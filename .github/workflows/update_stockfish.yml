@@ -38,7 +38,7 @@ jobs:
         run: |
           mkdir -p stockfish
           # Find the Ubuntu x86-64 asset URL
-          ASSET_URL=$(curl -s https://api.github.com/repos/official-stockfish/Stockfish/releases/latest | jq -r '.assets[] | select(.name | contains("ubuntu") and .name | contains("x86-64")) | .browser_download_url' | head -1)
+          ASSET_URL=$(curl -s https://api.github.com/repos/official-stockfish/Stockfish/releases/latest | jq -r '.assets[] | select( (.name | contains("ubuntu")) and (.name | contains("x86-64")) ) | .browser_download_url' | head -1)
           if [ -z "$ASSET_URL" ]; then
             echo "No suitable Linux x64 binary found"
             exit 1
