@@ -1,0 +1,8 @@
+services:
+  chess-bot:
+    build: .
+    environment:
+      - TOKEN=${TOKEN}  # Set TOKEN in .env file or environment
+    volumes:
+      - ./config.py:/app/config.py  # Mount config for easy editing
+    restart: unless-stopped
