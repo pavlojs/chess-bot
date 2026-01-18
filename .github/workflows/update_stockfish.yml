@@ -1,0 +1,64 @@
+name: Update Stockfish
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Runs daily at midnight UTC
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  update-stockfish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Get latest Stockfish release
+        run: |
+          LATEST_TAG=$(curl -s https://api.github.com/repos/official-stockfish/Stockfish/releases/latest | jq -r '.tag_name')
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+
+      - name: Check if update needed
+        run: |
+          if [ -f last_version.txt ] && [ "$(cat last_version.txt)" = "$LATEST_TAG" ]; then
+            echo "Stockfish is already up to date ($LATEST_TAG)"
+            echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
+          else
+            echo "New Stockfish version available: $LATEST_TAG"
+            echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
+            echo "$LATEST_TAG" > last_version.txt
+          fi
+
+      - name: Download Stockfish binary
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          mkdir -p stockfish
+          # Find the Linux x64 asset URL
+          ASSET_URL=$(curl -s https://api.github.com/repos/official-stockfish/Stockfish/releases/latest | jq -r '.assets[] | select(.name | contains("linux") and (.name | contains("x64") or contains("amd64"))) | .browser_download_url' | head -1)
+          if [ -z "$ASSET_URL" ]; then
+            echo "No suitable Linux x64 binary found"
+            exit 1
+          fi
+          echo "Downloading from $ASSET_URL"
+          wget -O stockfish/stockfish.tar.gz "$ASSET_URL"
+          tar -xzf stockfish/stockfish.tar.gz -C stockfish --strip-components=1
+          chmod +x stockfish/stockfish
+
+      # Config.py automatically detects the stockfish binary if it exists
+
+      - name: Commit and push changes
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update Stockfish to $LATEST_TAG"
+            git push
+          fi
