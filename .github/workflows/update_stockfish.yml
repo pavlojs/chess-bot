@@ -37,8 +37,8 @@ jobs:
         if: env.UPDATE_NEEDED == 'true'
         run: |
           mkdir -p stockfish
-          # Find the Linux x64 asset URL
-          ASSET_URL=$(curl -s https://api.github.com/repos/official-stockfish/Stockfish/releases/latest | jq -r '.assets[] | select(.name | contains("linux") and (.name | contains("x64") or contains("amd64"))) | .browser_download_url' | head -1)
+          # Find the Ubuntu x86-64 asset URL
+          ASSET_URL=$(curl -s https://api.github.com/repos/official-stockfish/Stockfish/releases/latest | jq -r '.assets[] | select(.name | contains("ubuntu") and .name | contains("x86-64")) | .browser_download_url' | head -1)
           if [ -z "$ASSET_URL" ]; then
             echo "No suitable Linux x64 binary found"
             exit 1
