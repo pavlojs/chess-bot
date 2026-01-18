@@ -40,12 +40,15 @@ jobs:
           # Find the Ubuntu x86-64 basic asset URL
           ASSET_URL=$(curl -s https://api.github.com/repos/official-stockfish/Stockfish/releases/latest | jq -r '.assets[] | select(.name == "stockfish-ubuntu-x86-64.tar") | .browser_download_url')
           if [ -z "$ASSET_URL" ]; then
-            echo "No suitable Linux x64 binary found"
+            echo "No suitable Ubuntu x86-64 binary found"
             exit 1
           fi
           echo "Downloading from $ASSET_URL"
           wget -O stockfish/stockfish.tar "$ASSET_URL"
-          tar -xf stockfish/stockfish.tar -C stockfish --strip-components=1
+          tar -xf stockfish/stockfish.tar -C stockfish
+          if [ -f stockfish/stockfish-ubuntu-x86-64/stockfish ]; then
+            mv stockfish/stockfish-ubuntu-x86-64/stockfish stockfish/stockfish
+          fi
           chmod +x stockfish/stockfish
 
       # Config.py automatically detects the stockfish binary if it exists
