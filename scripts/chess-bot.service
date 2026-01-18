@@ -1,0 +1,14 @@
+[Unit]
+Description=Lichess Chess Bot
+After=network.target
+
+[Service]
+Type=simple
+User=user  # Replace with your username
+WorkingDirectory=/home/user/chess-bot  # Replace with the full path to your bot directory
+ExecStart=/home/user/chess-bot/run_bot.sh  # Adjust path as needed
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
