@@ -2,7 +2,7 @@
 
 A powerful Lichess bot powered by the Stockfish engine, brought to you by the White Ravens team.
 
-![Chess Icon](https://img.shields.io/badge/Chess-♟️-black) ![Stockfish](https://img.shields.io/badge/Powered%20by-Stockfish-blue) ![Lichess](https://img.shields.io/badge/Platform-Lichess-green)
+![Chess Icon](https://img.shields.io/badge/Chess-♟️-black) ![Stockfish](https://img.shields.io/badge/Powered%20by-Stockfish-blue) ![Lichess](https://img.shields.io/badge/Platform-Lichess-green) ![Tests](https://github.com/whiteravens20/chess-bot/actions/workflows/tests.yml/badge.svg)
 
 ## Setup
 
@@ -13,6 +13,8 @@ A powerful Lichess bot powered by the Stockfish engine, brought to you by the Wh
 5. Run the bot: `python bot.py`
 
 ## Testing
+
+[![Tests](https://github.com/whiteravens20/chess-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/whiteravens20/chess-bot/actions/workflows/tests.yml)
 
 Run the comprehensive test suite:
 ```bash
