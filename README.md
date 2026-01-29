@@ -4,13 +4,35 @@ A powerful Lichess bot powered by the Stockfish engine, brought to you by the Wh
 
 ![Chess Icon](https://img.shields.io/badge/Chess-♟️-black) ![Stockfish](https://img.shields.io/badge/Powered%20by-Stockfish-blue) ![Lichess](https://img.shields.io/badge/Platform-Lichess-green)
 
+## Recent Improvements
+
+✨ **Version 2.0 Enhancements:**
+- Comprehensive logging system with rotating file handlers
+- Complete error handling with graceful shutdown support
+- Type hints throughout for better code clarity
+- 15+ unit tests with code coverage reporting
+- Fixed board state management bug
+- Async-safe Stockfish operations with timeouts
+- See [IMPROVEMENTS.md](IMPROVEMENTS.md) for full details
+
 ## Setup
 
 1. Clone this repository.
 2. Install dependencies: `pip install -r requirements.txt`
 3. Get a Lichess API token from https://lichess.org/account/oauth/token with board:play and bot:play scopes.
-4. Edit `config.py` and set your `TOKEN`.
+4. Set environment variable: `export TOKEN="your_lichess_token"`
 5. Run the bot: `python bot.py`
+
+## Testing
+
+Run the comprehensive test suite:
+```bash
+pytest              # Run all tests
+pytest -v           # Verbose output
+pytest --cov        # With coverage report
+```
+
+See [TESTING.md](TESTING.md) for detailed testing guide.
 
 ## Deployment
 
@@ -22,12 +44,14 @@ A powerful Lichess bot powered by the Stockfish engine, brought to you by the Wh
 4. Enable the service: `sudo systemctl enable chess-bot`
 5. Start the service: `sudo systemctl start chess-bot`
 6. Check status: `sudo systemctl status chess-bot`
+7. View logs: `tail -f logs/chess_bot.log`
 
 ### Docker Deployment
 
 1. Build and run with Docker Compose: `docker-compose up --build`
 2. Or manually: `docker build -t chess-bot .` then `docker run -e TOKEN=your_token chess-bot`
 3. For persistent config, mount the volume as in `docker-compose.yml`.
+
 
 ## Modifying Playstyle
 

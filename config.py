@@ -1,19 +1,28 @@
 # Configuration for Lichess Bot
 
 import os
+from typing import Dict, Any
 
 # Lichess API token (get from https://lichess.org/account/oauth/token or environment variable)
-TOKEN = os.getenv('TOKEN', "your_lichess_token_here")
+# Only require TOKEN when actually running the bot, not for imports/tests
+_token = os.getenv('TOKEN')
+if not _token and 'pytest' not in os.sys.modules and 'bot' in os.sys.argv:
+    raise ValueError(
+        "TOKEN environment variable not set. "
+        "Get your token from https://lichess.org/account/oauth/token"
+    )
+TOKEN = _token or "test_token_for_imports"
 
 # Stockfish settings
 import os
-STOCKFISH_PATH = "./stockfish/stockfish" if os.path.exists("./stockfish/stockfish") else None  # Use downloaded binary if available
-STOCKFISH_DEPTH = 15  # Search depth for Stockfish
-STOCKFISH_TIME = 1100  # Time per move in milliseconds
+STOCKFISH_PATH: str = "./stockfish/stockfish" if os.path.exists("./stockfish/stockfish") else None  # Use downloaded binary if available
+STOCKFISH_DEPTH: int = 15  # Search depth for Stockfish
+STOCKFISH_TIME: int = 1100  # Time per move in milliseconds
+STOCKFISH_TIMEOUT: int = 5  # Timeout in seconds for Stockfish operations
 
 # Playstyle modifications
 # UCI options for Stockfish (modify these to change playstyle)
-UCI_OPTIONS = {
+UCI_OPTIONS: Dict[str, Any] = {
     "Skill Level": 18,  # 0-20, higher is stronger
     "Threads": 6,  # Number of CPU threads
     "Hash": 1024,  # Hash size in MB
@@ -26,7 +35,7 @@ UCI_OPTIONS = {
 }
 
 # Bot behavior
-ACCEPT_CHALLENGES = True
-MIN_RATING = 1000  # Minimum opponent rating to accept
-MAX_RATING = 2400  # Maximum opponent rating to accept
-TIME_CONTROL = ["blitz", "rapid"]  # Accepted time controls
+ACCEPT_CHALLENGES: bool = True
+MIN_RATING: int = 1000  # Minimum opponent rating to accept
+MAX_RATING: int = 2400  # Maximum opponent rating to accept
+TIME_CONTROL: list = ["blitz", "rapid"]  # Accepted time controls

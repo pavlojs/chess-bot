@@ -1,3 +1,6 @@
 berserk
 python-chess
 stockfish
+pytest
+pytest-asyncio
+pytest-cov
