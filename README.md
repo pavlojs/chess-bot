@@ -4,17 +4,6 @@ A powerful Lichess bot powered by the Stockfish engine, brought to you by the Wh
 
 ![Chess Icon](https://img.shields.io/badge/Chess-♟️-black) ![Stockfish](https://img.shields.io/badge/Powered%20by-Stockfish-blue) ![Lichess](https://img.shields.io/badge/Platform-Lichess-green)
 
-## Recent Improvements
-
-✨ **Version 2.0 Enhancements:**
-- Comprehensive logging system with rotating file handlers
-- Complete error handling with graceful shutdown support
-- Type hints throughout for better code clarity
-- 15+ unit tests with code coverage reporting
-- Fixed board state management bug
-- Async-safe Stockfish operations with timeouts
-- See [IMPROVEMENTS.md](IMPROVEMENTS.md) for full details
-
 ## Setup
 
 1. Clone this repository.
