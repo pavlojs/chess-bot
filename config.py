@@ -39,3 +39,7 @@ ACCEPT_CHALLENGES: bool = True
 MIN_RATING: int = 1000  # Minimum opponent rating to accept
 MAX_RATING: int = 2400  # Maximum opponent rating to accept
 TIME_CONTROL: list = ["blitz", "rapid", "classical"]  # Accepted time controls (blitz, rapid, classical)
+
+# Dynamic bot strength based on opponent
+DYNAMIC_STRENGTH: bool = True  # Adapt bot strength to opponent rating
+STRENGTH_ADVANTAGE: int = 100  # Bot Elo advantage over opponent (in rating points)

@@ -2,7 +2,7 @@
 
 A powerful Lichess bot powered by the Stockfish engine, brought to you by the White Ravens team.
 
-![Chess Icon](https://img.shields.io/badge/Chess-♟️-black) ![Stockfish](https://img.shields.io/badge/Powered%20by-Stockfish-blue) ![Lichess](https://img.shields.io/badge/Platform-Lichess-green) ![Tests](https://github.com/whiteravens20/chess-bot/actions/workflows/tests.yml/badge.svg)
+![Chess Icon](https://img.shields.io/badge/Chess-♟️-black) ![Stockfish](https://img.shields.io/badge/Powered%20by-Stockfish-blue) ![Lichess](https://img.shields.io/badge/Platform-Lichess-green)
 
 ## Setup
 
@@ -62,6 +62,36 @@ The bot's playstyle can be modified by changing settings in `config.py`:
   - `"Contempt"`: Draw avoidance in centipawns.
 
 Other options can be added as needed. Refer to Stockfish documentation for available UCI options.
+
+### Dynamic Strength Based on Opponent Rating
+
+The bot can automatically adjust its strength to be slightly stronger than each opponent, creating more competitive and engaging games. This feature is **enabled by default**.
+
+**How it works:**
+- When a challenge is accepted, the bot extracts the opponent's ELO rating
+- At game start, the bot calculates its own ELO: `bot_elo = opponent_elo + STRENGTH_ADVANTAGE`
+- The bot limits its strength to this calculated rating using Stockfish's `UCI_Elo` option
+- All ELO values are automatically bounded between Stockfish's minimum (800) and maximum (2850)
+
+**Configuration options in `config.py`:**
+- `DYNAMIC_STRENGTH`: Enable/disable feature (default: `True`)
+- `STRENGTH_ADVANTAGE`: How many ELO points stronger than opponent (default: `100`)
+
+**Examples:**
+- 1400-rated opponent → bot plays at ~1500 ELO
+- 1800-rated opponent → bot plays at ~1900 ELO
+- 2800-rated opponent → bot plays at 2850 ELO (capped at maximum)
+
+**To customize:**
+```python
+# In config.py
+
+# Make bot even stronger relative to opponents
+STRENGTH_ADVANTAGE = 150
+
+# Or disable dynamic strength to use static settings from UCI_OPTIONS
+DYNAMIC_STRENGTH = False
+```
 
 ### Supported Time Controls
 

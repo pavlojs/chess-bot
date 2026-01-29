@@ -5,7 +5,7 @@ Lichess Chess Bot powered by Stockfish
 import asyncio
 import signal
 import sys
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 import logging
 
 import berserk
@@ -15,7 +15,7 @@ import chess
 from config import (
     TOKEN, STOCKFISH_PATH, STOCKFISH_DEPTH, STOCKFISH_TIME, 
     UCI_OPTIONS, ACCEPT_CHALLENGES, MIN_RATING, MAX_RATING, 
-    TIME_CONTROL, STOCKFISH_TIMEOUT
+    TIME_CONTROL, STOCKFISH_TIMEOUT, DYNAMIC_STRENGTH, STRENGTH_ADVANTAGE
 )
 from logging_config import setup_logger
 
@@ -30,6 +30,33 @@ def handle_shutdown_signal(signum: int, frame) -> None:
     global _shutdown_requested
     _shutdown_requested = True
     logger.warning(f"Shutdown signal received (signal {signum}). Cleaning up...")
+
+
+def get_dynamic_uci_options(challenger_rating: int) -> Dict[str, Any]:
+    """
+    Calculate UCI options for Stockfish based on opponent rating.
+    Bot will be set to slightly stronger than opponent.
+    
+    Args:
+        challenger_rating: ELO rating of the challenger
+        
+    Returns:
+        Dictionary of UCI options with dynamically adjusted strength
+    """
+    if not DYNAMIC_STRENGTH:
+        return UCI_OPTIONS.copy()
+    
+    # Calculate bot ELO: opponent + advantage
+    bot_elo = min(challenger_rating + STRENGTH_ADVANTAGE, 2850)  # Cap at Stockfish max
+    bot_elo = max(bot_elo, 800)  # Floor at Stockfish min
+    
+    # Create modified UCI options
+    dynamic_options = UCI_OPTIONS.copy()
+    dynamic_options["UCI_Elo"] = bot_elo
+    dynamic_options["UCI_LimitStrength"] = True
+    
+    logger.info(f"Dynamic strength enabled: opponent {challenger_rating} → bot {bot_elo} Elo")
+    return dynamic_options
 
 
 def should_accept_challenge(challenge: Dict) -> bool:
@@ -93,7 +120,8 @@ async def play_game(
     client: berserk.Client,
     stockfish: Stockfish,
     game_id: str,
-    bot_color: str
+    bot_color: str,
+    challenger_rating: Optional[int] = None
 ) -> None:
     """
     Play a single game for the bot.
@@ -103,8 +131,20 @@ async def play_game(
         stockfish: Initialized Stockfish engine
         game_id: ID of the game to play
         bot_color: Bot's color ('white' or 'black')
+        challenger_rating: ELO rating of the challenger (optional)
     """
     board = chess.Board()
+    
+    # Apply dynamic strength settings if challenger rating is provided
+    if challenger_rating is not None:
+        dynamic_options = get_dynamic_uci_options(challenger_rating)
+        try:
+            for key, value in dynamic_options.items():
+                if key != "SyzygyPath":  # Skip non-parameter options
+                    stockfish.update_engine_parameters({key: value})
+            logger.debug(f"Applied dynamic strength for game {game_id}")
+        except Exception as e:
+            logger.warning(f"Failed to apply dynamic strength: {e}")
     
     try:
         logger.info(f"Starting game {game_id} as {bot_color}")
@@ -213,6 +253,7 @@ async def main() -> None:
         sys.exit(1)
     
     active_games: Dict[str, asyncio.Task] = {}
+    challenger_ratings: Dict[str, int] = {}  # Store challenger ratings by game_id
     
     try:
         logger.info("Listening for incoming events...")
@@ -225,11 +266,13 @@ async def main() -> None:
                 if event['type'] == 'challenge':
                     challenge = event['challenge']
                     challenge_id = challenge['id']
+                    challenger_rating = challenge.get('challenger', {}).get('rating', 1500)
                     
                     if should_accept_challenge(challenge):
                         try:
                             await client.board.accept_challenge(challenge_id)
-                            logger.info(f"Accepted challenge: {challenge_id}")
+                            challenger_ratings[challenge_id] = challenger_rating
+                            logger.info(f"Accepted challenge: {challenge_id} from {challenger_rating} rated opponent")
                         except Exception as e:
                             logger.error(f"Failed to accept challenge {challenge_id}: {e}", exc_info=True)
                     else:
@@ -244,9 +287,12 @@ async def main() -> None:
                     game_id = game['id']
                     bot_color = game['color']
                     
+                    # Get challenger rating for this game
+                    challenger_rating = challenger_ratings.get(game_id)
+                    
                     # Create task for this game
                     task = asyncio.create_task(
-                        play_game(client, stockfish, game_id, bot_color)
+                        play_game(client, stockfish, game_id, bot_color, challenger_rating)
                     )
                     active_games[game_id] = task
                     logger.info(f"Game started: {game_id} (playing as {bot_color})")
