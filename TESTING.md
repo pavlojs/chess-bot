@@ -53,29 +53,32 @@ Coverage report will be generated in `htmlcov/index.html`
 
 Current test coverage includes:
 
-### Challenge Acceptance Tests
+### Challenge Acceptance Tests (7 tests)
 - ✅ Valid challenges (correct rating and time control)
 - ✅ Challenges with rating too low
 - ✅ Challenges with rating too high  
 - ✅ Challenges with unsupported time controls
+- ✅ Challenges with classical time control
 - ✅ Behavior when challenges are disabled
 - ✅ Handling of missing rating data
 
-### Board State Tests
+### Board State Tests (5 tests)
 - ✅ Board initialization
 - ✅ Single move application
 - ✅ Multiple move sequencing
 - ✅ Invalid move rejection
 - ✅ Game over detection (checkmate)
 
-### Stockfish Tests
+### Stockfish Tests (3 tests)
 - ✅ Successful initialization
 - ✅ Initialization with missing path
 - ✅ Initialization failure handling
 
-### Logging Tests
+### Logging Tests (1 test)
 - ✅ Logger configuration
 - ✅ Logger handler setup
+
+**Total: 16 tests, 100% pass rate**
 
 ## Continuous Integration
 

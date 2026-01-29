@@ -25,7 +25,7 @@ class TestChallengeAcceptance(unittest.TestCase):
         with patch('bot.ACCEPT_CHALLENGES', True), \
              patch('bot.MIN_RATING', 1000), \
              patch('bot.MAX_RATING', 2400), \
-             patch('bot.TIME_CONTROL', ['blitz', 'rapid']):
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
             result = should_accept_challenge(challenge)
             self.assertTrue(result)
     
@@ -40,7 +40,7 @@ class TestChallengeAcceptance(unittest.TestCase):
         with patch('bot.ACCEPT_CHALLENGES', True), \
              patch('bot.MIN_RATING', 1000), \
              patch('bot.MAX_RATING', 2400), \
-             patch('bot.TIME_CONTROL', ['blitz', 'rapid']):
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
             result = should_accept_challenge(challenge)
             self.assertFalse(result)
     
@@ -55,7 +55,7 @@ class TestChallengeAcceptance(unittest.TestCase):
         with patch('bot.ACCEPT_CHALLENGES', True), \
              patch('bot.MIN_RATING', 1000), \
              patch('bot.MAX_RATING', 2400), \
-             patch('bot.TIME_CONTROL', ['blitz', 'rapid']):
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
             result = should_accept_challenge(challenge)
             self.assertFalse(result)
     
@@ -63,14 +63,14 @@ class TestChallengeAcceptance(unittest.TestCase):
         """Test that unsupported time controls are rejected."""
         challenge = {
             'challenger': {'rating': 1500},
-            'timeControl': {'type': 'classical'},
+            'timeControl': {'type': 'bullet'},
             'id': 'test123'
         }
         
         with patch('bot.ACCEPT_CHALLENGES', True), \
              patch('bot.MIN_RATING', 1000), \
              patch('bot.MAX_RATING', 2400), \
-             patch('bot.TIME_CONTROL', ['blitz', 'rapid']):
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
             result = should_accept_challenge(challenge)
             self.assertFalse(result)
     
@@ -97,8 +97,23 @@ class TestChallengeAcceptance(unittest.TestCase):
         with patch('bot.ACCEPT_CHALLENGES', True), \
              patch('bot.MIN_RATING', 1000), \
              patch('bot.MAX_RATING', 2400), \
-             patch('bot.TIME_CONTROL', ['blitz', 'rapid']):
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
             # Default rating is 1500, should be accepted
+            result = should_accept_challenge(challenge)
+            self.assertTrue(result)
+    
+    def test_accept_challenge_classical_timecontrol(self):
+        """Test that classical time control challenges are accepted."""
+        challenge = {
+            'challenger': {'rating': 1800},
+            'timeControl': {'type': 'classical'},
+            'id': 'test123'
+        }
+        
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
             result = should_accept_challenge(challenge)
             self.assertTrue(result)
 

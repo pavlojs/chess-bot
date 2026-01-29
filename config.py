@@ -38,4 +38,4 @@ UCI_OPTIONS: Dict[str, Any] = {
 ACCEPT_CHALLENGES: bool = True
 MIN_RATING: int = 1000  # Minimum opponent rating to accept
 MAX_RATING: int = 2400  # Maximum opponent rating to accept
-TIME_CONTROL: list = ["blitz", "rapid"]  # Accepted time controls
+TIME_CONTROL: list = ["blitz", "rapid", "classical"]  # Accepted time controls (blitz, rapid, classical)

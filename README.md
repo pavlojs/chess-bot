@@ -48,6 +48,7 @@ The bot's playstyle can be modified by changing settings in `config.py`:
 
 - `STOCKFISH_DEPTH`: Search depth for Stockfish (higher = stronger but slower).
 - `STOCKFISH_TIME`: Time per move in milliseconds.
+- `TIME_CONTROL`: List of accepted time controls. Available options: `blitz`, `rapid`, `classical` (default: all three).
 - `UCI_OPTIONS`: Dictionary of UCI options for Stockfish, such as:
   - `"Skill Level"`: 0-20 (20 is strongest).
   - `"Threads"`: Number of CPU threads to use.
@@ -59,6 +60,22 @@ The bot's playstyle can be modified by changing settings in `config.py`:
   - `"Contempt"`: Draw avoidance in centipawns.
 
 Other options can be added as needed. Refer to Stockfish documentation for available UCI options.
+
+### Supported Time Controls
+
+The bot supports all major Lichess time control modes:
+
+- **Blitz**: Fast games (typically 3+0 to 5+3 minutes)
+- **Rapid**: Medium-paced games (typically 10+0 to 25+10 minutes)
+- **Classical**: Slow games (typically 30+ minutes per side)
+
+You can customize which time controls the bot accepts by editing `TIME_CONTROL` in `config.py`. For example:
+
+```python
+TIME_CONTROL = ["classical"]  # Only accept classical games
+TIME_CONTROL = ["blitz", "rapid"]  # Accept blitz and rapid only
+TIME_CONTROL = ["blitz", "rapid", "classical"]  # Accept all (default)
+```
 
 ## Using Syzygy Tablebases
 
