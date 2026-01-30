@@ -17,12 +17,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application
 COPY . .
 
-# Make setup script executable
-RUN chmod +x setup_venv.sh
-
-# Run setup (though venv not needed in Docker)
-RUN ./setup_venv.sh
-
 # Set environment variable for Lichess token (override at runtime)
 ENV TOKEN="your_lichess_token"
 
