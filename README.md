@@ -39,6 +39,35 @@ See [TESTING.md](TESTING.md) for detailed testing guide.
 
 ### Docker Deployment
 
+[![Build and Push Docker Image](https://github.com/whiteravens20/chess-bot/actions/workflows/build-and-push-docker.yml/badge.svg)](https://github.com/whiteravens20/chess-bot/actions/workflows/build-and-push-docker.yml)
+
+#### Option 1: Using Pre-built Image from GitHub Container Registry
+
+After each successful test run, a Docker image is automatically built and pushed to GitHub Container Registry. You can pull and run it directly:
+
+```bash
+# Set your Lichess token
+export TOKEN="your_lichess_token"
+
+# Pull and run the latest image
+docker run -e TOKEN=$TOKEN ghcr.io/whiteravens-lichess:latest
+```
+
+Or using Docker Compose:
+
+```yaml
+services:
+  chess-bot:
+    image: ghcr.io/whiteravens-lichess:latest
+    environment:
+      - TOKEN=${TOKEN}  # Set TOKEN in .env file or environment
+    volumes:
+      - ./config.py:/app/config.py  # Mount config for easy editing
+    restart: unless-stopped
+```
+
+#### Option 2: Build Locally
+
 1. Build and run with Docker Compose: `docker-compose up --build`
 2. Or manually: `docker build -t chess-bot .` then `docker run -e TOKEN=your_token chess-bot`
 3. For persistent config, mount the volume as in `docker-compose.yml`.
