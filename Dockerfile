@@ -17,9 +17,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application
 COPY . .
 
-# Set environment variable for Lichess token (override at runtime)
-ENV TOKEN="your_lichess_token"
-
 # Expose any ports if needed (not for this bot)
 
 # Command to run the bot

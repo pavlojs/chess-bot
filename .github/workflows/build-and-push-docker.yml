@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: whiteraven-lichess
+  IMAGE_NAME: ${{ github.repository_owner }}/whiteravens-lichess
 
 jobs:
   build-and-push:
