@@ -35,35 +35,14 @@ jobs:
             echo "$LATEST_TAG" > last_version.txt
           fi
 
-      - name: Download Stockfish binary
-        if: env.UPDATE_NEEDED == 'true'
-        run: |
-          mkdir -p stockfish
-          # Find the Ubuntu x86-64 basic asset URL
-          ASSET_URL=$(curl -s https://api.github.com/repos/official-stockfish/Stockfish/releases/latest | jq -r '.assets[] | select(.name == "stockfish-ubuntu-x86-64.tar") | .browser_download_url')
-          if [ -z "$ASSET_URL" ]; then
-            echo "No suitable Ubuntu x86-64 binary found"
-            exit 1
-          fi
-          echo "Downloading from $ASSET_URL"
-          wget -O stockfish/stockfish.tar "$ASSET_URL"
-          tar -xf stockfish/stockfish.tar -C stockfish
-          if [ -f stockfish/stockfish-ubuntu-x86-64/stockfish ]; then
-            mv stockfish/stockfish-ubuntu-x86-64/stockfish stockfish/stockfish
-          fi
-          chmod +x stockfish/stockfish
-
-      # Config.py automatically detects the stockfish binary if it exists
+      # Downloading and storing large Stockfish binary files in git is no longer done
+      # The Dockerfile will download and extract Stockfish during build time based on last_version.txt
 
       - name: Commit and push changes
         if: env.UPDATE_NEEDED == 'true'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add .
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Update Stockfish to $LATEST_TAG"
-            git push
-          fi
+          git add last_version.txt
+          git commit -m "Update Stockfish version to $LATEST_TAG"
+          git push

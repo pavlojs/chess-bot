@@ -45,3 +45,7 @@ parts/
 sdist/
 var/
 wheels/
+
+# Stockfish large files
+stockfish/stockfish.tar
+stockfish/stockfish/stockfish-ubuntu-x86-64
