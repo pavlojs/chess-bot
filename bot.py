@@ -40,18 +40,23 @@ def get_dynamic_uci_options(challenger_rating: int) -> Dict[str, Any]:
     return dynamic_options
 
 def should_accept_challenge(challenge: Dict) -> bool:
+    logger.info(f"Evaluating challenge: {challenge}")
     if not ACCEPT_CHALLENGES:
-        logger.debug("Challenge rejected: bot not accepting challenges")
+        logger.info("Challenge rejected: bot not accepting challenges")
         return False
     try:
         challenger_rating = challenge.get('challenger', {}).get('rating', 1500)
-        if challenger_rating < MIN_RATING or challenger_rating > MAX_RATING:
-            logger.debug(f"Challenge rejected: rating {challenger_rating} outside range [{MIN_RATING}, {MAX_RATING}]")
-            return False
         time_control = challenge.get('timeControl', {}).get('type', 'unknown')
-        if time_control not in TIME_CONTROL:
-            logger.debug(f"Challenge rejected: time control '{time_control}' not in {TIME_CONTROL}")
+        logger.info(f"Challenger rating: {challenger_rating}, time control: {time_control}")
+
+        if challenger_rating < MIN_RATING or challenger_rating > MAX_RATING:
+            logger.info(f"Challenge rejected: rating {challenger_rating} outside range [{MIN_RATING}, {MAX_RATING}]")
             return False
+
+        if time_control not in TIME_CONTROL:
+            logger.info(f"Challenge rejected: time control '{time_control}' not in {TIME_CONTROL}")
+            return False
+
         logger.info(f"Challenge accepted from {challenger_rating} rated opponent ({time_control})")
         return True
     except Exception as e:
@@ -89,7 +94,7 @@ async def play_game(
             for key, value in dynamic_options.items():
                 if key != "SyzygyPath":
                     stockfish.update_engine_parameters({key: value})
-            logger.debug(f"Applied dynamic strength for game {game_id}")
+            logger.info(f"Applied dynamic strength for game {game_id}")
         except Exception as e:
             logger.warning(f"Failed to apply dynamic strength: {e}")
     try:
@@ -111,7 +116,7 @@ async def play_game(
                             except ValueError as e:
                                 logger.error(f"Invalid move in gameFull: {move_uci}, {e}")
                                 continue
-                    logger.debug(f"Game state initialized: {board.fen()}")
+                    logger.info(f"Game state initialized: {board.fen()}")
                 elif event['type'] == 'gameState':
                     moves_str = event.get('moves', '')
                     board = chess.Board()
@@ -127,7 +132,7 @@ async def play_game(
                     if is_white_turn == bot_is_white and board.is_game_over() is False:
                         try:
                             stockfish.set_fen_position(board.fen())
-                            logger.debug(f"Thinking for move (depth {STOCKFISH_DEPTH}, time {STOCKFISH_TIME}ms)")
+                            logger.info(f"Thinking for move (depth {STOCKFISH_DEPTH}, time {STOCKFISH_TIME}ms)")
                             best_move = await asyncio.wait_for(
                                 asyncio.to_thread(stockfish.get_best_move_time, STOCKFISH_TIME),
                                 timeout=STOCKFISH_TIMEOUT
@@ -185,12 +190,10 @@ async def main() -> None:
                     if should_accept_challenge(challenge):
                         await client.board.accept_challenge(challenge_id)
                         challenger_ratings[challenge_id] = challenger_rating
-                        logger.debug(f"Challenge details: {challenge}")
                         logger.info(f"Accepted challenge: {challenge_id} from {challenger_rating} rated opponent")
                     else:
                         client.challenges.decline(challenge_id, reason='later')
-                        logger.debug(f"Challenge details: {challenge}")
-                        logger.debug(f"Declined challenge: {challenge_id}")
+                        logger.info(f"Declined challenge: {challenge_id}")
                 elif event['type'] == 'gameStart':
                     game = event['game']
                     game_id = game['id']
