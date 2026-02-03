@@ -50,7 +50,7 @@ After each successful test run, a Docker image is automatically built and pushed
 export TOKEN="your_lichess_token"
 
 # Pull and run the latest image
-docker run -e TOKEN=$TOKEN ghcr.io/axiom-chess/bot:latest
+docker run -e TOKEN=$TOKEN ghcr.io/whiteravens20/axiom-chess-bot:latest
 ```
 
 Or using Docker Compose:
@@ -58,7 +58,7 @@ Or using Docker Compose:
 ```yaml
 services:
   axiom-bot:
-    image: ghcr.io/axiom-chess/bot:latest
+    image: ghcr.io/whiteravens20/axiom-chess-bot:latest
     environment:
       - TOKEN=${TOKEN}  # Set TOKEN in .env file or environment
     volumes:
