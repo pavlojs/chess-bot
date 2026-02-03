@@ -185,9 +185,11 @@ async def main() -> None:
                     if should_accept_challenge(challenge):
                         await client.board.accept_challenge(challenge_id)
                         challenger_ratings[challenge_id] = challenger_rating
+                        logger.debug(f"Challenge details: {challenge}")
                         logger.info(f"Accepted challenge: {challenge_id} from {challenger_rating} rated opponent")
                     else:
                         client.challenges.decline(challenge_id, reason='later')
+                        logger.debug(f"Challenge details: {challenge}")
                         logger.debug(f"Declined challenge: {challenge_id}")
                 elif event['type'] == 'gameStart':
                     game = event['game']
