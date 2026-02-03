@@ -1,5 +1,5 @@
 """
-Lichess Chess Bot powered by Stockfish
+Axiom Chess Bot powered by Stockfish
 """
 
 import asyncio
@@ -235,7 +235,7 @@ async def play_game(
 async def main() -> None:
     """Main bot loop - connect to Lichess and process events."""
     
-    logger.info("Chess Bot starting up")
+    logger.info("Axiom Chess Bot starting up")
     
     # Initialize Stockfish
     stockfish = initialize_stockfish()
@@ -331,7 +331,7 @@ async def main() -> None:
         except Exception as e:
             logger.error(f"Error closing Stockfish: {e}")
         
-        logger.info("Chess Bot shut down successfully")
+        logger.info("Axiom Chess Bot shut down successfully")
 
 
 if __name__ == "__main__":

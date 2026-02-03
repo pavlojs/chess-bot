@@ -1,5 +1,5 @@
 """
-Centralized logging configuration for Chess Bot
+Centralized logging configuration for Axiom Chess Bot
 """
 
 import logging
@@ -35,7 +35,7 @@ def setup_logger(name: str) -> logging.Logger:
     
     # File handler with DEBUG level (rotated)
     file_handler = logging.handlers.RotatingFileHandler(
-        log_dir / "chess_bot.log",
+        log_dir / "axiom_bot.log",
         maxBytes=10_485_760,  # 10 MB
         backupCount=5
     )

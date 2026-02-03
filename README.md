@@ -1,6 +1,6 @@
-# 🐦‍⬛ White Raven Chess Bot
+# ♟️ Axiom Chess Bot
 
-A powerful Lichess bot powered by the Stockfish engine, brought to you by the White Ravens team.
+A powerful Lichess bot powered by the Stockfish engine.
 
 ![Chess Icon](https://img.shields.io/badge/Chess-♟️-black) ![Stockfish](https://img.shields.io/badge/Powered%20by-Stockfish-blue) ![Lichess](https://img.shields.io/badge/Platform-Lichess-green)
 
@@ -14,7 +14,7 @@ A powerful Lichess bot powered by the Stockfish engine, brought to you by the Wh
 
 ## Testing
 
-[![Tests](https://github.com/whiteravens20/chess-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/whiteravens20/chess-bot/actions/workflows/tests.yml)
+[![Tests](https://github.com/axiom-chess/bot/actions/workflows/tests.yml/badge.svg)](https://github.com/axiom-chess/bot/actions/workflows/tests.yml)
 
 Run the comprehensive test suite:
 ```bash
@@ -30,16 +30,16 @@ See [TESTING.md](TESTING.md) for detailed testing guide.
 ### Running Automatically on System Startup (Linux)
 
 1. Run `./setup_venv.sh` to set up the virtual environment.
-2. Copy `chess-bot.service` to `/etc/systemd/system/` (adjust paths in the file for your user and directory).
+2. Copy `axiom-bot.service` to `/etc/systemd/system/` (adjust paths in the file for your user and directory).
 3. Reload systemd: `sudo systemctl daemon-reload`
-4. Enable the service: `sudo systemctl enable chess-bot`
-5. Start the service: `sudo systemctl start chess-bot`
-6. Check status: `sudo systemctl status chess-bot`
-7. View logs: `tail -f logs/chess_bot.log`
+4. Enable the service: `sudo systemctl enable axiom-bot`
+5. Start the service: `sudo systemctl start axiom-bot`
+6. Check status: `sudo systemctl status axiom-bot`
+7. View logs: `tail -f logs/axiom_bot.log`
 
 ### Docker Deployment
 
-[![Build and Push Docker Image](https://github.com/whiteravens20/chess-bot/actions/workflows/build-and-push-docker.yml/badge.svg)](https://github.com/whiteravens20/chess-bot/actions/workflows/build-and-push-docker.yml)
+[![Build and Push Docker Image](https://github.com/axiom-chess/bot/actions/workflows/build-and-push-docker.yml/badge.svg)](https://github.com/axiom-chess/bot/actions/workflows/build-and-push-docker.yml)
 
 #### Option 1: Using Pre-built Image from GitHub Container Registry
 
@@ -50,15 +50,15 @@ After each successful test run, a Docker image is automatically built and pushed
 export TOKEN="your_lichess_token"
 
 # Pull and run the latest image
-docker run -e TOKEN=$TOKEN ghcr.io/whiteravens-lichess:latest
+docker run -e TOKEN=$TOKEN ghcr.io/axiom-chess/bot:latest
 ```
 
 Or using Docker Compose:
 
 ```yaml
 services:
-  chess-bot:
-    image: ghcr.io/whiteravens-lichess:latest
+  axiom-bot:
+    image: ghcr.io/axiom-chess/bot:latest
     environment:
       - TOKEN=${TOKEN}  # Set TOKEN in .env file or environment
     volumes:
@@ -69,7 +69,7 @@ services:
 #### Option 2: Build Locally
 
 1. Build and run with Docker Compose: `docker-compose up --build`
-2. Or manually: `docker build -t chess-bot .` then `docker run -e TOKEN=your_token chess-bot`
+2. Or manually: `docker build -t axiom-bot .` then `docker run -e TOKEN=your_token axiom-bot`
 3. For persistent config, mount the volume as in `docker-compose.yml`.
 
 

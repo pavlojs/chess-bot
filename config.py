@@ -1,4 +1,4 @@
-# Configuration for Lichess Bot
+# Configuration for Axiom Chess Bot
 
 import os
 from typing import Dict, Any

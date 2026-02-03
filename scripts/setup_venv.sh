@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Setup virtual environment for the chess bot
+# Setup virtual environment for the Axiom chess bot
 
 echo "Setting up virtual environment..."
 

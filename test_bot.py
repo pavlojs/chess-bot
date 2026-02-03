@@ -1,5 +1,5 @@
 """
-Unit tests for Chess Bot
+Unit tests for Axiom Chess Bot
 """
 
 import unittest

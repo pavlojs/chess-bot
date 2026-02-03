@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/whiteravens-lichess
+  IMAGE_NAME: ${{ github.repository_owner }}/axiom-chess-bot
 
 jobs:
   build-and-push:

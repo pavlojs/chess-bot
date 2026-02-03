@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Script to run the chess bot in virtual environment
+# Script to run the Axiom bot in virtual environment
 
 # Get the directory of this script
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
