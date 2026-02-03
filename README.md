@@ -1,5 +1,8 @@
 # ♟️ Axiom Chess Bot
 
+**⚠️ Early BETA Stage ⚠️**  
+This project is currently in early BETA stage and is not working as intended. It is only suitable for development purposes.
+
 A powerful Lichess bot powered by the Stockfish engine.
 
 ![Chess Icon](https://img.shields.io/badge/Chess-♟️-black) ![Stockfish](https://img.shields.io/badge/Powered%20by-Stockfish-blue) ![Lichess](https://img.shields.io/badge/Platform-Lichess-green)
