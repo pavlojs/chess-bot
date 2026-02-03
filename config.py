@@ -26,7 +26,7 @@ UCI_OPTIONS: Dict[str, Any] = {
     "Skill Level": 18,  # 0-20, higher is stronger
     "Threads": 6,  # Number of CPU threads
     "Hash": 1024,  # Hash size in MB
-    "UCI_LimitStrength": True,  # Set to True to limit strength
+    "UCI_LimitStrength": False,  # Set to True to limit strength
     "UCI_Elo": 1600,  # Target Elo when UCI_LimitStrength is True (800-2850)
     "Move Overhead": 30,  # Time overhead in ms per move
     # "Slow Mover": 84,  # Time management factor (10-1000)
@@ -36,9 +36,9 @@ UCI_OPTIONS: Dict[str, Any] = {
 
 # Bot behavior
 ACCEPT_CHALLENGES: bool = True
-MIN_RATING: int = 1000  # Minimum opponent rating to accept
-MAX_RATING: int = 2400  # Maximum opponent rating to accept
-TIME_CONTROL: list = ["blitz", "rapid", "classical"]  # Accepted time controls (blitz, rapid, classical)
+MIN_RATING: int = 0  # Minimum opponent rating to accept
+MAX_RATING: int = 2800  # Maximum opponent rating to accept
+TIME_CONTROL: list = ["bullet", "blitz", "rapid", "classical"]  # Accepted time controls
 
 # Dynamic bot strength based on opponent
 DYNAMIC_STRENGTH: bool = True  # Adapt bot strength to opponent rating
