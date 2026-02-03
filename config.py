@@ -15,7 +15,7 @@ TOKEN = _token or "test_token_for_imports"
 
 # Stockfish settings
 import os
-STOCKFISH_PATH: str = "./stockfish/stockfish" if os.path.exists("./stockfish/stockfish") else None  # Use downloaded binary if available
+STOCKFISH_PATH: str = "/usr/local/bin/stockfish"  # Path to Stockfish binary
 STOCKFISH_DEPTH: int = 15  # Search depth for Stockfish
 STOCKFISH_TIME: int = 1100  # Time per move in milliseconds
 STOCKFISH_TIMEOUT: int = 5  # Timeout in seconds for Stockfish operations
@@ -31,7 +31,7 @@ UCI_OPTIONS: Dict[str, Any] = {
     "Move Overhead": 30,  # Time overhead in ms per move
     # "Slow Mover": 84,  # Time management factor (10-1000)
     "Contempt": 20,  # Draw avoidance in centipawns
-    "SyzygyPath": "./syzygy",  # Path to Syzygy tablebases
+    # "SyzygyPath": "./syzygy",  # Path to Syzygy tablebases
 }
 
 # Bot behavior
