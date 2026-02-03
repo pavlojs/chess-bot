@@ -2,7 +2,7 @@ name: Build and Push Docker Image
 
 on:
   workflow_run:
-    workflows: ["Tests"]
+    workflows: ["Tests", "Update Stockfish"]
     types:
       - completed
     branches: [main, develop]
