@@ -1,10 +1,8 @@
 """
-Axiom Chess Bot – stable Lichess architecture
-One thread per game, one Stockfish per game
+Axiom Chess Bot – stable BOT API architecture using Berserk and Stockfish
 """
 
 import signal
-import sys
 import threading
 import logging
 import chess
@@ -16,7 +14,6 @@ from typing import Dict, Any
 from config import (
     TOKEN,
     STOCKFISH_PATH,
-    STOCKFISH_DEPTH,
     STOCKFISH_TIME,
     UCI_OPTIONS,
     ACCEPT_CHALLENGES,
@@ -34,7 +31,7 @@ shutdown_requested = False
 
 
 # ─────────────────────────────────────────────
-# SIGNALS
+# SIGNAL HANDLING
 # ─────────────────────────────────────────────
 
 def handle_shutdown(signum, frame):
@@ -88,7 +85,6 @@ def should_accept_challenge(challenge: Dict[str, Any]) -> bool:
 def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
     sf = Stockfish(
         path=STOCKFISH_PATH,
-        depth=STOCKFISH_DEPTH,
         parameters=UCI_OPTIONS.copy(),
     )
 
@@ -111,10 +107,11 @@ def play_game(client: berserk.Client, game_id: str):
     logger.info(f"Starting game thread {game_id}")
 
     board = chess.Board()
-    stockfish = None
+    stockfish: Stockfish | None = None
+    bot_is_white: bool | None = None
 
     try:
-        stream = client.board.stream_game_state(game_id)
+        stream = client.bot.stream_game_state(game_id)
 
         for event in stream:
             if shutdown_requested:
@@ -127,10 +124,20 @@ def play_game(client: berserk.Client, game_id: str):
                 for move in moves:
                     board.push_uci(move)
 
-                color = event["white"]["id"] == client.session.token_owner
+                white_id = event["white"]["id"]
+                bot_id = event.get("botId")
+                bot_is_white = (white_id == bot_id)
 
-                opponent = event["black"] if color else event["white"]
-                stockfish = init_stockfish(opponent.get("rating"))
+                opponent = event["black"] if bot_is_white else event["white"]
+                opponent_rating = opponent.get("rating")
+
+                stockfish = init_stockfish(opponent_rating)
+
+                logger.info(
+                    f"Game {game_id}: playing as "
+                    f"{'white' if bot_is_white else 'black'} "
+                    f"vs {opponent_rating}"
+                )
 
             elif event["type"] == "gameState":
                 if event.get("moves"):
@@ -144,9 +151,12 @@ def play_game(client: berserk.Client, game_id: str):
                 logger.info(f"Game {game_id} finished")
                 break
 
+            if bot_is_white is None or stockfish is None:
+                continue
+
             is_my_turn = (
-                (board.turn == chess.WHITE and color) or
-                (board.turn == chess.BLACK and not color)
+                (board.turn == chess.WHITE and bot_is_white) or
+                (board.turn == chess.BLACK and not bot_is_white)
             )
 
             if not is_my_turn:
@@ -157,12 +167,12 @@ def play_game(client: berserk.Client, game_id: str):
                 move = stockfish.get_best_move_time(STOCKFISH_TIME)
 
                 if move:
-                    client.board.make_move(game_id, move)
+                    client.bot.make_move(game_id, move)
                     board.push_uci(move)
                     logger.info(f"[{game_id}] Played {move}")
 
             except StockfishException as e:
-                logger.error(f"Stockfish error: {e}")
+                logger.error(f"Stockfish error in game {game_id}: {e}")
                 break
 
     except Exception as e:
@@ -182,11 +192,17 @@ def main():
     session = berserk.TokenSession(TOKEN)
     client = berserk.Client(session)
 
-    logger.info("Axiom Bot connected to Lichess")
+    account = client.account.get()
+    
+    is_bot = account.get("title") == "BOT"
+    if not is_bot:
+        raise RuntimeError("This account is NOT a BOT account")
+
+    logger.info("Bot account verified: %s", account.get("username"))
 
     active_games: Dict[str, threading.Thread] = {}
 
-    for event in client.board.stream_incoming_events():
+    for event in client.bot.stream_incoming_events():
         if shutdown_requested:
             break
 
@@ -196,9 +212,9 @@ def main():
                 cid = challenge["id"]
 
                 if should_accept_challenge(challenge):
-                    client.challenges.accept(cid)
+                    client.bot.accept_challenge(cid)
                 else:
-                    client.challenges.decline(cid, reason="later")
+                    client.bot.decline_challenge(cid)
 
             elif event["type"] == "gameStart":
                 game_id = event["game"]["id"]
