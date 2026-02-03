@@ -317,8 +317,9 @@ async def main() -> None:
         
         # Close Stockfish
         try:
-            stockfish.quit()
-            logger.info("Stockfish engine closed")
+            if hasattr(stockfish, "_stockfish"):
+                stockfish._stockfish.terminate()
+                logger.info("Stockfish engine terminated")
         except Exception as e:
             logger.error(f"Error closing Stockfish: {e}")
         
