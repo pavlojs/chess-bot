@@ -261,48 +261,39 @@ async def main() -> None:
             if _shutdown_requested:
                 logger.info("Shutdown requested, waiting for active games to finish...")
                 break
-            
+
             try:
                 if event['type'] == 'challenge':
                     challenge = event['challenge']
                     challenge_id = challenge['id']
                     challenger_rating = challenge.get('challenger', {}).get('rating', 1500)
-                    
+
                     if should_accept_challenge(challenge):
-                        try:
-                            await client.board.accept_challenge(challenge_id)
-                            challenger_ratings[challenge_id] = challenger_rating
-                            logger.info(f"Accepted challenge: {challenge_id} from {challenger_rating} rated opponent")
-                        except Exception as e:
-                            logger.error(f"Failed to accept challenge {challenge_id}: {e}", exc_info=True)
+                        asyncio.run(client.board.accept_challenge(challenge_id))
+                        challenger_ratings[challenge_id] = challenger_rating
+                        logger.info(f"Accepted challenge: {challenge_id} from {challenger_rating} rated opponent")
                     else:
-                        try:
-                            await client.board.decline_challenge(challenge_id, reason='later')
-                            logger.debug(f"Declined challenge: {challenge_id}")
-                        except Exception as e:
-                            logger.debug(f"Failed to decline challenge {challenge_id}: {e}")
-                
+                        asyncio.run(client.board.decline_challenge(challenge_id, reason='later'))
+                        logger.debug(f"Declined challenge: {challenge_id}")
+
                 elif event['type'] == 'gameStart':
                     game = event['game']
                     game_id = game['id']
                     bot_color = game['color']
-                    
-                    # Get challenger rating for this game
+
                     challenger_rating = challenger_ratings.get(game_id)
-                    
+
                     # Create task for this game
                     task = asyncio.create_task(
                         play_game(client, stockfish, game_id, bot_color, challenger_rating)
                     )
                     active_games[game_id] = task
+
+                    # Clean up finished tasks
+                    active_games = {gid: t for gid, t in active_games.items() if not t.done()}
+
                     logger.info(f"Game started: {game_id} (playing as {bot_color})")
-                    
-                    # Clean up finished game tasks
-                    active_games = {
-                        gid: t for gid, t in active_games.items() 
-                        if not t.done()
-                    }
-            
+
             except Exception as e:
                 logger.error(f"Error processing incoming event: {e}", exc_info=True)
                 continue
