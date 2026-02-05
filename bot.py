@@ -103,12 +103,13 @@ def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
 # GAME THREAD
 # ─────────────────────────────────────────────
 
-def play_game(client: berserk.Client, game_id: str):
+def play_game(client: berserk.Client, game_id: str, bot_username: str):
     logger.info(f"Starting game thread {game_id}")
 
     board = chess.Board()
     stockfish: Stockfish | None = None
     bot_is_white: bool | None = None
+    last_move_count = 0  # Track number of moves processed
 
     try:
         stream = client.bots.stream_game_state(game_id)
@@ -120,13 +121,20 @@ def play_game(client: berserk.Client, game_id: str):
             if event["type"] == "gameFull":
                 board.reset()
 
-                moves = event["state"]["moves"].split()
+                moves = event["state"]["moves"].split() if event["state"]["moves"] else []
                 for move in moves:
                     board.push_uci(move)
+                
+                last_move_count = len(moves)
 
-                white_id = event["white"]["id"]
-                bot_id = event.get("botId")
-                bot_is_white = (white_id == bot_id)
+                white_username = event["white"].get("name", event["white"].get("id", "")).lower()
+                black_username = event["black"].get("name", event["black"].get("id", "")).lower()
+                bot_is_white = (white_username == bot_username.lower())
+
+                logger.debug(
+                    f"[{game_id}] White: {white_username}, Black: {black_username}, "
+                    f"Bot: {bot_username.lower()}, Bot is white: {bot_is_white}"
+                )
 
                 opponent = event["black"] if bot_is_white else event["white"]
                 opponent_rating = opponent.get("rating")
@@ -138,20 +146,87 @@ def play_game(client: berserk.Client, game_id: str):
                     f"{'white' if bot_is_white else 'black'} "
                     f"vs {opponent_rating}"
                 )
+                # Don't continue here - we need to check if it's our turn
 
-            elif event["type"] == "gameState":
-                if event.get("moves"):
-                    last_move = event["moves"].split()[-1]
-                    board.push_uci(last_move)
+            if event["type"] == "gameState":
+                moves = event["moves"].split() if event.get("moves") else []
+                current_move_count = len(moves)
+                
+                # Check if game ended (resignation, timeout, etc.)
+                status = event.get("status")
+                if status in ["mate", "resign", "stalemate", "timeout", "draw", "outoftime", "cheat", "noStart", "unknownFinish", "variantEnd"]:
+                    logger.info(f"[{game_id}] Game ended: {status}")
+                    break
+                
+                # Only process new moves
+                if current_move_count > last_move_count:
+                    new_moves = moves[last_move_count:]
+                    for move in new_moves:
+                        board.push_uci(move)
+                        logger.debug(f"[{game_id}] Applied move {move}, board turn: {board.turn}")
+                    last_move_count = current_move_count
 
-            else:
-                continue
+                # Handle draw offers
+                if event.get("wdraw") or event.get("bdraw"):
+                    logger.info(f"[{game_id}] Draw offer received")
+                    
+                    if stockfish:
+                        try:
+                            # Evaluate position to decide
+                            stockfish.set_fen_position(board.fen())
+                            eval_info = stockfish.get_evaluation()
+                            
+                            # Get centipawn evaluation (positive = bot winning, negative = bot losing)
+                            accept_draw = False
+                            
+                            if eval_info["type"] == "cp":
+                                evaluation = eval_info["value"]
+                                # Adjust for color (Stockfish always evaluates from white's perspective)
+                                if not bot_is_white:
+                                    evaluation = -evaluation
+                                
+                                logger.info(f"[{game_id}] Position evaluation: {evaluation} centipawns")
+                                
+                                # Accept draw if losing badly (< -300 centipawns)
+                                if evaluation < -300:
+                                    accept_draw = True
+                                    logger.info(f"[{game_id}] Accepting draw offer (losing position)")
+                                else:
+                                    logger.info(f"[{game_id}] Declining draw offer (fighting position)")
+                            else:
+                                # If mate evaluation, decline unless we're getting mated
+                                mate_value = eval_info["value"]
+                                if mate_value < 0:  # We're getting mated
+                                    accept_draw = True
+                                    logger.info(f"[{game_id}] Accepting draw offer (mate in {abs(mate_value)})")
+                                else:
+                                    logger.info(f"[{game_id}] Declining draw offer (we have mate in {mate_value})")
+                            
+                            # Send decision via API
+                            try:
+                                response = client._r.post(
+                                    f"api/bot/game/{game_id}/draw/{'yes' if accept_draw else 'no'}"
+                                )
+                                response.raise_for_status()
+                            except Exception as api_error:
+                                logger.error(f"[{game_id}] Failed to respond to draw offer: {api_error}")
+                                
+                        except Exception as e:
+                            logger.error(f"[{game_id}] Error evaluating draw offer: {e}")
+                            # On error, decline draw and continue playing
+                            try:
+                                client._r.post(f"api/bot/game/{game_id}/draw/no")
+                            except:
+                                pass
 
+            # After processing event, check if game is over
             if board.is_game_over():
                 logger.info(f"Game {game_id} finished")
                 break
 
+            # Skip if game not initialized yet
             if bot_is_white is None or stockfish is None:
+                logger.debug(f"[{game_id}] Waiting for game initialization...")
                 continue
 
             is_my_turn = (
@@ -160,16 +235,24 @@ def play_game(client: berserk.Client, game_id: str):
             )
 
             if not is_my_turn:
+                logger.debug(
+                    f"[{game_id}] Not my turn (board.turn={board.turn}, "
+                    f"bot_is_white={bot_is_white})"
+                )
                 continue
 
             try:
+                logger.debug(f"[{game_id}] Calculating move for position: {board.fen()}")
                 stockfish.set_fen_position(board.fen())
                 move = stockfish.get_best_move_time(STOCKFISH_TIME)
 
                 if move:
                     client.bots.make_move(game_id, move)
                     board.push_uci(move)
+                    last_move_count += 1  # Increment move count after our move
                     logger.info(f"[{game_id}] Played {move}")
+                else:
+                    logger.warning(f"[{game_id}] Stockfish returned no move")
 
             except StockfishException as e:
                 logger.error(f"Stockfish error in game {game_id}: {e}")
@@ -179,8 +262,13 @@ def play_game(client: berserk.Client, game_id: str):
         logger.error(f"Game {game_id} crashed: {e}", exc_info=True)
 
     finally:
-        if stockfish and hasattr(stockfish, "_stockfish"):
-            stockfish._stockfish.terminate()
+        if stockfish:
+            try:
+                if hasattr(stockfish, "_stockfish") and stockfish._stockfish:
+                    stockfish._stockfish.kill()
+                    stockfish._stockfish.wait()
+            except Exception as e:
+                logger.debug(f"[{game_id}] Error during Stockfish cleanup: {e}")
         logger.info(f"Game thread {game_id} exited")
 
 
@@ -198,7 +286,8 @@ def main():
     if not is_bot:
         raise RuntimeError("This account is NOT a BOT account")
 
-    logger.info("Bot account verified: %s", account.get("username"))
+    bot_username = account.get("username")
+    logger.info("Bot account verified: %s", bot_username)
 
     active_games: Dict[str, threading.Thread] = {}
 
@@ -221,7 +310,7 @@ def main():
 
                 thread = threading.Thread(
                     target=play_game,
-                    args=(client, game_id),
+                    args=(client, game_id, bot_username),
                     daemon=True,
                 )
                 active_games[game_id] = thread

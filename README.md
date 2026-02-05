@@ -1,23 +1,40 @@
 # ♟️ Axiom Chess Bot
 
-**⚠️ Early BETA Stage ⚠️**  
-This project is currently in early BETA stage and is not working as intended. It is only suitable for development purposes.
-
-A powerful Lichess bot powered by the Stockfish engine.
+A powerful Lichess bot powered by the Stockfish engine with dynamic strength adjustment and intelligent game handling.
 
 ![Chess Icon](https://img.shields.io/badge/Chess-♟️-black) ![Stockfish](https://img.shields.io/badge/Powered%20by-Stockfish-blue) ![Lichess](https://img.shields.io/badge/Platform-Lichess-green)
 
 ## Setup
 
 1. Clone this repository.
-2. Install dependencies: `pip install -r requirements.txt`
+2. Install Python dependencies: `pip install -r requirements.txt`
 3. Get a Lichess API token from https://lichess.org/account/oauth/token with board:play and bot:play scopes.
 4. Set environment variable: `export TOKEN="your_lichess_token"`
 5. Run the bot: `python bot.py`
 
+**Stockfish Auto-Update**: The bot automatically downloads and installs the latest Stockfish from GitHub on first run (same method as Docker build). This ensures you're always using the newest version.
+
+- To disable auto-update: set `AUTO_UPDATE_STOCKFISH=false` in your environment or `.env` file
+- To use a custom Stockfish binary: set `STOCKFISH_PATH=/path/to/stockfish`
+
+Manual Stockfish installation (if auto-update is disabled):
+```bash
+./scripts/install_stockfish.sh
+```
+
+### How It Works
+
+The bot uses the same Stockfish installation method as the Docker build:
+1. On first run, `config.py` calls `stockfish_updater.py`
+2. Downloads latest Stockfish from [official GitHub releases](https://github.com/official-stockfish/Stockfish/releases)
+3. Extracts and installs to `/usr/local/bin/stockfish`
+4. On subsequent runs, checks for updates and upgrades if available
+
+This ensures consistency between local development and Docker deployment.
+
 ## Testing
 
-[![Tests](https://github.com/axiom-chess/bot/actions/workflows/tests.yml/badge.svg)](https://github.com/axiom-chess/bot/actions/workflows/tests.yml)
+[![Tests](https://github.com/whiteravens20/chess-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/whiteravens20/chess-bot/actions/workflows/tests.yml)
 
 Run the comprehensive test suite:
 ```bash
@@ -42,7 +59,7 @@ See [TESTING.md](TESTING.md) for detailed testing guide.
 
 ### Docker Deployment
 
-[![Build and Push Docker Image](https://github.com/axiom-chess/bot/actions/workflows/build-and-push-docker.yml/badge.svg)](https://github.com/axiom-chess/bot/actions/workflows/build-and-push-docker.yml)
+[![Build and Push Docker Image](https://github.com/whiteravens20/chess-bot/actions/workflows/build-and-push-docker.yml/badge.svg)](https://github.com/whiteravens20/chess-bot/actions/workflows/build-and-push-docker.yml)
 
 #### Option 1: Using Pre-built Image from GitHub Container Registry
 
@@ -80,18 +97,17 @@ services:
 
 The bot's playstyle can be modified by changing settings in `config.py`:
 
-- `STOCKFISH_DEPTH`: Search depth for Stockfish (higher = stronger but slower).
 - `STOCKFISH_TIME`: Time per move in milliseconds.
-- `TIME_CONTROL`: List of accepted time controls. Available options: `blitz`, `rapid`, `classical` (default: all three).
-- `UCI_OPTIONS`: Dictionary of UCI options for Stockfish, such as:
-  - `"Skill Level"`: 0-20 (20 is strongest).
-  - `"Threads"`: Number of CPU threads to use.
-  - `"Hash"`: Hash table size in MB.
-  - `"UCI_LimitStrength"`: True/False to limit strength.
-  - `"UCI_Elo"`: Target Elo when limiting strength (800-2850).
-  - `"Move Overhead"`: Time overhead in ms per move.
-  - `"Slow Mover"`: Time management factor (10-1000).
-  - `"Contempt"`: Draw avoidance in centipawns.
+- `TIME_CONTROL`: List of accepted time controls. Available options: `bullet`, `blitz`, `rapid`, `classical`.
+- `UCI_OPTIONS`: Dictionary of UCI options for Stockfish 18+:
+  - `"Threads"`: Number of CPU threads to use (1-1024).
+  - `"Hash"`: Hash table size in MB (1-33554432).
+  - `"Move Overhead"`: Network latency compensation in ms (0-5000). **Note:** space in key name.
+  - `"Ponder"`: True/False to enable pondering.
+  - `"UCI_LimitStrength"`: True/False to limit strength (used with dynamic strength feature).
+  - `"UCI_Elo"`: Target Elo rating when UCI_LimitStrength is True (800-2850).
+  
+  For full list of available options, run: `/usr/local/bin/stockfish` and type `uci`
 
 Other options can be added as needed. Refer to Stockfish documentation for available UCI options.
 
@@ -154,13 +170,15 @@ Note: Tablebases are large; start with 3-5 piece files (~10 GB).
 
 ## Current Playstyle and Difficulty
 
-Based on the current UCI options in `config.py`, the bot is configured as follows:
+Based on the current configuration in `config.py`, the bot is configured as follows:
 
-- **Difficulty**: Intermediate (limited to approximately 1600 Elo)
-- **Playstyle**: Aggressive, with a tendency to avoid draws (Contempt set to 20 centipawns)
-- **Endgame**: Uses Syzygy tablebases for perfect play in endgames with up to 7 pieces
+- **Difficulty**: Dynamic - automatically adjusts to be ~100 Elo stronger than each opponent (configurable via `STRENGTH_ADVANTAGE`)
+- **Playstyle**: Balanced, adapts strength to create competitive games
+- **Endgame**: Uses Syzygy tablebases for perfect play in endgames with up to 7 pieces (if configured)
+- **Draw Offers**: Evaluates position and accepts if losing badly (< -300 centipawns)
+- **Game Handling**: Properly detects and handles all game endings (resignation, timeout, mate, etc.)
 
-This makes the bot suitable for players looking for a challenging but not overwhelming opponent.
+This makes the bot suitable for players of all levels, as it automatically adjusts to provide challenging but fair games.
 
 ## Updating Stockfish
 
