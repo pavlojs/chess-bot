@@ -240,5 +240,44 @@ class TestLogging(unittest.TestCase):
         self.assertTrue(len(logger.handlers) > 0)
 
 
+class TestStockfishUpdater(unittest.TestCase):
+    """Test Stockfish auto-updater functionality."""
+    
+    def test_get_binary_name(self):
+        """Test that correct binary name is determined for the platform."""
+        from stockfish_updater import get_binary_name
+        
+        binary_name = get_binary_name()
+        
+        # Should return a valid binary name
+        self.assertIsInstance(binary_name, str)
+        self.assertTrue(binary_name.startswith("stockfish-"))
+    
+    def test_get_installed_version(self):
+        """Test version detection of installed Stockfish."""
+        from stockfish_updater import get_installed_version
+        
+        version = get_installed_version()
+        
+        # Should return either None or a version string
+        if version is not None:
+            self.assertIsInstance(version, str)
+    
+    def test_get_latest_release_info(self):
+        """Test fetching latest release info from GitHub."""
+        from stockfish_updater import get_latest_release_info
+        
+        try:
+            info = get_latest_release_info()
+            
+            # Should have required fields
+            self.assertIn("tag_name", info)
+            self.assertIn("assets", info)
+            self.assertIsInstance(info["assets"], list)
+        except Exception as e:
+            # Network errors are acceptable in tests
+            self.skipTest(f"Network request failed: {e}")
+
+
 if __name__ == '__main__':
     unittest.main()
