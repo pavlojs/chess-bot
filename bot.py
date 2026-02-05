@@ -111,7 +111,7 @@ def play_game(client: berserk.Client, game_id: str):
     bot_is_white: bool | None = None
 
     try:
-        stream = client.bot.stream_game_state(game_id)
+        stream = client.bots.stream_game_state(game_id)
 
         for event in stream:
             if shutdown_requested:
@@ -167,7 +167,7 @@ def play_game(client: berserk.Client, game_id: str):
                 move = stockfish.get_best_move_time(STOCKFISH_TIME)
 
                 if move:
-                    client.bot.make_move(game_id, move)
+                    client.bots.make_move(game_id, move)
                     board.push_uci(move)
                     logger.info(f"[{game_id}] Played {move}")
 
@@ -202,7 +202,7 @@ def main():
 
     active_games: Dict[str, threading.Thread] = {}
 
-    for event in client.bot.stream_incoming_events():
+    for event in client.bots.stream_incoming_events():
         if shutdown_requested:
             break
 
@@ -212,9 +212,9 @@ def main():
                 cid = challenge["id"]
 
                 if should_accept_challenge(challenge):
-                    client.bot.accept_challenge(cid)
+                    client.bots.accept_challenge(cid)
                 else:
-                    client.bot.decline_challenge(cid)
+                    client.bots.decline_challenge(cid)
 
             elif event["type"] == "gameStart":
                 game_id = event["game"]["id"]
