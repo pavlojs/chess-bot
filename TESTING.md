@@ -69,16 +69,20 @@ Current test coverage includes:
 - ✅ Invalid move rejection
 - ✅ Game over detection (checkmate)
 
-### Stockfish Tests (3 tests)
+### Stockfish Initialization Tests (3 tests)
 - ✅ Successful initialization
-- ✅ Initialization with missing path
-- ✅ Initialization failure handling
+- ✅ Initialization with dynamic strength adjustment
+- ✅ ELO capping (800-2850 range)
+
+### Stockfish Updater Tests (3 tests)
+- ✅ Binary name detection (platform-specific)
+- ✅ Version detection from installed binary
+- ✅ Latest release info retrieval from GitHub API
 
 ### Logging Tests (1 test)
-- ✅ Logger configuration
-- ✅ Logger handler setup
+- ✅ Logger configuration and handler setup
 
-**Total: 16 tests, 100% pass rate**
+**Total: 19 tests, 100% pass rate**
 
 ## Continuous Integration
 
@@ -93,10 +97,11 @@ pytest && git add .
 Tests are organized in `test_bot.py` with separate test classes for different functionality:
 
 ```python
-class TestChallengeAcceptance(unittest.TestCase)
-class TestBoardState(unittest.TestCase)
-class TestStockfishInitialization(unittest.TestCase)
-class TestLogging(unittest.TestCase)
+class TestChallengeAcceptance(unittest.TestCase)    # 7 tests
+class TestBoardState(unittest.TestCase)              # 5 tests
+class TestStockfishInitialization(unittest.TestCase) # 3 tests
+class TestStockfishUpdater(unittest.TestCase)        # 3 tests
+class TestLogging(unittest.TestCase)                 # 1 test
 ```
 
 ## Mocking
