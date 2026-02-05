@@ -5,10 +5,14 @@ Unit tests for Axiom Chess Bot
 import unittest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
+import os
 
 import chess
 
-from bot import should_accept_challenge, initialize_stockfish
+# Mock TOKEN before importing bot
+os.environ.setdefault('TOKEN', 'test_token_for_testing')
+
+from bot import should_accept_challenge, init_stockfish
 
 
 class TestChallengeAcceptance(unittest.TestCase):
@@ -18,7 +22,7 @@ class TestChallengeAcceptance(unittest.TestCase):
         """Test that valid challenges are accepted."""
         challenge = {
             'challenger': {'rating': 1500},
-            'timeControl': {'type': 'blitz'},
+            'timeControl': {'limit': 180, 'increment': 0},
             'id': 'test123'
         }
         
@@ -33,7 +37,7 @@ class TestChallengeAcceptance(unittest.TestCase):
         """Test that challenges below minimum rating are rejected."""
         challenge = {
             'challenger': {'rating': 900},
-            'timeControl': {'type': 'blitz'},
+            'timeControl': {'limit': 180, 'increment': 0},
             'id': 'test123'
         }
         
@@ -48,7 +52,7 @@ class TestChallengeAcceptance(unittest.TestCase):
         """Test that challenges above maximum rating are rejected."""
         challenge = {
             'challenger': {'rating': 2500},
-            'timeControl': {'type': 'blitz'},
+            'timeControl': {'limit': 180, 'increment': 0},
             'id': 'test123'
         }
         
@@ -63,7 +67,7 @@ class TestChallengeAcceptance(unittest.TestCase):
         """Test that unsupported time controls are rejected."""
         challenge = {
             'challenger': {'rating': 1500},
-            'timeControl': {'type': 'bullet'},
+            'timeControl': {'limit': 60, 'increment': 0},
             'id': 'test123'
         }
         
@@ -78,7 +82,7 @@ class TestChallengeAcceptance(unittest.TestCase):
         """Test that challenges are rejected when ACCEPT_CHALLENGES is False."""
         challenge = {
             'challenger': {'rating': 1500},
-            'timeControl': {'type': 'blitz'},
+            'timeControl': {'limit': 180, 'increment': 0},
             'id': 'test123'
         }
         
@@ -90,7 +94,7 @@ class TestChallengeAcceptance(unittest.TestCase):
         """Test that default rating is used when rating is missing."""
         challenge = {
             'challenger': {},
-            'timeControl': {'type': 'blitz'},
+            'timeControl': {'limit': 180, 'increment': 0},
             'id': 'test123'
         }
         
@@ -106,7 +110,7 @@ class TestChallengeAcceptance(unittest.TestCase):
         """Test that classical time control challenges are accepted."""
         challenge = {
             'challenger': {'rating': 1800},
-            'timeControl': {'type': 'classical'},
+            'timeControl': {'limit': 1800, 'increment': 0},
             'id': 'test123'
         }
         
@@ -172,37 +176,54 @@ class TestStockfishInitialization(unittest.TestCase):
     """Test Stockfish engine initialization."""
     
     @patch('bot.Stockfish')
-    @patch('bot.STOCKFISH_PATH', './stockfish/stockfish')
+    @patch('bot.STOCKFISH_PATH', '/usr/local/bin/stockfish')
     def test_stockfish_initialization_success(self, mock_stockfish_class):
-        """Test successful Stockfish initialization."""
+        """Test successful Stockfish initialization without dynamic strength."""
         mock_sf_instance = Mock()
         mock_stockfish_class.return_value = mock_sf_instance
         
-        with patch('bot.logger'):
-            result = initialize_stockfish()
+        with patch('bot.DYNAMIC_STRENGTH', False):
+            result = init_stockfish()
         
         # Verify Stockfish was called with correct parameters
         mock_stockfish_class.assert_called_once()
         self.assertIsNotNone(result)
     
-    @patch('bot.STOCKFISH_PATH', None)
-    def test_stockfish_initialization_no_path(self):
-        """Test Stockfish initialization when path is not available."""
-        with patch('bot.logger'):
-            result = initialize_stockfish()
+    @patch('bot.Stockfish')
+    @patch('bot.STOCKFISH_PATH', '/usr/local/bin/stockfish')
+    def test_stockfish_initialization_with_dynamic_strength(self, mock_stockfish_class):
+        """Test Stockfish initialization with dynamic strength enabled."""
+        mock_sf_instance = Mock()
+        mock_stockfish_class.return_value = mock_sf_instance
         
-        self.assertIsNone(result)
+        with patch('bot.DYNAMIC_STRENGTH', True), \
+             patch('bot.STRENGTH_ADVANTAGE', 100):
+            result = init_stockfish(opponent_rating=1500)
+        
+        # Verify Stockfish strength was set to opponent_rating + advantage
+        mock_sf_instance.update_engine_parameters.assert_called_once_with({
+            'UCI_LimitStrength': True,
+            'UCI_Elo': 1600,
+        })
+        self.assertIsNotNone(result)
     
     @patch('bot.Stockfish')
-    @patch('bot.STOCKFISH_PATH', './stockfish/stockfish')
-    def test_stockfish_initialization_failure(self, mock_stockfish_class):
-        """Test handling of Stockfish initialization failure."""
-        mock_stockfish_class.side_effect = Exception("Stockfish not found")
+    @patch('bot.STOCKFISH_PATH', '/usr/local/bin/stockfish')
+    def test_stockfish_initialization_caps_elo(self, mock_stockfish_class):
+        """Test that Stockfish ELO is capped at maximum."""
+        mock_sf_instance = Mock()
+        mock_stockfish_class.return_value = mock_sf_instance
         
-        with patch('bot.logger'):
-            result = initialize_stockfish()
+        with patch('bot.DYNAMIC_STRENGTH', True), \
+             patch('bot.STRENGTH_ADVANTAGE', 100):
+            result = init_stockfish(opponent_rating=2800)
         
-        self.assertIsNone(result)
+        # Verify ELO is capped at 2850
+        mock_sf_instance.update_engine_parameters.assert_called_once_with({
+            'UCI_LimitStrength': True,
+            'UCI_Elo': 2850,
+        })
+        self.assertIsNotNone(result)
 
 
 class TestLogging(unittest.TestCase):
