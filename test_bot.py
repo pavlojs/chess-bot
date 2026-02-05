@@ -111,6 +111,7 @@ class TestChallengeAcceptance(unittest.TestCase):
         challenge = {
             'challenger': {'rating': 1800},
             'timeControl': {'limit': 1800, 'increment': 0},
+            'speed': 'classical',
             'id': 'test123'
         }
         
@@ -120,6 +121,38 @@ class TestChallengeAcceptance(unittest.TestCase):
              patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
             result = should_accept_challenge(challenge)
             self.assertTrue(result)
+    
+    def test_reject_correspondence_challenge(self):
+        """Test that correspondence challenges are rejected."""
+        challenge = {
+            'challenger': {'rating': 1500},
+            'timeControl': {'limit': 259200, 'increment': 0},
+            'speed': 'correspondence',
+            'id': 'test123'
+        }
+        
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['bullet', 'blitz', 'rapid', 'classical']):
+            result = should_accept_challenge(challenge)
+            self.assertFalse(result)
+    
+    def test_reject_unlimited_time_challenge(self):
+        """Test that unlimited time challenges are rejected."""
+        challenge = {
+            'challenger': {'rating': 1500},
+            'timeControl': {'limit': 0, 'increment': 0},
+            'speed': 'unlimited',
+            'id': 'test123'
+        }
+        
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['bullet', 'blitz', 'rapid', 'classical']):
+            result = should_accept_challenge(challenge)
+            self.assertFalse(result)
 
 
 class TestBoardState(unittest.TestCase):

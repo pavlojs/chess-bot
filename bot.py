@@ -48,7 +48,17 @@ signal.signal(signal.SIGTERM, handle_shutdown)
 # UTILS
 # ─────────────────────────────────────────────
 
-def determine_time_category(limit: int, increment: int) -> str:
+def determine_time_category(limit: int, increment: int) -> str | None:
+    # Reject unlimited time games (limit = 0 and increment = 0)
+    if limit == 0 and increment == 0:
+        return None
+    
+    # Reject correspondence games (days per move > 0)
+    # In Lichess API, correspondence games have very large limits
+    # or are marked differently in variant/speed fields
+    if limit >= 259200:  # 3+ days in seconds = correspondence
+        return None
+    
     total = limit + increment * 40
     if total < 180:
         return "bullet"
@@ -65,12 +75,25 @@ def should_accept_challenge(challenge: Dict[str, Any]) -> bool:
 
     challenger = challenge.get("challenger", {})
     rating = challenger.get("rating", 1500)
+    
+    # Check if challenge has speed field (more reliable than calculating)
+    speed = challenge.get("speed")
+    if speed:
+        # Reject correspondence and unlimited time games
+        if speed in ["correspondence", "unlimited"]:
+            logger.info(f"Rejecting {speed} challenge")
+            return False
 
     clock = challenge.get("timeControl", {})
     limit = clock.get("limit", 0)
     increment = clock.get("increment", 0)
 
     category = determine_time_category(limit, increment)
+    
+    # Reject if category is None (unlimited or correspondence)
+    if category is None:
+        logger.info(f"Rejecting challenge with no valid time category")
+        return False
 
     if not (MIN_RATING <= rating <= MAX_RATING):
         return False

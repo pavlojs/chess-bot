@@ -53,7 +53,7 @@ Coverage report will be generated in `htmlcov/index.html`
 
 Current test coverage includes:
 
-### Challenge Acceptance Tests (7 tests)
+### Challenge Acceptance Tests (9 tests)
 - ✅ Valid challenges (correct rating and time control)
 - ✅ Challenges with rating too low
 - ✅ Challenges with rating too high  
@@ -61,6 +61,8 @@ Current test coverage includes:
 - ✅ Challenges with classical time control
 - ✅ Behavior when challenges are disabled
 - ✅ Handling of missing rating data
+- ✅ Rejection of correspondence challenges
+- ✅ Rejection of unlimited time challenges
 
 ### Board State Tests (5 tests)
 - ✅ Board initialization
@@ -82,7 +84,7 @@ Current test coverage includes:
 ### Logging Tests (1 test)
 - ✅ Logger configuration and handler setup
 
-**Total: 19 tests, 100% pass rate**
+**Total: 21 tests, 100% pass rate**
 
 ## Continuous Integration
 
@@ -97,7 +99,7 @@ pytest && git add .
 Tests are organized in `test_bot.py` with separate test classes for different functionality:
 
 ```python
-class TestChallengeAcceptance(unittest.TestCase)    # 7 tests
+class TestChallengeAcceptance(unittest.TestCase)    # 9 tests
 class TestBoardState(unittest.TestCase)              # 5 tests
 class TestStockfishInitialization(unittest.TestCase) # 3 tests
 class TestStockfishUpdater(unittest.TestCase)        # 3 tests

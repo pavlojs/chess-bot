@@ -10,7 +10,14 @@ A powerful Lichess bot powered by the Stockfish engine with dynamic strength adj
 
 [![Challenge Axiom_BOT](https://img.shields.io/badge/Challenge-Axiom__BOT-orange?style=for-the-badge&logo=lichess)](https://lichess.org/?user=Axiom_BOT#friend)
 
-The bot accepts challenges in **Rapid**, **Classical**, and **Blitz** time controls. It automatically adjusts its strength to match your rating for competitive games!
+The bot accepts challenges in **Bullet**, **Blitz**, **Rapid**, and **Classical** time controls. 
+
+**Note:** The bot automatically rejects:
+- ❌ Correspondence games (days per move)
+- ❌ Unlimited time games (no clock)
+- ✅ Accepts challenges from both human players and other bots
+
+The bot automatically adjusts its strength to match your rating for competitive games!
 
 ## Requirements
 
@@ -156,13 +163,18 @@ DYNAMIC_STRENGTH = False
 
 ### Supported Time Controls
 
-The bot supports all major Lichess time control modes:
+The bot supports all major real-time Lichess time control modes:
 
-- **Blitz**: Fast games (typically 3+0 to 5+3 minutes)
-- **Rapid**: Medium-paced games (typically 10+0 to 25+10 minutes)
+- **Bullet**: Ultra-fast games (typically < 3 minutes total)
+- **Blitz**: Fast games (typically 3-8 minutes total)
+- **Rapid**: Medium-paced games (typically 10-25 minutes total)
 - **Classical**: Slow games (typically 30+ minutes per side)
 
-You can customize which time controls the bot accepts by editing `TIME_CONTROL` in `config.py`. For example:
+**Automatically rejected:**
+- ❌ **Correspondence**: Games with days per move (limit ≥ 259200 seconds)
+- ❌ **Unlimited**: Games with no time control (0+0)
+
+You can customize which real-time time controls the bot accepts by editing `TIME_CONTROL` in `config.py`. For example:
 
 ```python
 TIME_CONTROL = ["classical"]  # Only accept classical games
