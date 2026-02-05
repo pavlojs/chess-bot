@@ -4,6 +4,19 @@ A powerful Lichess bot powered by the Stockfish engine with dynamic strength adj
 
 ![Chess Icon](https://img.shields.io/badge/Chess-♟️-black) ![Stockfish](https://img.shields.io/badge/Powered%20by-Stockfish-blue) ![Lichess](https://img.shields.io/badge/Platform-Lichess-green)
 
+## Play Against the Bot
+
+🤖 **Official Bot Account**: [@Axiom_BOT](https://lichess.org/@/Axiom_BOT)
+
+[![Challenge Axiom_BOT](https://img.shields.io/badge/Challenge-Axiom__BOT-orange?style=for-the-badge&logo=lichess)](https://lichess.org/?user=Axiom_BOT#friend)
+
+The bot accepts challenges in **Rapid**, **Classical**, and **Blitz** time controls. It automatically adjusts its strength to match your rating for competitive games!
+
+## Requirements
+
+- Python 3.10 or higher
+- Lichess BOT account
+
 ## Setup
 
 1. Clone this repository.
