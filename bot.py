@@ -210,27 +210,29 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 
                                 logger.info(f"[{game_id}] Position evaluation: {evaluation} centipawns")
                                 
-                                # Accept draw if losing badly (< -300 centipawns)
-                                if evaluation < -300:
+                                # Accept draw only if position is close to equal (±200 centipawns)
+                                # Decline if we have advantage OR disadvantage - let the engine play it out
+                                if -200 <= evaluation <= 200:
                                     accept_draw = True
-                                    logger.info(f"[{game_id}] Accepting draw offer (losing position)")
+                                    logger.info(f"[{game_id}] Accepting draw offer (balanced position: {evaluation}cp)")
+                                elif evaluation > 200:
+                                    logger.info(f"[{game_id}] Declining draw offer (we're winning: {evaluation}cp)")
                                 else:
-                                    logger.info(f"[{game_id}] Declining draw offer (fighting position)")
+                                    logger.info(f"[{game_id}] Declining draw offer (we're losing but engine can play: {evaluation}cp)")
                             else:
-                                # If mate evaluation, decline unless we're getting mated
+                                # If mate evaluation, always decline - let the engine play
                                 mate_value = eval_info["value"]
-                                if mate_value < 0:  # We're getting mated
-                                    accept_draw = True
-                                    logger.info(f"[{game_id}] Accepting draw offer (mate in {abs(mate_value)})")
+                                if mate_value < 0:
+                                    logger.info(f"[{game_id}] Declining draw offer (getting mated in {abs(mate_value)}, but will fight)")
                                 else:
                                     logger.info(f"[{game_id}] Declining draw offer (we have mate in {mate_value})")
                             
                             # Send decision via API
                             try:
-                                response = client._r.post(
-                                    f"api/bot/game/{game_id}/draw/{'yes' if accept_draw else 'no'}"
-                                )
-                                response.raise_for_status()
+                                if accept_draw:
+                                    client.bots.accept_draw(game_id)
+                                else:
+                                    client.bots.decline_draw(game_id)
                             except Exception as api_error:
                                 logger.error(f"[{game_id}] Failed to respond to draw offer: {api_error}")
                                 
@@ -238,7 +240,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             logger.error(f"[{game_id}] Error evaluating draw offer: {e}")
                             # On error, decline draw and continue playing
                             try:
-                                client._r.post(f"api/bot/game/{game_id}/draw/no")
+                                client.bots.decline_draw(game_id)
                             except:
                                 pass
 
