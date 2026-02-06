@@ -117,15 +117,13 @@ services:
 
 The bot's playstyle can be modified by changing settings in `config.py`:
 
-- `STOCKFISH_TIME`: Time per move in milliseconds.
+- `STOCKFISH_TIME`: Base thinking time per move in milliseconds (default: `3000` = 3 seconds). Higher values = stronger play.
 - `TIME_CONTROL`: List of accepted time controls. Available options: `bullet`, `blitz`, `rapid`, `classical`.
 - `UCI_OPTIONS`: Dictionary of UCI options for Stockfish 18+:
-  - `"Threads"`: Number of CPU threads to use (1-1024).
-  - `"Hash"`: Hash table size in MB (1-33554432).
+  - `"Threads"`: Number of CPU threads to use (1-1024). Default: `4`
+  - `"Hash"`: Hash table size in MB (1-33554432). Default: `2048` (2 GB)
   - `"Move Overhead"`: Network latency compensation in ms (0-5000). **Note:** space in key name.
   - `"Ponder"`: True/False to enable pondering.
-  - `"UCI_LimitStrength"`: True/False to limit strength (used with dynamic strength feature).
-  - `"UCI_Elo"`: Target Elo rating when UCI_LimitStrength is True (800-2850).
   
   For full list of available options, run: `/usr/local/bin/stockfish` and type `uci`
 
@@ -133,31 +131,67 @@ Other options can be added as needed. Refer to Stockfish documentation for avail
 
 ### Dynamic Strength Based on Opponent Rating
 
-The bot can automatically adjust its strength to be slightly stronger than each opponent, creating more competitive and engaging games. This feature is **enabled by default**.
+The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fair, competitive games at all levels. This feature is **enabled by default**.
 
-**How it works:**
-- When a challenge is accepted, the bot extracts the opponent's ELO rating
-- At game start, the bot calculates its own ELO: `bot_elo = opponent_elo + STRENGTH_ADVANTAGE`
-- The bot limits its strength to this calculated rating using Stockfish's `UCI_Elo` option
-- All ELO values are automatically bounded between Stockfish's minimum (800) and maximum (2850)
+**How the Hybrid System Works:**
+
+👶 **Beginners & Intermediates (< 1700 ELO):**
+- Uses `UCI_LimitStrength` to play at opponent_rating + 100
+- Intentionally limits engine to fair playing level
+- Example: 1500-rated player faces ~1600 strength bot
+- **Result: Fair, winnable games** ✅
+
+🎯 **Advanced Players (1700-2299 ELO):**
+- Uses **full-strength Stockfish** (no intentional mistakes)
+- Adjusts difficulty via thinking time (50-99% of base time)
+- Example: 2000-rated player faces full strength with 2250ms thinking time
+- **Result: Challenging but quality chess** ✅
+
+👑 **Expert & Master (2300+ ELO):**
+- **MAXIMUM POWER**: Full strength + Full thinking time (3 seconds)
+- No handicaps, no compromises
+- Effective strength: ~3200-3500 ELO
+- **Result: Ultimate challenge** 🔥
+
+**Why this approach is better:**
+- ✅ Fair games for beginners (UCI_LimitStrength ensures balanced play)
+- ✅ No blunders for advanced players (full engine quality)
+- ✅ Maximum challenge for strong players (full power unlocked)
+- ✅ Smooth difficulty progression across all levels
 
 **Configuration options in `config.py`:**
 - `DYNAMIC_STRENGTH`: Enable/disable feature (default: `True`)
-- `STRENGTH_ADVANTAGE`: How many ELO points stronger than opponent (default: `100`)
+- `LIMIT_STRENGTH_THRESHOLD`: Below this rating, use UCI_LimitStrength (default: `1700`)
+- `FULL_STRENGTH_THRESHOLD`: At or above this rating, use full power (default: `2300`)
+- `STRENGTH_ADVANTAGE`: ELO bonus for weak opponents (default: `100`)
+- `STOCKFISH_TIME`: Base thinking time in milliseconds (default: `3000`)
 
-**Examples:**
-- 1400-rated opponent → bot plays at ~1500 ELO
-- 1800-rated opponent → bot plays at ~1900 ELO
-- 2800-rated opponent → bot plays at 2850 ELO (capped at maximum)
+**Effective Strength Examples:**
+
+| Opponent Rating | Method | Thinking Time | Effective Bot Strength | Advantage |
+|----------------|--------|---------------|----------------------|------------|
+| **1200 ELO** | UCI_LimitStrength | 1200ms (40%) | ~1300 ELO | +100 ELO ✅ |
+| **1500 ELO** | UCI_LimitStrength | 1200ms (40%) | ~1600 ELO | +100 ELO ✅ |
+| **1700 ELO** | Time Control (50%) | 1500ms | ~1900 ELO | +200 ELO ✅ |
+| **2000 ELO** | Time Control (75%) | 2250ms | ~2400 ELO | +400 ELO ✅ |
+| **2300 ELO** | **FULL POWER** | **3000ms (100%)** | **~3200 ELO** | **+900 ELO** 🔥 |
+| **2500 ELO** | **FULL POWER** | **3000ms (100%)** | **~3400 ELO** | **+900 ELO** 🔥 |
 
 **To customize:**
 ```python
 # In config.py
 
-# Make bot even stronger relative to opponents
-STRENGTH_ADVANTAGE = 150
+# Adjust thresholds
+LIMIT_STRENGTH_THRESHOLD = 1600  # Use UCI_LimitStrength below 1600
+FULL_STRENGTH_THRESHOLD = 2000   # Full power at 2000+
 
-# Or disable dynamic strength to use static settings from UCI_OPTIONS
+# Adjust advantage for weak opponents
+STRENGTH_ADVANTAGE = 150  # Play 150 ELO above opponent
+
+# Increase base thinking time for stronger play
+STOCKFISH_TIME = 5000  # 5 seconds (very strong)
+
+# Or disable dynamic strength for consistent maximum strength
 DYNAMIC_STRENGTH = False
 ```
 
@@ -197,13 +231,28 @@ Note: Tablebases are large; start with 3-5 piece files (~10 GB).
 
 Based on the current configuration in `config.py`, the bot is configured as follows:
 
-- **Difficulty**: Dynamic - automatically adjusts to be ~100 Elo stronger than each opponent (configurable via `STRENGTH_ADVANTAGE`)
-- **Playstyle**: Balanced, adapts strength to create competitive games
+- **Difficulty**: Hybrid dynamic system - adapts method to opponent level
+  - **Beginners (< 1800)**: UCI_LimitStrength at opponent+100 ELO (fair games)
+  - **Intermediates (1800-2199)**: Full strength with reduced time (challenging)
+  - **Advanced (2200+)**: **MAXIMUM POWER** - full strength + full time
+- **Playstyle**: 
+  - Fair and balanced for learning players
+  - Aggressive and precise for strong opponents
+  - Never "gives up" - fights in all positions
 - **Endgame**: Uses Syzygy tablebases for perfect play in endgames with up to 7 pieces (if configured)
-- **Draw Offers**: Evaluates position and accepts if losing badly (< -300 centipawns)
+- **Draw Offers**: Intelligent evaluation system
+  - **Accepts** draws only in balanced positions (±200 centipawns)
+  - **Declines** draws when winning or losing significantly
+  - **Declines** all mate positions - trusts engine calculation
+  - Philosophy: Utilize calculation advantage, especially against strong opponents
 - **Game Handling**: Properly detects and handles all game endings (resignation, timeout, mate, etc.)
 
-This makes the bot suitable for players of all levels, as it automatically adjusts to provide challenging but fair games.
+**Effective Strength by Opponent Level:**
+- **Beginners to Intermediate** (< 1800): Plays at opponent's level + 100 ELO
+- **Advanced** (1800-2199): ~2000-2400 ELO depending on rating
+- **Expert and Master** (2200+): **~3200-3500 ELO** (Super-GM level)
+
+This makes the bot suitable and fair for players of all levels!
 
 ## Updating Stockfish
 

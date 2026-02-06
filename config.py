@@ -63,12 +63,14 @@ def find_stockfish_path():
 
 STOCKFISH_PATH = find_stockfish_path()
 
-STOCKFISH_TIME = 1100  # ms per move
+# Stockfish time per move (ms) - dynamically adjusted based on opponent strength
+# Base time for calculation, can be adjusted per opponent
+STOCKFISH_TIME = 3000  # Default: 3 seconds per move
 
 UCI_OPTIONS: Dict[str, Any] = {
     "Threads": 4,
-    "Hash": 1024,
-    "UCI_LimitStrength": False,
+    "Hash": 2048,
+    "UCI_LimitStrength": False,  # Never use UCI_LimitStrength - it introduces blunders
     "Move Overhead": 30,  # Note: space in key name (ms)
     "Ponder": False,
 }
@@ -78,5 +80,18 @@ MIN_RATING = 1320
 MAX_RATING = 2800
 TIME_CONTROL = ["bullet", "blitz", "rapid", "classical"]
 
+# Dynamic strength: HYBRID approach for fair games at all levels
+# Combines UCI_LimitStrength (for beginners) with time control (for advanced players)
 DYNAMIC_STRENGTH = True
-STRENGTH_ADVANTAGE = 100
+
+# HYBRID SYSTEM THRESHOLDS:
+# 1. Below LIMIT_STRENGTH_THRESHOLD: Use UCI_LimitStrength (fair for beginners)
+# 2. Between thresholds: Full strength engine, reduced time (no blunders for intermediates)
+# 3. Above FULL_STRENGTH_THRESHOLD: MAXIMUM POWER (full time + full strength)
+
+LIMIT_STRENGTH_THRESHOLD = 1700  # Below this: UCI_LimitStrength for fair games
+FULL_STRENGTH_THRESHOLD = 2300   # At or above: FULL POWER (no compromises)
+
+# For opponents below LIMIT_STRENGTH_THRESHOLD:
+# Bot plays at opponent_rating + STRENGTH_ADVANTAGE using UCI_LimitStrength
+STRENGTH_ADVANTAGE = 100  # ELO advantage for weak opponents (e.g., 1500 → bot plays 1600)

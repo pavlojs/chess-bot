@@ -224,16 +224,17 @@ class TestStockfishInitialization(unittest.TestCase):
     
     @patch('bot.Stockfish')
     @patch('bot.STOCKFISH_PATH', '/usr/local/bin/stockfish')
-    def test_stockfish_initialization_with_dynamic_strength(self, mock_stockfish_class):
-        """Test Stockfish initialization with dynamic strength enabled."""
+    def test_stockfish_initialization_weak_opponent(self, mock_stockfish_class):
+        """Test Stockfish initialization with weak opponent - uses UCI_LimitStrength."""
         mock_sf_instance = Mock()
         mock_stockfish_class.return_value = mock_sf_instance
         
         with patch('bot.DYNAMIC_STRENGTH', True), \
+             patch('bot.LIMIT_STRENGTH_THRESHOLD', 1800), \
              patch('bot.STRENGTH_ADVANTAGE', 100):
             result = init_stockfish(opponent_rating=1500)
         
-        # Verify Stockfish strength was set to opponent_rating + advantage
+        # Verify that UCI_LimitStrength IS used for weak opponents
         mock_sf_instance.update_engine_parameters.assert_called_once_with({
             'UCI_LimitStrength': True,
             'UCI_Elo': 1600,
@@ -242,21 +243,89 @@ class TestStockfishInitialization(unittest.TestCase):
     
     @patch('bot.Stockfish')
     @patch('bot.STOCKFISH_PATH', '/usr/local/bin/stockfish')
-    def test_stockfish_initialization_caps_elo(self, mock_stockfish_class):
-        """Test that Stockfish ELO is capped at maximum."""
+    def test_stockfish_initialization_strong_opponent(self, mock_stockfish_class):
+        """Test Stockfish initialization with strong opponent - full strength."""
         mock_sf_instance = Mock()
         mock_stockfish_class.return_value = mock_sf_instance
         
         with patch('bot.DYNAMIC_STRENGTH', True), \
-             patch('bot.STRENGTH_ADVANTAGE', 100):
-            result = init_stockfish(opponent_rating=2800)
+             patch('bot.LIMIT_STRENGTH_THRESHOLD', 1800):
+            result = init_stockfish(opponent_rating=2200)
         
-        # Verify ELO is capped at 2850
-        mock_sf_instance.update_engine_parameters.assert_called_once_with({
-            'UCI_LimitStrength': True,
-            'UCI_Elo': 2850,
-        })
+        # Verify engine parameters are not modified for strong opponents
+        mock_sf_instance.update_engine_parameters.assert_not_called()
         self.assertIsNotNone(result)
+
+
+class TestMoveTimeCalculation(unittest.TestCase):
+    """Test hybrid dynamic move time calculation based on opponent rating."""
+    
+    @patch('bot.STOCKFISH_TIME', 3000)
+    @patch('bot.LIMIT_STRENGTH_THRESHOLD', 1800)
+    @patch('bot.FULL_STRENGTH_THRESHOLD', 2200)
+    def test_full_time_for_strong_opponents(self):
+        """Test that strong opponents (2200+) get full thinking time."""
+        from bot import calculate_move_time
+        
+        with patch('bot.DYNAMIC_STRENGTH', True):
+            # Strong opponents should get 100% time
+            time_2200 = calculate_move_time(2200, 3000)
+            time_2500 = calculate_move_time(2500, 3000)
+            time_2800 = calculate_move_time(2800, 3000)
+            
+            self.assertEqual(time_2200, 3000)
+            self.assertEqual(time_2500, 3000)
+            self.assertEqual(time_2800, 3000)
+    
+    @patch('bot.STOCKFISH_TIME', 3000)
+    @patch('bot.LIMIT_STRENGTH_THRESHOLD', 1800)
+    @patch('bot.FULL_STRENGTH_THRESHOLD', 2200)
+    def test_reduced_time_for_weak_opponents(self):
+        """Test that weak opponents (< 1800) get minimum time (UCI_LimitStrength handles fairness)."""
+        from bot import calculate_move_time
+        
+        with patch('bot.DYNAMIC_STRENGTH', True):
+            # Weak opponents get 40% time (UCI_LimitStrength makes it fair)
+            time_1200 = calculate_move_time(1200, 3000)
+            time_1500 = calculate_move_time(1500, 3000)
+            time_1700 = calculate_move_time(1700, 3000)
+            
+            # All should get 40% = 1200ms
+            self.assertEqual(time_1200, 1200)
+            self.assertEqual(time_1500, 1200)
+            self.assertEqual(time_1700, 1200)
+    
+    @patch('bot.STOCKFISH_TIME', 3000)
+    @patch('bot.LIMIT_STRENGTH_THRESHOLD', 1800)
+    @patch('bot.FULL_STRENGTH_THRESHOLD', 2200)
+    def test_scaled_time_for_intermediate_opponents(self):
+        """Test that intermediate opponents (1800-2199) get scaled time."""
+        from bot import calculate_move_time
+        
+        with patch('bot.DYNAMIC_STRENGTH', True):
+            # Intermediate opponents get 50-99% time with full strength
+            time_1800 = calculate_move_time(1800, 3000)  # 50%
+            time_2000 = calculate_move_time(2000, 3000)  # ~75%
+            time_2100 = calculate_move_time(2100, 3000)  # ~87%
+            
+            self.assertEqual(time_1800, 1500)  # 50%
+            self.assertGreater(time_2000, 2000)  # More than 66%
+            self.assertLess(time_2000, 2500)  # Less than 83%
+            self.assertGreater(time_2100, 2400)  # More than 80%
+            self.assertLess(time_2100, 3000)  # Less than full
+    
+    @patch('bot.STOCKFISH_TIME', 3000)
+    def test_disabled_dynamic_strength(self):
+        """Test that dynamic strength can be disabled."""
+        from bot import calculate_move_time
+        
+        with patch('bot.DYNAMIC_STRENGTH', False):
+            # Should always return base time when disabled
+            time_1500 = calculate_move_time(1500, 3000)
+            time_2500 = calculate_move_time(2500, 3000)
+            
+            self.assertEqual(time_1500, 3000)
+            self.assertEqual(time_2500, 3000)
 
 
 class TestLogging(unittest.TestCase):

@@ -71,10 +71,16 @@ Current test coverage includes:
 - ✅ Invalid move rejection
 - ✅ Game over detection (checkmate)
 
-### Stockfish Initialization Tests (3 tests)
+### Stockfish Initialization Tests (2 tests)
 - ✅ Successful initialization
-- ✅ Initialization with dynamic strength adjustment
-- ✅ ELO capping (800-2850 range)
+- ✅ UCI_LimitStrength for weak opponents (< 1800 ELO)
+- ✅ Full strength for strong opponents (≥ 1800 ELO)
+
+### Move Time Calculation Tests (4 tests)
+- ✅ Full thinking time for strong opponents (≥ 2200 ELO)
+- ✅ Minimum time for weak opponents (< 1800 ELO, UCI_LimitStrength handles fairness)
+- ✅ Scaled time for intermediate opponents (1800-2199 ELO)
+- ✅ Consistent time when dynamic strength is disabled
 
 ### Stockfish Updater Tests (3 tests)
 - ✅ Binary name detection (platform-specific)
@@ -84,7 +90,7 @@ Current test coverage includes:
 ### Logging Tests (1 test)
 - ✅ Logger configuration and handler setup
 
-**Total: 21 tests, 100% pass rate**
+**Total: 25 tests, 100% pass rate**
 
 ## Continuous Integration
 
@@ -101,7 +107,8 @@ Tests are organized in `test_bot.py` with separate test classes for different fu
 ```python
 class TestChallengeAcceptance(unittest.TestCase)    # 9 tests
 class TestBoardState(unittest.TestCase)              # 5 tests
-class TestStockfishInitialization(unittest.TestCase) # 3 tests
+class TestStockfishInitialization(unittest.TestCase) # 2 tests
+class TestMoveTimeCalculation(unittest.TestCase)     # 4 tests (HYBRID)
 class TestStockfishUpdater(unittest.TestCase)        # 3 tests
 class TestLogging(unittest.TestCase)                 # 1 test
 ```

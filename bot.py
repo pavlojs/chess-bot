@@ -22,6 +22,8 @@ from config import (
     TIME_CONTROL,
     DYNAMIC_STRENGTH,
     STRENGTH_ADVANTAGE,
+    LIMIT_STRENGTH_THRESHOLD,
+    FULL_STRENGTH_THRESHOLD,
 )
 
 from logging_config import setup_logger
@@ -106,20 +108,69 @@ def should_accept_challenge(challenge: Dict[str, Any]) -> bool:
 
 
 def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
+    """Initialize Stockfish engine with hybrid strength system.
+    
+    Hybrid approach:
+    - Weak opponents (< 1800): UCI_LimitStrength for fair games
+    - Intermediate (1800-2199): Full strength, reduced time
+    - Strong (2200+): FULL POWER
+    """
     sf = Stockfish(
         path=STOCKFISH_PATH,
         parameters=UCI_OPTIONS.copy(),
     )
-
+    
     if DYNAMIC_STRENGTH and opponent_rating:
-        elo = min(max(opponent_rating + STRENGTH_ADVANTAGE, 1320), 2850)
-        sf.update_engine_parameters({
-            "UCI_LimitStrength": True,
-            "UCI_Elo": elo,
-        })
-        logger.info(f"Stockfish strength set to {elo}")
-
+        # For weak opponents: Use UCI_LimitStrength for fair, balanced games
+        if opponent_rating < LIMIT_STRENGTH_THRESHOLD:
+            target_elo = min(max(opponent_rating + STRENGTH_ADVANTAGE, 1320), 2850)
+            sf.update_engine_parameters({
+                "UCI_LimitStrength": True,
+                "UCI_Elo": target_elo,
+            })
+            logger.info(f"Opponent {opponent_rating} ELO: Using UCI_LimitStrength = {target_elo} (fair play mode)")
+        else:
+            # For intermediate/strong opponents: Full engine strength, time-controlled
+            logger.info(f"Opponent {opponent_rating} ELO: Using full strength engine (time-controlled)")
+    
     return sf
+
+
+def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_TIME) -> int:
+    """Calculate thinking time based on opponent strength - HYBRID APPROACH.
+    
+    Strategy:
+    - Weak opponents (< 1800): Reduced time (40% min) + UCI_LimitStrength handles fairness
+    - Intermediate (1800-2199): Scaled time (50-99%) with full strength engine
+    - Strong opponents (2200+): Full time (100%) with full strength engine
+    
+    Returns:
+        Thinking time in milliseconds
+    """
+    if not DYNAMIC_STRENGTH or not opponent_rating:
+        return base_time
+    
+    # FULL POWER for strong opponents (2200+)
+    if opponent_rating >= FULL_STRENGTH_THRESHOLD:
+        logger.debug(f"Strong opponent ({opponent_rating}): FULL POWER - {base_time}ms (100%)")
+        return base_time
+    
+    # For weak opponents (< 1800): Use minimal time since UCI_LimitStrength handles fairness
+    if opponent_rating < LIMIT_STRENGTH_THRESHOLD:
+        min_time = int(base_time * 0.4)  # 40% = 1200ms (reasonable minimum)
+        logger.debug(f"Weak opponent ({opponent_rating}): {min_time}ms (40%, UCI_LimitStrength active)")
+        return min_time
+    
+    # For intermediate opponents (1800-2199): Time-based scaling with full strength
+    # Linear scaling: 1800 → 50%, 2199 → 99%
+    rating_range = FULL_STRENGTH_THRESHOLD - LIMIT_STRENGTH_THRESHOLD  # 400
+    rating_offset = opponent_rating - LIMIT_STRENGTH_THRESHOLD
+    time_percentage = 0.5 + (rating_offset / rating_range) * 0.49  # 50% to 99%
+    
+    adjusted_time = int(base_time * time_percentage)
+    logger.debug(f"Intermediate opponent ({opponent_rating}): {adjusted_time}ms ({time_percentage*100:.0f}%)")
+    
+    return adjusted_time
 
 
 # ─────────────────────────────────────────────
@@ -132,6 +183,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
     board = chess.Board()
     stockfish: Stockfish | None = None
     bot_is_white: bool | None = None
+    opponent_rating: int | None = None  # Track opponent rating for move time calculation
     last_move_count = 0  # Track number of moves processed
 
     try:
@@ -160,7 +212,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                 )
 
                 opponent = event["black"] if bot_is_white else event["white"]
-                opponent_rating = opponent.get("rating")
+                opponent_rating = opponent.get("rating")  # Store in outer scope
 
                 stockfish = init_stockfish(opponent_rating)
 
@@ -269,7 +321,10 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
             try:
                 logger.debug(f"[{game_id}] Calculating move for position: {board.fen()}")
                 stockfish.set_fen_position(board.fen())
-                move = stockfish.get_best_move_time(STOCKFISH_TIME)
+                
+                # Calculate appropriate thinking time based on opponent strength
+                move_time = calculate_move_time(opponent_rating)
+                move = stockfish.get_best_move_time(move_time)
 
                 if move:
                     client.bots.make_move(game_id, move)
