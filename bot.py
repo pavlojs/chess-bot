@@ -112,7 +112,7 @@ def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
     )
 
     if DYNAMIC_STRENGTH and opponent_rating:
-        elo = min(max(opponent_rating + STRENGTH_ADVANTAGE, 800), 2850)
+        elo = min(max(opponent_rating + STRENGTH_ADVANTAGE, 1320), 2850)
         sf.update_engine_parameters({
             "UCI_LimitStrength": True,
             "UCI_Elo": elo,

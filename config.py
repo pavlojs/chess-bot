@@ -74,7 +74,7 @@ UCI_OPTIONS: Dict[str, Any] = {
 }
 
 ACCEPT_CHALLENGES = True
-MIN_RATING = 0
+MIN_RATING = 1320
 MAX_RATING = 2800
 TIME_CONTROL = ["bullet", "blitz", "rapid", "classical"]
 
