@@ -6,7 +6,17 @@ This project includes comprehensive unit tests using pytest.
 
 ### Prerequisites
 
-Install test dependencies:
+#### Using Virtual Environment (Recommended)
+
+Setup virtual environment and install dependencies:
+```bash
+bash scripts/setup_venv.sh
+source venv/bin/activate
+```
+
+#### System-wide Installation
+
+For Docker or systems without venv restrictions:
 ```bash
 pip install -r requirements.txt
 ```
@@ -71,7 +81,7 @@ Current test coverage includes:
 - ✅ Invalid move rejection
 - ✅ Game over detection (checkmate)
 
-### Stockfish Initialization Tests (2 tests)
+### Stockfish Initialization Tests (3 tests)
 - ✅ Successful initialization
 - ✅ UCI_LimitStrength for weak opponents (< 1800 ELO)
 - ✅ Full strength for strong opponents (≥ 1800 ELO)
@@ -92,6 +102,35 @@ Current test coverage includes:
 
 **Total: 25 tests, 100% pass rate**
 
+### Network Error Handling & Retry Logic
+The bot now includes robust error handling for network issues:
+
+**Features:**
+- ✅ Exponential backoff retry logic for transient network errors
+- ✅ Automatic reconnection after stream disconnects
+- ✅ Special handling for Lichess API errors (502, 503, 504)
+- ✅ Game state preservation during reconnections
+- ✅ Graceful shutdown on persistent errors
+
+**Handled Exceptions:**
+- `ChunkedEncodingError` - Stream prematurely ended
+- `ProtocolError` - HTTP protocol violations
+- `ConnectionError` - Network connectivity issues 
+- `Timeout` - Connection timeouts
+- `ResponseError` - API errors (502, 503, 504)
+
+**Retry Parameters:**
+- Account info: 10 retries with 2s base delay
+- Event stream: Infinite retries with 10s delay
+- Game stream: Infinite retries with 5s delay
+- API errors (5xx): 15s delay before retry
+
+These improvements ensure the bot maintains stable connections even during:
+- Network instability
+- Lichess server maintenance
+- Temporary API outages
+- Internet connection issues
+
 ## Continuous Integration
 
 Run the test suite before committing:
@@ -107,7 +146,7 @@ Tests are organized in `test_bot.py` with separate test classes for different fu
 ```python
 class TestChallengeAcceptance(unittest.TestCase)    # 9 tests
 class TestBoardState(unittest.TestCase)              # 5 tests
-class TestStockfishInitialization(unittest.TestCase) # 2 tests
+class TestStockfishInitialization(unittest.TestCase) # 3 tests
 class TestMoveTimeCalculation(unittest.TestCase)     # 4 tests (HYBRID)
 class TestStockfishUpdater(unittest.TestCase)        # 3 tests
 class TestLogging(unittest.TestCase)                 # 1 test
@@ -124,7 +163,7 @@ This allows tests to run without requiring actual API credentials or engine bina
 
 ## Performance
 
-All tests complete in under 1 second.
+All tests complete in under 3 seconds (~2.5s on typical hardware).
 
 ## Future Test Improvements
 
@@ -134,3 +173,7 @@ Planned enhancements:
 - Performance benchmarking
 - Game state recovery tests
 - Error scenario testing
+- Network failure simulation tests
+- Retry logic boundary testing
+- Stream reconnection tests
+- Concurrent game handling tests

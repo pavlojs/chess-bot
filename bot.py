@@ -7,9 +7,12 @@ import threading
 import logging
 import chess
 import berserk
+import time
 
 from stockfish import Stockfish, StockfishException
 from typing import Dict, Any
+from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout, RequestException
+from urllib3.exceptions import ProtocolError
 
 from config import (
     TOKEN,
@@ -44,6 +47,58 @@ def handle_shutdown(signum, frame):
 
 signal.signal(signal.SIGINT, handle_shutdown)
 signal.signal(signal.SIGTERM, handle_shutdown)
+
+
+# ─────────────────────────────────────────────
+# RETRY LOGIC
+# ─────────────────────────────────────────────
+
+def retry_with_backoff(func, max_retries=5, base_delay=1, max_delay=60, description="Operation"):
+    """Execute a function with exponential backoff retry logic.
+    
+    Args:
+        func: Function to execute
+        max_retries: Maximum number of retry attempts
+        base_delay: Initial delay in seconds
+        max_delay: Maximum delay between retries
+        description: Description of the operation for logging
+    
+    Returns:
+        Result of the function call
+    
+    Raises:
+        Last exception if all retries fail
+    """
+    for attempt in range(max_retries):
+        if shutdown_requested:
+            raise KeyboardInterrupt("Shutdown requested")
+        
+        try:
+            return func()
+        except (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout) as e:
+            if attempt == max_retries - 1:
+                logger.error(f"{description} failed after {max_retries} attempts: {e}")
+                raise
+            
+            delay = min(base_delay * (2 ** attempt), max_delay)
+            logger.warning(f"{description} failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
+            time.sleep(delay)
+        except berserk.exceptions.ResponseError as e:
+            # Handle 502, 503, 504 errors with retry
+            if hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]:
+                if attempt == max_retries - 1:
+                    logger.error(f"{description} failed after {max_retries} attempts: {e}")
+                    raise
+                
+                delay = min(base_delay * (2 ** attempt), max_delay)
+                logger.warning(f"{description} failed with {e.response.status_code} (attempt {attempt + 1}/{max_retries}). Retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                # For other errors, don't retry
+                raise
+        except Exception as e:
+            logger.error(f"{description} failed with unexpected error: {e}")
+            raise
 
 
 # ─────────────────────────────────────────────
@@ -187,155 +242,169 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
     last_move_count = 0  # Track number of moves processed
 
     try:
-        stream = client.bots.stream_game_state(game_id)
-
-        for event in stream:
-            if shutdown_requested:
-                break
-
-            if event["type"] == "gameFull":
-                board.reset()
-
-                moves = event["state"]["moves"].split() if event["state"]["moves"] else []
-                for move in moves:
-                    board.push_uci(move)
-                
-                last_move_count = len(moves)
-
-                white_username = event["white"].get("name", event["white"].get("id", "")).lower()
-                black_username = event["black"].get("name", event["black"].get("id", "")).lower()
-                bot_is_white = (white_username == bot_username.lower())
-
-                logger.debug(
-                    f"[{game_id}] White: {white_username}, Black: {black_username}, "
-                    f"Bot: {bot_username.lower()}, Bot is white: {bot_is_white}"
-                )
-
-                opponent = event["black"] if bot_is_white else event["white"]
-                opponent_rating = opponent.get("rating")  # Store in outer scope
-
-                stockfish = init_stockfish(opponent_rating)
-
-                logger.info(
-                    f"Game {game_id}: playing as "
-                    f"{'white' if bot_is_white else 'black'} "
-                    f"vs {opponent_rating}"
-                )
-                # Don't continue here - we need to check if it's our turn
-
-            if event["type"] == "gameState":
-                moves = event["moves"].split() if event.get("moves") else []
-                current_move_count = len(moves)
-                
-                # Check if game ended (resignation, timeout, etc.)
-                status = event.get("status")
-                if status in ["mate", "resign", "stalemate", "timeout", "draw", "outoftime", "cheat", "noStart", "unknownFinish", "variantEnd"]:
-                    logger.info(f"[{game_id}] Game ended: {status}")
-                    break
-                
-                # Only process new moves
-                if current_move_count > last_move_count:
-                    new_moves = moves[last_move_count:]
-                    for move in new_moves:
-                        board.push_uci(move)
-                        logger.debug(f"[{game_id}] Applied move {move}, board turn: {board.turn}")
-                    last_move_count = current_move_count
-
-                # Handle draw offers
-                if event.get("wdraw") or event.get("bdraw"):
-                    logger.info(f"[{game_id}] Draw offer received")
-                    
-                    if stockfish:
-                        try:
-                            # Evaluate position to decide
-                            stockfish.set_fen_position(board.fen())
-                            eval_info = stockfish.get_evaluation()
-                            
-                            # Get centipawn evaluation (positive = bot winning, negative = bot losing)
-                            accept_draw = False
-                            
-                            if eval_info["type"] == "cp":
-                                evaluation = eval_info["value"]
-                                # Adjust for color (Stockfish always evaluates from white's perspective)
-                                if not bot_is_white:
-                                    evaluation = -evaluation
-                                
-                                logger.info(f"[{game_id}] Position evaluation: {evaluation} centipawns")
-                                
-                                # Accept draw only if position is close to equal (±200 centipawns)
-                                # Decline if we have advantage OR disadvantage - let the engine play it out
-                                if -200 <= evaluation <= 200:
-                                    accept_draw = True
-                                    logger.info(f"[{game_id}] Accepting draw offer (balanced position: {evaluation}cp)")
-                                elif evaluation > 200:
-                                    logger.info(f"[{game_id}] Declining draw offer (we're winning: {evaluation}cp)")
-                                else:
-                                    logger.info(f"[{game_id}] Declining draw offer (we're losing but engine can play: {evaluation}cp)")
-                            else:
-                                # If mate evaluation, always decline - let the engine play
-                                mate_value = eval_info["value"]
-                                if mate_value < 0:
-                                    logger.info(f"[{game_id}] Declining draw offer (getting mated in {abs(mate_value)}, but will fight)")
-                                else:
-                                    logger.info(f"[{game_id}] Declining draw offer (we have mate in {mate_value})")
-                            
-                            # Send decision via API
-                            try:
-                                if accept_draw:
-                                    client.bots.accept_draw(game_id)
-                                else:
-                                    client.bots.decline_draw(game_id)
-                            except Exception as api_error:
-                                logger.error(f"[{game_id}] Failed to respond to draw offer: {api_error}")
-                                
-                        except Exception as e:
-                            logger.error(f"[{game_id}] Error evaluating draw offer: {e}")
-                            # On error, decline draw and continue playing
-                            try:
-                                client.bots.decline_draw(game_id)
-                            except:
-                                pass
-
-            # After processing event, check if game is over
-            if board.is_game_over():
-                logger.info(f"Game {game_id} finished")
-                break
-
-            # Skip if game not initialized yet
-            if bot_is_white is None or stockfish is None:
-                logger.debug(f"[{game_id}] Waiting for game initialization...")
-                continue
-
-            is_my_turn = (
-                (board.turn == chess.WHITE and bot_is_white) or
-                (board.turn == chess.BLACK and not bot_is_white)
-            )
-
-            if not is_my_turn:
-                logger.debug(
-                    f"[{game_id}] Not my turn (board.turn={board.turn}, "
-                    f"bot_is_white={bot_is_white})"
-                )
-                continue
-
+        # Retry stream connection with backoff
+        while not shutdown_requested:
             try:
-                logger.debug(f"[{game_id}] Calculating move for position: {board.fen()}")
-                stockfish.set_fen_position(board.fen())
+                stream = client.bots.stream_game_state(game_id)
                 
-                # Calculate appropriate thinking time based on opponent strength
-                move_time = calculate_move_time(opponent_rating)
-                move = stockfish.get_best_move_time(move_time)
+                for event in stream:
+                    if shutdown_requested:
+                        break
 
-                if move:
-                    client.bots.make_move(game_id, move)
-                    board.push_uci(move)
-                    last_move_count += 1  # Increment move count after our move
-                    logger.info(f"[{game_id}] Played {move}")
-                else:
-                    logger.warning(f"[{game_id}] Stockfish returned no move")
+                    if event["type"] == "gameFull":
+                        board.reset()
 
-            except StockfishException as e:
-                logger.error(f"Stockfish error in game {game_id}: {e}")
+                        moves = event["state"]["moves"].split() if event["state"]["moves"] else []
+                        for move in moves:
+                            board.push_uci(move)
+                        
+                        last_move_count = len(moves)
+
+                        white_username = event["white"].get("name", event["white"].get("id", "")).lower()
+                        black_username = event["black"].get("name", event["black"].get("id", "")).lower()
+                        bot_is_white = (white_username == bot_username.lower())
+
+                        logger.debug(
+                            f"[{game_id}] White: {white_username}, Black: {black_username}, "
+                            f"Bot: {bot_username.lower()}, Bot is white: {bot_is_white}"
+                        )
+
+                        opponent = event["black"] if bot_is_white else event["white"]
+                        opponent_rating = opponent.get("rating")  # Store in outer scope
+
+                        stockfish = init_stockfish(opponent_rating)
+
+                        logger.info(
+                            f"Game {game_id}: playing as "
+                            f"{'white' if bot_is_white else 'black'} "
+                            f"vs {opponent_rating}"
+                        )
+                        # Don't continue here - we need to check if it's our turn
+
+                    if event["type"] == "gameState":
+                        moves = event["moves"].split() if event.get("moves") else []
+                        current_move_count = len(moves)
+                        
+                        # Check if game ended (resignation, timeout, etc.)
+                        status = event.get("status")
+                        if status in ["mate", "resign", "stalemate", "timeout", "draw", "outoftime", "cheat", "noStart", "unknownFinish", "variantEnd"]:
+                            logger.info(f"[{game_id}] Game ended: {status}")
+                            break
+                        
+                        # Only process new moves
+                        if current_move_count > last_move_count:
+                            new_moves = moves[last_move_count:]
+                            for move in new_moves:
+                                board.push_uci(move)
+                                logger.debug(f"[{game_id}] Applied move {move}, board turn: {board.turn}")
+                            last_move_count = current_move_count
+
+                        # Handle draw offers
+                        if event.get("wdraw") or event.get("bdraw"):
+                            logger.info(f"[{game_id}] Draw offer received")
+                            
+                            if stockfish:
+                                try:
+                                    # Evaluate position to decide
+                                    stockfish.set_fen_position(board.fen())
+                                    eval_info = stockfish.get_evaluation()
+                                    
+                                    # Get centipawn evaluation (positive = bot winning, negative = bot losing)
+                                    accept_draw = False
+                                    
+                                    if eval_info["type"] == "cp":
+                                        evaluation = eval_info["value"]
+                                        # Adjust for color (Stockfish always evaluates from white's perspective)
+                                        if not bot_is_white:
+                                            evaluation = -evaluation
+                                        
+                                        logger.info(f"[{game_id}] Position evaluation: {evaluation} centipawns")
+                                        
+                                        # Accept draw only if position is close to equal (±200 centipawns)
+                                        # Decline if we have advantage OR disadvantage - let the engine play it out
+                                        if -200 <= evaluation <= 200:
+                                            accept_draw = True
+                                            logger.info(f"[{game_id}] Accepting draw offer (balanced position: {evaluation}cp)")
+                                        elif evaluation > 200:
+                                            logger.info(f"[{game_id}] Declining draw offer (we're winning: {evaluation}cp)")
+                                        else:
+                                            logger.info(f"[{game_id}] Declining draw offer (we're losing but engine can play: {evaluation}cp)")
+                                    else:
+                                        # If mate evaluation, always decline - let the engine play
+                                        mate_value = eval_info["value"]
+                                        if mate_value < 0:
+                                            logger.info(f"[{game_id}] Declining draw offer (getting mated in {abs(mate_value)}, but will fight)")
+                                        else:
+                                            logger.info(f"[{game_id}] Declining draw offer (we have mate in {mate_value})")
+                                    
+                                    # Send decision via API
+                                    try:
+                                        if accept_draw:
+                                            client.bots.accept_draw(game_id)
+                                        else:
+                                            client.bots.decline_draw(game_id)
+                                    except Exception as api_error:
+                                        logger.error(f"[{game_id}] Failed to respond to draw offer: {api_error}")
+                                        
+                                except Exception as e:
+                                    logger.error(f"[{game_id}] Error evaluating draw offer: {e}")
+                                    # On error, decline draw and continue playing
+                                    try:
+                                        client.bots.decline_draw(game_id)
+                                    except:
+                                        pass
+
+                    # After processing event, check if game is over
+                    if board.is_game_over():
+                        logger.info(f"Game {game_id} finished")
+                        break
+
+                    # Skip if game not initialized yet
+                    if bot_is_white is None or stockfish is None:
+                        logger.debug(f"[{game_id}] Waiting for game initialization...")
+                        continue
+
+                    is_my_turn = (
+                        (board.turn == chess.WHITE and bot_is_white) or
+                        (board.turn == chess.BLACK and not bot_is_white)
+                    )
+
+                    if not is_my_turn:
+                        logger.debug(
+                            f"[{game_id}] Not my turn (board.turn={board.turn}, "
+                            f"bot_is_white={bot_is_white})"
+                        )
+                        continue
+
+                    try:
+                        logger.debug(f"[{game_id}] Calculating move for position: {board.fen()}")
+                        stockfish.set_fen_position(board.fen())
+                        
+                        # Calculate appropriate thinking time based on opponent strength
+                        move_time = calculate_move_time(opponent_rating)
+                        move = stockfish.get_best_move_time(move_time)
+
+                        if move:
+                            client.bots.make_move(game_id, move)
+                            board.push_uci(move)
+                            last_move_count += 1  # Increment move count after our move
+                            logger.info(f"[{game_id}] Played {move}")
+                        else:
+                            logger.warning(f"[{game_id}] Stockfish returned no move")
+
+                    except StockfishException as e:
+                        logger.error(f"Stockfish error in game {game_id}: {e}")
+                        break
+                
+                # If stream ends normally, exit
+                break
+                
+            except (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout) as e:
+                logger.warning(f"[{game_id}] Stream connection lost: {e}. Reconnecting in 5s...")
+                time.sleep(5)
+                continue
+            except Exception as e:
+                logger.error(f"[{game_id}] Unexpected stream error: {e}", exc_info=True)
                 break
 
     except Exception as e:
@@ -360,7 +429,13 @@ def main():
     session = berserk.TokenSession(TOKEN)
     client = berserk.Client(session)
 
-    account = client.account.get()
+    # Get account with retry logic
+    account = retry_with_backoff(
+        lambda: client.account.get(),
+        max_retries=10,
+        base_delay=2,
+        description="Get account info"
+    )
     
     is_bot = account.get("title") == "BOT"
     if not is_bot:
@@ -371,35 +446,60 @@ def main():
 
     active_games: Dict[str, threading.Thread] = {}
 
-    for event in client.bots.stream_incoming_events():
-        if shutdown_requested:
-            break
-
+    # Main event loop with automatic reconnection
+    while not shutdown_requested:
         try:
-            if event["type"] == "challenge":
-                challenge = event["challenge"]
-                cid = challenge["id"]
+            logger.info("Connecting to event stream...")
+            for event in client.bots.stream_incoming_events():
+                if shutdown_requested:
+                    break
 
-                if should_accept_challenge(challenge):
-                    client.bots.accept_challenge(cid)
-                else:
-                    client.bots.decline_challenge(cid)
+                try:
+                    if event["type"] == "challenge":
+                        challenge = event["challenge"]
+                        cid = challenge["id"]
 
-            elif event["type"] == "gameStart":
-                game_id = event["game"]["id"]
+                        if should_accept_challenge(challenge):
+                            client.bots.accept_challenge(cid)
+                        else:
+                            client.bots.decline_challenge(cid)
 
-                thread = threading.Thread(
-                    target=play_game,
-                    args=(client, game_id, bot_username),
-                    daemon=True,
-                )
-                active_games[game_id] = thread
-                thread.start()
+                    elif event["type"] == "gameStart":
+                        game_id = event["game"]["id"]
 
-                logger.info(f"Game {game_id} started")
+                        thread = threading.Thread(
+                            target=play_game,
+                            args=(client, game_id, bot_username),
+                            daemon=True,
+                        )
+                        active_games[game_id] = thread
+                        thread.start()
 
+                        logger.info(f"Game {game_id} started")
+
+                except Exception as e:
+                    logger.error(f"Event processing error: {e}", exc_info=True)
+            
+            # Stream ended normally
+            logger.info("Event stream ended")
+            break
+            
+        except (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout) as e:
+            logger.warning(f"Event stream connection lost: {e}. Reconnecting in 10s...")
+            time.sleep(10)
+            continue
+        except berserk.exceptions.ResponseError as e:
+            if hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]:
+                logger.warning(f"Lichess API error {e.response.status_code}. Reconnecting in 15s...")
+                time.sleep(15)
+                continue
+            else:
+                logger.error(f"Unrecoverable API error: {e}", exc_info=True)
+                break
         except Exception as e:
             logger.error(f"Main loop error: {e}", exc_info=True)
+            time.sleep(10)
+            continue
 
     logger.info("Shutting down bot")
 
