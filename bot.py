@@ -196,8 +196,8 @@ def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_
     
     Strategy:
     - Weak opponents (< 1800): Reduced time (40% min) + UCI_LimitStrength handles fairness
-    - Intermediate (1800-2199): Scaled time (50-99%) with full strength engine
-    - Strong opponents (2200+): Full time (100%) with full strength engine
+    - Intermediate (1800-2799): Scaled time (40-95%) with full strength engine
+    - Strong opponents (2800+): Full time (100%) with full strength engine
     
     Returns:
         Thinking time in milliseconds
@@ -205,7 +205,7 @@ def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_
     if not DYNAMIC_STRENGTH or not opponent_rating:
         return base_time
     
-    # FULL POWER for strong opponents (2200+)
+    # FULL POWER for strong opponents (2800+)
     if opponent_rating >= FULL_STRENGTH_THRESHOLD:
         logger.debug(f"Strong opponent ({opponent_rating}): FULL POWER - {base_time}ms (100%)")
         return base_time
@@ -216,11 +216,11 @@ def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_
         logger.debug(f"Weak opponent ({opponent_rating}): {min_time}ms (40%, UCI_LimitStrength active)")
         return min_time
     
-    # For intermediate opponents (1800-2199): Time-based scaling with full strength
-    # Linear scaling: 1800 → 50%, 2199 → 99%
-    rating_range = FULL_STRENGTH_THRESHOLD - LIMIT_STRENGTH_THRESHOLD  # 400
+    # For intermediate opponents (1800-2799): Time-based scaling with full strength
+    # Linear scaling: 1800 → 40%, 2799 → 95%
+    rating_range = FULL_STRENGTH_THRESHOLD - LIMIT_STRENGTH_THRESHOLD  # 1000
     rating_offset = opponent_rating - LIMIT_STRENGTH_THRESHOLD
-    time_percentage = 0.5 + (rating_offset / rating_range) * 0.49  # 50% to 99%
+    time_percentage = 0.4 + (rating_offset / rating_range) * 0.55  # 40% to 95%
     
     adjusted_time = int(base_time * time_percentage)
     logger.debug(f"Intermediate opponent ({opponent_rating}): {adjusted_time}ms ({time_percentage*100:.0f}%)")

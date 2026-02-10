@@ -303,16 +303,16 @@ class TestMoveTimeCalculation(unittest.TestCase):
         from bot import calculate_move_time
         
         with patch('bot.DYNAMIC_STRENGTH', True):
-            # Intermediate opponents get 50-99% time with full strength
-            time_1800 = calculate_move_time(1800, 3000)  # 50%
-            time_2000 = calculate_move_time(2000, 3000)  # ~75%
-            time_2100 = calculate_move_time(2100, 3000)  # ~87%
+            # Intermediate opponents get 40-95% time with full strength
+            time_1800 = calculate_move_time(1800, 3000)  # 40%
+            time_2000 = calculate_move_time(2000, 3000)  # ~67.5%
+            time_2100 = calculate_move_time(2100, 3000)  # ~81%
             
-            self.assertEqual(time_1800, 1500)  # 50%
-            self.assertGreater(time_2000, 2000)  # More than 66%
-            self.assertLess(time_2000, 2500)  # Less than 83%
-            self.assertGreater(time_2100, 2400)  # More than 80%
-            self.assertLess(time_2100, 3000)  # Less than full
+            self.assertEqual(time_1800, 1200)  # 40%
+            self.assertGreater(time_2000, 1900)  # More than 63%
+            self.assertLess(time_2000, 2100)  # Less than 70%
+            self.assertGreater(time_2100, 2300)  # More than 76%
+            self.assertLess(time_2100, 2500)  # Less than 83%
     
     @patch('bot.STOCKFISH_TIME', 3000)
     def test_disabled_dynamic_strength(self):

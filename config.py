@@ -89,8 +89,8 @@ DYNAMIC_STRENGTH = True
 # 2. Between thresholds: Full strength engine, reduced time (no blunders for intermediates)
 # 3. Above FULL_STRENGTH_THRESHOLD: MAXIMUM POWER (full time + full strength)
 
-LIMIT_STRENGTH_THRESHOLD = 1700  # Below this: UCI_LimitStrength for fair games
-FULL_STRENGTH_THRESHOLD = 2300   # At or above: FULL POWER (no compromises)
+LIMIT_STRENGTH_THRESHOLD = 1800  # Below this: UCI_LimitStrength for fair games
+FULL_STRENGTH_THRESHOLD = 2800   # At or above: FULL POWER (no compromises)
 
 # For opponents below LIMIT_STRENGTH_THRESHOLD:
 # Bot plays at opponent_rating + STRENGTH_ADVANTAGE using UCI_LimitStrength
