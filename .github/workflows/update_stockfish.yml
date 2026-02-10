@@ -45,4 +45,4 @@ jobs:
           git config --local user.name "GitHub Action"
           git add last_version.txt
           git commit -m "Update Stockfish version to $LATEST_TAG"
-          git push
+          git push origin main
