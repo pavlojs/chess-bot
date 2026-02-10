@@ -135,19 +135,20 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 
 **How the Hybrid System Works:**
 
-👶 **Beginners & Intermediates (< 1700 ELO):**
+👶 **Beginners & Intermediates (< 1800 ELO):**
 - Uses `UCI_LimitStrength` to play at opponent_rating + 100
 - Intentionally limits engine to fair playing level
 - Example: 1500-rated player faces ~1600 strength bot
 - **Result: Fair, winnable games** ✅
 
-🎯 **Advanced Players (1700-2299 ELO):**
+🎯 **Advanced Players (1800-2799 ELO):**
 - Uses **full-strength Stockfish** (no intentional mistakes)
-- Adjusts difficulty via thinking time (50-99% of base time)
-- Example: 2000-rated player faces full strength with 2250ms thinking time
+- Adjusts difficulty via thinking time (40-95% of base time)
+- Example: 2000-rated player faces full strength with 1420ms thinking time
+- Example: 2500-rated player faces full strength with 2485ms thinking time
 - **Result: Challenging but quality chess** ✅
 
-👑 **Expert & Master (2300+ ELO):**
+👑 **Elite & Super-GM (2800+ ELO):**
 - **MAXIMUM POWER**: Full strength + Full thinking time (3 seconds)
 - No handicaps, no compromises
 - Effective strength: ~3200-3500 ELO
@@ -161,8 +162,8 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 
 **Configuration options in `config.py`:**
 - `DYNAMIC_STRENGTH`: Enable/disable feature (default: `True`)
-- `LIMIT_STRENGTH_THRESHOLD`: Below this rating, use UCI_LimitStrength (default: `1700`)
-- `FULL_STRENGTH_THRESHOLD`: At or above this rating, use full power (default: `2300`)
+- `LIMIT_STRENGTH_THRESHOLD`: Below this rating, use UCI_LimitStrength (default: `1800`)
+- `FULL_STRENGTH_THRESHOLD`: At or above this rating, use full power (default: `2800`)
 - `STRENGTH_ADVANTAGE`: ELO bonus for weak opponents (default: `100`)
 - `STOCKFISH_TIME`: Base thinking time in milliseconds (default: `3000`)
 
@@ -172,10 +173,11 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 |----------------|--------|---------------|----------------------|------------|
 | **1200 ELO** | UCI_LimitStrength | 1200ms (40%) | ~1300 ELO | +100 ELO ✅ |
 | **1500 ELO** | UCI_LimitStrength | 1200ms (40%) | ~1600 ELO | +100 ELO ✅ |
-| **1700 ELO** | Time Control (50%) | 1500ms | ~1900 ELO | +200 ELO ✅ |
-| **2000 ELO** | Time Control (75%) | 2250ms | ~2400 ELO | +400 ELO ✅ |
-| **2300 ELO** | **FULL POWER** | **3000ms (100%)** | **~3200 ELO** | **+900 ELO** 🔥 |
-| **2500 ELO** | **FULL POWER** | **3000ms (100%)** | **~3400 ELO** | **+900 ELO** 🔥 |
+| **1800 ELO** | Time Control (40%) | 1200ms | ~2000 ELO | +200 ELO ✅ |
+| **2000 ELO** | Time Control (51%) | 1530ms | ~2200 ELO | +200 ELO ✅ |
+| **2500 ELO** | Time Control (79%) | 2370ms | ~2700 ELO | +200 ELO ✅ |
+| **2800 ELO** | **FULL POWER** | **3000ms (100%)** | **~3200 ELO** | **+400 ELO** 🔥 |
+| **3000 ELO** | **FULL POWER** | **3000ms (100%)** | **~3400 ELO** | **+400 ELO** 🔥 |
 
 **To customize:**
 ```python
@@ -183,7 +185,7 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 
 # Adjust thresholds
 LIMIT_STRENGTH_THRESHOLD = 1600  # Use UCI_LimitStrength below 1600
-FULL_STRENGTH_THRESHOLD = 2000   # Full power at 2000+
+FULL_STRENGTH_THRESHOLD = 2600   # Full power at 2600+
 
 # Adjust advantage for weak opponents
 STRENGTH_ADVANTAGE = 150  # Play 150 ELO above opponent
@@ -233,8 +235,8 @@ Based on the current configuration in `config.py`, the bot is configured as foll
 
 - **Difficulty**: Hybrid dynamic system - adapts method to opponent level
   - **Beginners (< 1800)**: UCI_LimitStrength at opponent+100 ELO (fair games)
-  - **Intermediates (1800-2199)**: Full strength with reduced time (challenging)
-  - **Advanced (2200+)**: **MAXIMUM POWER** - full strength + full time
+  - **Advanced (1800-2799)**: Full strength with scaled time (challenging)
+  - **Elite (2800+)**: **MAXIMUM POWER** - full strength + full time
 - **Playstyle**: 
   - Fair and balanced for learning players
   - Aggressive and precise for strong opponents
@@ -249,8 +251,8 @@ Based on the current configuration in `config.py`, the bot is configured as foll
 
 **Effective Strength by Opponent Level:**
 - **Beginners to Intermediate** (< 1800): Plays at opponent's level + 100 ELO
-- **Advanced** (1800-2199): ~2000-2400 ELO depending on rating
-- **Expert and Master** (2200+): **~3200-3500 ELO** (Super-GM level)
+- **Advanced** (1800-2799): ~2000-2900 ELO depending on rating and time scaling
+- **Elite and Super-GM** (2800+): **~3200-3500 ELO** (Maximum power)
 
 This makes the bot suitable and fair for players of all levels!
 
