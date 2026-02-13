@@ -225,6 +225,45 @@ def should_accept_challenge(challenge: Dict[str, Any]) -> bool:
     return True
 
 
+def get_game_end_reason(board: chess.Board) -> str:
+    """Get detailed reason for game ending.
+    
+    Args:
+        board: Chess board in final position
+        
+    Returns:
+        Human-readable description of game ending reason
+    """
+    if board.is_checkmate():
+        winner = "White" if board.turn == chess.BLACK else "Black"
+        return f"checkmate - {winner} wins"
+    
+    if board.is_stalemate():
+        return "draw by stalemate"
+    
+    if board.is_insufficient_material():
+        return "draw by insufficient material"
+    
+    # Check for threefold repetition
+    if board.can_claim_threefold_repetition():
+        return "draw by threefold repetition"
+    
+    # Check for fivefold repetition (automatic draw)
+    if board.is_fivefold_repetition():
+        return "draw by fivefold repetition"
+    
+    # Check for fifty-move rule
+    if board.can_claim_fifty_moves():
+        return "draw by fifty-move rule"
+    
+    # Check for seventy-five move rule (automatic draw)
+    if board.is_seventyfive_moves():
+        return "draw by seventy-five-move rule"
+    
+    # Shouldn't reach here if board.is_game_over() was True
+    return "game ended (unknown reason)"
+
+
 def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
     """Initialize Stockfish engine with hybrid strength system.
     
@@ -593,7 +632,8 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 
                     # After processing event, check if game is over
                     if board.is_game_over():
-                        logger.info(f"Game {game_id} finished")
+                        reason = get_game_end_reason(board)
+                        logger.info(f"Game {game_id} finished: {reason}")
                         break
 
                     # Skip if game not initialized yet
@@ -624,7 +664,8 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         if move:
                             # Double-check game isn't over before making move
                             if board.is_game_over():
-                                logger.info(f"[{game_id}] Game ended while calculating move")
+                                reason = get_game_end_reason(board)
+                                logger.info(f"[{game_id}] Game ended while calculating move: {reason}")
                                 break
                             
                             client.bots.make_move(game_id, move)

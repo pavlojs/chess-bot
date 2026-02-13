@@ -328,6 +328,92 @@ class TestMoveTimeCalculation(unittest.TestCase):
             self.assertEqual(time_2500, 3000)
 
 
+class TestGameEndReason(unittest.TestCase):
+    """Test game end reason detection."""
+    
+    def test_checkmate_white_wins(self):
+        """Test checkmate detection - white wins."""
+        from bot import get_game_end_reason
+        
+        # Fool's mate: 1. f3 e6 2. g4 Qh4# - Black wins
+        board = chess.Board()
+        moves = ['f2f3', 'e7e6', 'g2g4', 'd8h4']
+        for move in moves:
+            board.push_uci(move)
+        
+        reason = get_game_end_reason(board)
+        self.assertIn("checkmate", reason.lower())
+        self.assertIn("black wins", reason.lower())
+    
+    def test_stalemate(self):
+        """Test stalemate detection."""
+        from bot import get_game_end_reason
+        
+        # Create a proper stalemate position:
+        # White King on h6, White Queen on g6
+        # Black King on h8 - Black to move is stalemate
+        board = chess.Board()
+        board.clear()
+        board.set_piece_at(chess.H6, chess.Piece(chess.KING, chess.WHITE))
+        board.set_piece_at(chess.G6, chess.Piece(chess.QUEEN, chess.WHITE))
+        board.set_piece_at(chess.H8, chess.Piece(chess.KING, chess.BLACK))
+        board.turn = chess.BLACK
+        
+        # Verify it's stalemate
+        self.assertTrue(board.is_stalemate(), f"Position is not stalemate. Legal moves: {list(board.legal_moves)}")
+        
+        reason = get_game_end_reason(board)
+        self.assertEqual(reason, "draw by stalemate")
+    
+    def test_insufficient_material(self):
+        """Test insufficient material detection."""
+        from bot import get_game_end_reason
+        
+        # King vs King
+        board = chess.Board()
+        board.clear()
+        board.set_piece_at(chess.E1, chess.Piece(chess.KING, chess.WHITE))
+        board.set_piece_at(chess.E8, chess.Piece(chess.KING, chess.BLACK))
+        
+        # Verify insufficient material
+        self.assertTrue(board.is_insufficient_material())
+        
+        reason = get_game_end_reason(board)
+        self.assertEqual(reason, "draw by insufficient material")
+    
+    def test_threefold_repetition(self):
+        """Test threefold repetition detection."""
+        from bot import get_game_end_reason
+        
+        board = chess.Board()
+        
+        # Repeat moves 3 times to trigger threefold repetition
+        # White knight moves: Nf3-g1-f3-g1-f3-g1
+        moves = ['g1f3', 'g8f6', 'f3g1', 'f6g8', 
+                 'g1f3', 'g8f6', 'f3g1', 'f6g8',
+                 'g1f3', 'g8f6', 'f3g1', 'f6g8']
+        
+        for move in moves:
+            board.push_uci(move)
+        
+        # Should be able to claim threefold repetition
+        if board.can_claim_threefold_repetition():
+            reason = get_game_end_reason(board)
+            self.assertIn("threefold repetition", reason.lower())
+    
+    def test_fifty_move_rule(self):
+        """Test fifty-move rule detection."""
+        from bot import get_game_end_reason
+        
+        board = chess.Board()
+        # Manually set halfmove clock to 100 (50 moves by each side)
+        board.halfmove_clock = 100
+        
+        if board.can_claim_fifty_moves():
+            reason = get_game_end_reason(board)
+            self.assertIn("fifty-move rule", reason.lower())
+
+
 class TestLogging(unittest.TestCase):
     """Test logging configuration."""
     
