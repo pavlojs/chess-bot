@@ -31,6 +31,7 @@ The bot automatically adjusts its strength to match your rating for competitive 
 3. Get a Lichess API token from https://lichess.org/account/oauth/token with board:play and bot:play scopes.
 4. Set environment variable: `export TOKEN="your_lichess_token"`
 5. Run the bot: `python bot.py`
+6. To stop the bot gracefully: Press `Ctrl+C` (once for clean shutdown, twice for immediate exit)
 
 **Stockfish Auto-Update**: The bot automatically downloads and installs the latest Stockfish from GitHub on first run (same method as Docker build). This ensures you're always using the newest version.
 
@@ -195,6 +196,68 @@ STOCKFISH_TIME = 5000  # 5 seconds (very strong)
 
 # Or disable dynamic strength for consistent maximum strength
 DYNAMIC_STRENGTH = False
+```
+
+### Automatic Bot Challenging
+
+The bot can automatically challenge other bots on Lichess when it has no active games. This feature **runs in a separate background thread** and operates independently of the main event stream.
+
+**How it works:**
+- ✅ Runs in background thread - doesn't block event processing
+- ✅ Automatically challenges online bots when idle (no active games)
+- ✅ Respects rate limits (max 3 challenges per hour by default)
+- ✅ Only challenges bots within specified ELO range (1500-2900 by default)
+- ✅ Uses variety of time controls (blitz, rapid, and classical)
+- ✅ Also accepts challenges from other bots and human players (if user logs into bot account)
+- ✅ Handles declined/canceled challenges gracefully
+- ✅ Distinguishes between incoming and outgoing challenges automatically
+
+**Configuration options in `config.py`:**
+- `ENABLE_AUTO_CHALLENGE`: Enable/disable auto-challenge feature (default: `True`)
+- `MAX_CHALLENGES_PER_HOUR`: Maximum challenges to send per hour (default: `3`)
+- `CHALLENGE_MIN_RATING`: Minimum ELO to challenge (default: `1500`)
+- `CHALLENGE_MAX_RATING`: Maximum ELO to challenge (default: `2900`)
+- `CHALLENGE_CHECK_INTERVAL`: How often to check for challenging (default: `300` seconds = 5 minutes)
+- `CHALLENGE_TIME_CONTROLS`: List of time controls to use when challenging
+
+**Environment variables** (can be set in `.env` file):
+```bash
+ENABLE_AUTO_CHALLENGE=true
+MAX_CHALLENGES_PER_HOUR=3
+CHALLENGE_MIN_RATING=1500
+CHALLENGE_MAX_RATING=2900
+CHALLENGE_CHECK_INTERVAL=300
+```
+
+**To customize time controls:**
+```python
+# In config.py
+CHALLENGE_TIME_CONTROLS = [
+    {"limit": 180, "increment": 0},   # 3+0 blitz
+    {"limit": 300, "increment": 3},   # 5+3 blitz
+    {"limit": 600, "increment": 5},   # 10+5 rapid
+    {"limit": 900, "increment": 10},  # 15+10 classical
+    {"limit": 1800, "increment": 0},  # 30+0 classical
+]
+```
+
+**Features:**
+- 🤖 **Handles manual invitations**: If you log into the bot account on Lichess and manually invite a bot to play, the bot will accept it (if within rating/time control criteria)
+- 🎯 **Smart targeting**: Only challenges bots within your specified ELO range
+- ⏱️ **Rate limiting**: Respects Lichess API limits with configurable hourly cap
+- 🎲 **Variety**: Randomly selects bots and time controls for diverse games
+- 🔄 **Auto-retry**: Periodically checks for new opponents when idle
+- 📝 **Decline handling**: Logs when challenges are declined or canceled by opponents
+
+**To disable auto-challenging:**
+```python
+# In config.py
+ENABLE_AUTO_CHALLENGE = False
+```
+
+Or set environment variable:
+```bash
+export ENABLE_AUTO_CHALLENGE=false
 ```
 
 ### Supported Time Controls

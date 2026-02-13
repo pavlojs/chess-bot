@@ -95,3 +95,33 @@ FULL_STRENGTH_THRESHOLD = 2800   # At or above: FULL POWER (no compromises)
 # For opponents below LIMIT_STRENGTH_THRESHOLD:
 # Bot plays at opponent_rating + STRENGTH_ADVANTAGE using UCI_LimitStrength
 STRENGTH_ADVANTAGE = 100  # ELO advantage for weak opponents (e.g., 1500 → bot plays 1600)
+
+# ─────────────────────────────────────────────
+# CHALLENGE CONFIGURATION
+# ─────────────────────────────────────────────
+
+# Enable automatic challenging of other bots
+ENABLE_AUTO_CHALLENGE = os.getenv("ENABLE_AUTO_CHALLENGE", "true").lower() in ("true", "1", "yes")
+
+# Maximum number of games to challenge per hour
+MAX_CHALLENGES_PER_HOUR = int(os.getenv("MAX_CHALLENGES_PER_HOUR", "3"))
+
+# ELO limits for challenging bots
+CHALLENGE_MIN_RATING = int(os.getenv("CHALLENGE_MIN_RATING", "1500"))
+CHALLENGE_MAX_RATING = int(os.getenv("CHALLENGE_MAX_RATING", "2900"))
+
+# Time controls to use when challenging (random selection)
+CHALLENGE_TIME_CONTROLS = [
+    {"limit": 180, "increment": 0},   # 3+0 blitz
+    {"limit": 180, "increment": 2},   # 3+2 blitz
+    {"limit": 300, "increment": 0},   # 5+0 blitz
+    {"limit": 300, "increment": 3},   # 5+3 blitz
+    {"limit": 600, "increment": 0},   # 10+0 rapid
+    {"limit": 600, "increment": 5},   # 10+5 rapid
+    {"limit": 900, "increment": 10},  # 15+10 classical
+    {"limit": 1200, "increment": 10}, # 20+10 classical
+    {"limit": 1800, "increment": 0},  # 30+0 classical
+]
+
+# Challenge check interval (seconds) - how often to check if we should challenge
+CHALLENGE_CHECK_INTERVAL = int(os.getenv("CHALLENGE_CHECK_INTERVAL", "300"))  # 5 minutes

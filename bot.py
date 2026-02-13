@@ -3,14 +3,18 @@ Axiom Chess Bot – stable BOT API architecture using Berserk and Stockfish
 """
 
 import signal
+import sys
 import threading
 import logging
 import chess
 import berserk
 import time
+import random
+from collections import deque
+from datetime import datetime, timedelta
 
 from stockfish import Stockfish, StockfishException
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout, RequestException
 from urllib3.exceptions import ProtocolError
 
@@ -27,6 +31,12 @@ from config import (
     STRENGTH_ADVANTAGE,
     LIMIT_STRENGTH_THRESHOLD,
     FULL_STRENGTH_THRESHOLD,
+    ENABLE_AUTO_CHALLENGE,
+    MAX_CHALLENGES_PER_HOUR,
+    CHALLENGE_MIN_RATING,
+    CHALLENGE_MAX_RATING,
+    CHALLENGE_TIME_CONTROLS,
+    CHALLENGE_CHECK_INTERVAL,
 )
 
 from logging_config import setup_logger
@@ -36,13 +46,65 @@ shutdown_requested = False
 
 
 # ─────────────────────────────────────────────
+# CHALLENGE TRACKER
+# ─────────────────────────────────────────────
+
+class ChallengeTracker:
+    """Track challenges sent to enforce rate limits."""
+    
+    def __init__(self, max_per_hour: int = MAX_CHALLENGES_PER_HOUR):
+        self.max_per_hour = max_per_hour
+        self.challenge_times: deque = deque()
+        self.lock = threading.Lock()
+    
+    def can_challenge(self) -> bool:
+        """Check if we can send another challenge within the hourly limit."""
+        with self.lock:
+            now = datetime.now()
+            # Remove challenges older than 1 hour
+            while self.challenge_times and self.challenge_times[0] < now - timedelta(hours=1):
+                self.challenge_times.popleft()
+            
+            return len(self.challenge_times) < self.max_per_hour
+    
+    def record_challenge(self):
+        """Record a new challenge."""
+        with self.lock:
+            self.challenge_times.append(datetime.now())
+    
+    def get_remaining_challenges(self) -> int:
+        """Get number of challenges remaining in current hour."""
+        with self.lock:
+            now = datetime.now()
+            # Remove old challenges
+            while self.challenge_times and self.challenge_times[0] < now - timedelta(hours=1):
+                self.challenge_times.popleft()
+            
+            return max(0, self.max_per_hour - len(self.challenge_times))
+
+
+# ─────────────────────────────────────────────
 # SIGNAL HANDLING
 # ─────────────────────────────────────────────
 
 def handle_shutdown(signum, frame):
     global shutdown_requested
+    if shutdown_requested:
+        # Second signal - force exit immediately
+        logger.warning("Force shutdown!")
+        sys.exit(1)
+    
     shutdown_requested = True
-    logger.warning("Shutdown signal received")
+    logger.warning("Shutdown signal received, waiting for cleanup (press Ctrl+C again to force)")
+    
+    # Give threads a moment to finish, then exit
+    def delayed_exit():
+        time.sleep(2)
+        if shutdown_requested:
+            logger.info("Forcing shutdown after timeout")
+            sys.exit(0)
+    
+    threading.Thread(target=delayed_exit, daemon=True).start()
 
 
 signal.signal(signal.SIGINT, handle_shutdown)
@@ -226,6 +288,180 @@ def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_
     logger.debug(f"Intermediate opponent ({opponent_rating}): {adjusted_time}ms ({time_percentage*100:.0f}%)")
     
     return adjusted_time
+
+
+# ─────────────────────────────────────────────
+# CHALLENGE FUNCTIONS
+# ─────────────────────────────────────────────
+
+def get_online_bots(client: berserk.Client, limit: int = 100) -> List[Dict[str, Any]]:
+    """Get list of online bots from Lichess.
+    
+    Args:
+        client: Berserk client instance
+        limit: Maximum number of bots to retrieve
+    
+    Returns:
+        List of bot dictionaries with user information
+    """
+    try:
+        # Use berserk's built-in method to get online bots
+        online_bots = []
+        
+        try:
+            # client.bots.get_online_bots returns an iterator
+            for bot_data in client.bots.get_online_bots(limit=limit):
+                online_bots.append(bot_data)
+                
+                if len(online_bots) >= limit:
+                    break
+                    
+        except Exception as e:
+            logger.warning(f"Failed to fetch online bots: {e}")
+            return []
+        
+        logger.debug(f"Retrieved {len(online_bots)} online bots")
+        return online_bots
+        
+    except Exception as e:
+        logger.error(f"Error getting online bots: {e}")
+        return []
+
+
+def filter_suitable_bots(bots: List[Dict[str, Any]], min_rating: int, max_rating: int, 
+                         bot_username: str) -> List[Dict[str, Any]]:
+    """Filter bots by rating criteria.
+    
+    Args:
+        bots: List of bot dictionaries
+        min_rating: Minimum rating threshold
+        max_rating: Maximum rating threshold
+        bot_username: Our bot's username (to exclude self)
+    
+    Returns:
+        Filtered list of suitable bots
+    """
+    suitable = []
+    
+    for bot in bots:
+        username = bot.get("username", "").lower()
+        
+        # Skip self
+        if username == bot_username.lower():
+            continue
+        
+        # Get perfs (performance ratings)
+        perfs = bot.get("perfs", {})
+        
+        # Check if bot has any rating in acceptable range
+        has_suitable_rating = False
+        for time_control in ["blitz", "rapid", "bullet", "classical"]:
+            if time_control in perfs:
+                rating = perfs[time_control].get("rating", 0)
+                if min_rating <= rating <= max_rating:
+                    has_suitable_rating = True
+                    break
+        
+        if has_suitable_rating:
+            suitable.append(bot)
+    
+    return suitable
+
+
+def challenge_bot(client: berserk.Client, opponent_username: str, 
+                  time_control: Dict[str, int], color: str = "random") -> bool:
+    """Challenge a bot to a game.
+    
+    Args:
+        client: Berserk client instance
+        opponent_username: Username of the bot to challenge
+        time_control: Dictionary with 'limit' and 'increment' keys (in seconds)
+        color: Color preference ("white", "black", or "random")
+    
+    Returns:
+        True if challenge was sent successfully, False otherwise
+    """
+    try:
+        # Use berserk to create a challenge
+        challenge = client.challenges.create(
+            opponent_username,
+            rated=True,
+            clock_limit=time_control["limit"],
+            clock_increment=time_control["increment"],
+            color=color,
+            variant="standard",
+        )
+        
+        logger.info(
+            f"Challenged {opponent_username} to {time_control['limit']}+{time_control['increment']} game"
+        )
+        return True
+    except berserk.exceptions.ResponseError as e:
+        logger.warning(f"Failed to challenge {opponent_username}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Error challenging {opponent_username}: {e}")
+        return False
+
+
+def try_challenge_random_bot(client: berserk.Client, bot_username: str, 
+                             tracker: ChallengeTracker) -> bool:
+    """Attempt to challenge a random suitable bot.
+    
+    Args:
+        client: Berserk client instance
+        bot_username: Our bot's username
+        tracker: Challenge tracker to enforce rate limits
+    
+    Returns:
+        True if challenge was sent, False otherwise
+    """
+    if not ENABLE_AUTO_CHALLENGE:
+        return False
+    
+    if not tracker.can_challenge():
+        remaining = tracker.get_remaining_challenges()
+        logger.debug(f"Challenge limit reached. Remaining this hour: {remaining}")
+        return False
+    
+    # Get online bots
+    logger.debug("Fetching online bots...")
+    online_bots = get_online_bots(client, limit=100)
+    
+    if not online_bots:
+        logger.debug("No online bots found")
+        return False
+    
+    # Filter by rating
+    suitable_bots = filter_suitable_bots(
+        online_bots, 
+        CHALLENGE_MIN_RATING, 
+        CHALLENGE_MAX_RATING, 
+        bot_username
+    )
+    
+    if not suitable_bots:
+        logger.debug(
+            f"No suitable bots found (rating range: {CHALLENGE_MIN_RATING}-{CHALLENGE_MAX_RATING})"
+        )
+        return False
+    
+    # Select random bot and time control
+    target_bot = random.choice(suitable_bots)
+    time_control = random.choice(CHALLENGE_TIME_CONTROLS)
+    
+    # Send challenge
+    success = challenge_bot(
+        client, 
+        target_bot["username"], 
+        time_control,
+        color="random"
+    )
+    
+    if success:
+        tracker.record_challenge()
+    
+    return success
 
 
 # ─────────────────────────────────────────────
@@ -425,6 +661,38 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 # MAIN LOOP
 # ─────────────────────────────────────────────
 
+def challenge_loop(client: berserk.Client, bot_username: str, 
+                  active_games: Dict[str, threading.Thread],
+                  challenge_tracker: ChallengeTracker):
+    """Background thread that periodically challenges other bots."""
+    logger.info("Challenge loop started")
+    
+    while not shutdown_requested:
+        try:
+            time.sleep(CHALLENGE_CHECK_INTERVAL)
+            
+            if shutdown_requested:
+                break
+            
+            if not ENABLE_AUTO_CHALLENGE:
+                continue
+            
+            # Count active games (threads that are still alive)
+            active_count = sum(1 for t in active_games.values() if t.is_alive())
+            
+            if active_count == 0:
+                logger.info("No active games, attempting to challenge a bot...")
+                try_challenge_random_bot(client, bot_username, challenge_tracker)
+            else:
+                logger.debug(f"Skipping challenge check: {active_count} active game(s)")
+                
+        except Exception as e:
+            logger.error(f"Challenge loop error: {e}", exc_info=True)
+            time.sleep(10)
+    
+    logger.info("Challenge loop stopped")
+
+
 def main():
     session = berserk.TokenSession(TOKEN)
     client = berserk.Client(session)
@@ -445,6 +713,16 @@ def main():
     logger.info("Bot account verified: %s", bot_username)
 
     active_games: Dict[str, threading.Thread] = {}
+    challenge_tracker = ChallengeTracker(MAX_CHALLENGES_PER_HOUR)
+    
+    # Start challenge loop in background thread
+    challenge_thread = threading.Thread(
+        target=challenge_loop,
+        args=(client, bot_username, active_games, challenge_tracker),
+        daemon=True
+    )
+    challenge_thread.start()
+    logger.info("Background challenge thread started")
 
     # Main event loop with automatic reconnection
     while not shutdown_requested:
@@ -458,11 +736,45 @@ def main():
                     if event["type"] == "challenge":
                         challenge = event["challenge"]
                         cid = challenge["id"]
-
-                        if should_accept_challenge(challenge):
-                            client.bots.accept_challenge(cid)
+                        
+                        # Check if this is an incoming challenge (destUser is us)
+                        dest_user = challenge.get("destUser", {})
+                        challenger = challenge.get("challenger", {})
+                        
+                        dest_username = dest_user.get("name", dest_user.get("id", "")).lower()
+                        challenger_username = challenger.get("name", challenger.get("id", "")).lower()
+                        
+                        # Only process incoming challenges (where we are the destination)
+                        if dest_username == bot_username.lower():
+                            if should_accept_challenge(challenge):
+                                try:
+                                    client.bots.accept_challenge(cid)
+                                except berserk.exceptions.ResponseError as e:
+                                    if "404" in str(e):
+                                        logger.debug(f"Challenge {cid} no longer exists")
+                                    else:
+                                        logger.warning(f"Failed to accept challenge: {e}")
+                            else:
+                                try:
+                                    client.bots.decline_challenge(cid)
+                                except berserk.exceptions.ResponseError as e:
+                                    if "404" in str(e):
+                                        logger.debug(f"Challenge {cid} no longer exists")
+                                    else:
+                                        logger.warning(f"Failed to decline challenge: {e}")
                         else:
-                            client.bots.decline_challenge(cid)
+                            # Outgoing challenge - just log it
+                            logger.debug(f"Outgoing challenge to {dest_username}: {cid}")
+                    
+                    elif event["type"] == "challengeDeclined":
+                        challenge = event.get("challenge", {})
+                        decliner = challenge.get("destUser", {}).get("name", "Unknown")
+                        logger.info(f"Challenge declined by {decliner}")
+                    
+                    elif event["type"] == "challengeCanceled":
+                        challenge = event.get("challenge", {})
+                        challenger = challenge.get("challenger", {}).get("name", "Unknown")
+                        logger.info(f"Challenge canceled by {challenger}")
 
                     elif event["type"] == "gameStart":
                         game_id = event["game"]["id"]
@@ -476,6 +788,14 @@ def main():
                         thread.start()
 
                         logger.info(f"Game {game_id} started")
+                    
+                    elif event["type"] == "gameFinish":
+                        game_id = event["game"]["id"]
+                        if game_id in active_games:
+                            # Clean up finished game thread
+                            active_games[game_id].join(timeout=1)
+                            del active_games[game_id]
+                            logger.info(f"Game {game_id} finished and cleaned up")
 
                 except Exception as e:
                     logger.error(f"Event processing error: {e}", exc_info=True)

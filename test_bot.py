@@ -342,6 +342,67 @@ class TestLogging(unittest.TestCase):
         self.assertTrue(len(logger.handlers) > 0)
 
 
+class TestChallengeTracker(unittest.TestCase):
+    """Test challenge tracker functionality."""
+    
+    def test_initial_state(self):
+        """Test that tracker starts with no challenges."""
+        from bot import ChallengeTracker
+        
+        tracker = ChallengeTracker(max_per_hour=3)
+        self.assertTrue(tracker.can_challenge())
+        self.assertEqual(tracker.get_remaining_challenges(), 3)
+    
+    def test_record_challenge(self):
+        """Test recording challenges."""
+        from bot import ChallengeTracker
+        
+        tracker = ChallengeTracker(max_per_hour=3)
+        
+        tracker.record_challenge()
+        self.assertEqual(tracker.get_remaining_challenges(), 2)
+        
+        tracker.record_challenge()
+        self.assertEqual(tracker.get_remaining_challenges(), 1)
+        
+        tracker.record_challenge()
+        self.assertEqual(tracker.get_remaining_challenges(), 0)
+        self.assertFalse(tracker.can_challenge())
+    
+    def test_hourly_reset(self):
+        """Test that challenges older than 1 hour are removed."""
+        from bot import ChallengeTracker
+        from datetime import datetime, timedelta
+        
+        tracker = ChallengeTracker(max_per_hour=3)
+        
+        # Manually add old challenge
+        old_time = datetime.now() - timedelta(hours=2)
+        tracker.challenge_times.append(old_time)
+        
+        # Should still have capacity
+        self.assertTrue(tracker.can_challenge())
+        self.assertEqual(tracker.get_remaining_challenges(), 3)
+    
+    def test_filter_suitable_bots(self):
+        """Test filtering bots by rating."""
+        from bot import filter_suitable_bots
+        
+        bots = [
+            {"username": "bot1", "perfs": {"blitz": {"rating": 1400}}},  # Too low
+            {"username": "bot2", "perfs": {"blitz": {"rating": 1600}}},  # Good
+            {"username": "bot3", "perfs": {"blitz": {"rating": 2500}}},  # Good
+            {"username": "bot4", "perfs": {"blitz": {"rating": 3000}}},  # Too high
+            {"username": "TestBot", "perfs": {"blitz": {"rating": 2000}}},  # Self (should be excluded)
+        ]
+        
+        suitable = filter_suitable_bots(bots, 1500, 2900, "TestBot")
+        
+        self.assertEqual(len(suitable), 2)
+        self.assertEqual(suitable[0]["username"], "bot2")
+        self.assertEqual(suitable[1]["username"], "bot3")
+
+
 class TestStockfishUpdater(unittest.TestCase):
     """Test Stockfish auto-updater functionality."""
     
