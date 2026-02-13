@@ -8,6 +8,7 @@ import threading
 import logging
 import chess
 import berserk
+from berserk.exceptions import ResponseError
 import time
 import random
 from collections import deque
@@ -621,6 +622,11 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         move = stockfish.get_best_move_time(move_time)
 
                         if move:
+                            # Double-check game isn't over before making move
+                            if board.is_game_over():
+                                logger.info(f"[{game_id}] Game ended while calculating move")
+                                break
+                            
                             client.bots.make_move(game_id, move)
                             board.push_uci(move)
                             last_move_count += 1  # Increment move count after our move
@@ -628,6 +634,15 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         else:
                             logger.warning(f"[{game_id}] Stockfish returned no move")
 
+                    except ResponseError as e:
+                        # Handle "game already over" errors gracefully (race condition)
+                        error_msg = str(e).lower()
+                        if "not your turn" in error_msg or "game already over" in error_msg:
+                            logger.info(f"[{game_id}] Game ended while making move (race condition)")
+                            break
+                        else:
+                            logger.error(f"[{game_id}] API error: {e}")
+                            break
                     except StockfishException as e:
                         logger.error(f"Stockfish error in game {game_id}: {e}")
                         break
