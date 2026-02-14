@@ -414,6 +414,20 @@ class TestGameEndReason(unittest.TestCase):
             self.assertIn("fifty-move rule", reason.lower())
 
 
+class TestErrorHandling(unittest.TestCase):
+    """Test error handling in game play."""
+    
+    def test_api_error_import(self):
+        """Test that ApiError can be imported from berserk.exceptions."""
+        from berserk.exceptions import ApiError
+        self.assertIsNotNone(ApiError)
+    
+    def test_response_error_import(self):
+        """Test that ResponseError can be imported from berserk.exceptions."""
+        from berserk.exceptions import ResponseError
+        self.assertIsNotNone(ResponseError)
+
+
 class TestLogging(unittest.TestCase):
     """Test logging configuration."""
     

@@ -8,7 +8,7 @@ import threading
 import logging
 import chess
 import berserk
-from berserk.exceptions import ResponseError
+from berserk.exceptions import ResponseError, ApiError
 import time
 import random
 from collections import deque
@@ -675,6 +675,15 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         else:
                             logger.warning(f"[{game_id}] Stockfish returned no move")
 
+                    except ApiError as e:
+                        # Handle network/connection errors during move submission
+                        error_str = str(e).lower()
+                        if "connection" in error_str or "remote" in error_str:
+                            logger.warning(f"[{game_id}] Network error while making move: {e}")
+                            logger.info(f"[{game_id}] Game interrupted due to connection issues")
+                        else:
+                            logger.error(f"[{game_id}] API error while making move: {e}")
+                        break
                     except ResponseError as e:
                         # Handle "game already over" errors gracefully (race condition)
                         error_msg = str(e).lower()
