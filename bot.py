@@ -615,10 +615,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                     
                                     # Send decision via API
                                     try:
-                                        if accept_draw:
-                                            client.bots.accept_draw(game_id)
-                                        else:
-                                            client.bots.decline_draw(game_id)
+                                        client.board.handle_draw_offer(game_id, accept=accept_draw)
                                     except Exception as api_error:
                                         logger.error(f"[{game_id}] Failed to respond to draw offer: {api_error}")
                                         
@@ -626,7 +623,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                     logger.error(f"[{game_id}] Error evaluating draw offer: {e}")
                                     # On error, decline draw and continue playing
                                     try:
-                                        client.bots.decline_draw(game_id)
+                                        client.board.handle_draw_offer(game_id, accept=False)
                                     except:
                                         pass
 
