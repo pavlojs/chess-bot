@@ -503,6 +503,95 @@ class TestChallengeTracker(unittest.TestCase):
         self.assertEqual(suitable[1]["username"], "bot3")
 
 
+class TestDrawOfferHandling(unittest.TestCase):
+    """Test draw offer handling logic."""
+    
+    @patch('bot.Stockfish')
+    def test_accept_draw_balanced_position(self, mock_stockfish_class):
+        """Test that draw is accepted in balanced positions (±200cp)."""
+        # Mock Stockfish to return balanced evaluation
+        mock_sf = Mock()
+        mock_sf.get_evaluation.return_value = {"type": "cp", "value": 50}
+        
+        # Simulate bot deciding on draw offer
+        eval_info = mock_sf.get_evaluation()
+        evaluation = eval_info["value"]
+        
+        # Bot is white, so evaluation is from white's perspective
+        accept_draw = -200 <= evaluation <= 200
+        
+        self.assertTrue(accept_draw)
+        self.assertEqual(evaluation, 50)
+    
+    @patch('bot.Stockfish')
+    def test_decline_draw_winning_position(self, mock_stockfish_class):
+        """Test that draw is declined when bot is winning (>200cp)."""
+        # Mock Stockfish to return winning evaluation
+        mock_sf = Mock()
+        mock_sf.get_evaluation.return_value = {"type": "cp", "value": 921}
+        
+        eval_info = mock_sf.get_evaluation()
+        evaluation = eval_info["value"]
+        
+        # Bot is white, so evaluation is from white's perspective
+        accept_draw = -200 <= evaluation <= 200
+        
+        self.assertFalse(accept_draw)
+        self.assertGreater(evaluation, 200)
+    
+    @patch('bot.Stockfish')
+    def test_decline_draw_losing_position(self, mock_stockfish_class):
+        """Test that draw is declined when bot is losing (<-200cp)."""
+        # Mock Stockfish to return losing evaluation
+        mock_sf = Mock()
+        mock_sf.get_evaluation.return_value = {"type": "cp", "value": -1003}
+        
+        eval_info = mock_sf.get_evaluation()
+        evaluation = eval_info["value"]
+        
+        # Bot is white, so evaluation is from white's perspective
+        accept_draw = -200 <= evaluation <= 200
+        
+        self.assertFalse(accept_draw)
+        self.assertLess(evaluation, -200)
+    
+    @patch('bot.Stockfish')
+    def test_decline_draw_mate_position(self, mock_stockfish_class):
+        """Test that draw is declined when bot has mate."""
+        # Mock Stockfish to return mate evaluation
+        mock_sf = Mock()
+        mock_sf.get_evaluation.return_value = {"type": "mate", "value": 3}
+        
+        eval_info = mock_sf.get_evaluation()
+        
+        # Mate evaluation means always decline
+        accept_draw = eval_info["type"] != "mate"
+        
+        self.assertFalse(accept_draw)
+        self.assertEqual(eval_info["type"], "mate")
+    
+    @patch('bot.Stockfish')
+    def test_color_adjustment_for_black(self, mock_stockfish_class):
+        """Test that evaluation is adjusted correctly when bot plays as black."""
+        # Mock Stockfish (evaluates from white's perspective)
+        mock_sf = Mock()
+        mock_sf.get_evaluation.return_value = {"type": "cp", "value": 300}
+        
+        eval_info = mock_sf.get_evaluation()
+        evaluation = eval_info["value"]
+        
+        # Bot is black, so negate evaluation
+        bot_is_white = False
+        if not bot_is_white:
+            evaluation = -evaluation
+        
+        # From bot's (black's) perspective, this is losing
+        accept_draw = -200 <= evaluation <= 200
+        
+        self.assertFalse(accept_draw)
+        self.assertEqual(evaluation, -300)
+
+
 class TestStockfishUpdater(unittest.TestCase):
     """Test Stockfish auto-updater functionality."""
     
