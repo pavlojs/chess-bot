@@ -668,15 +668,36 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 logger.info(f"[{game_id}] Game ended while calculating move: {reason}")
                                 break
                             
-                            client.bots.make_move(game_id, move)
-                            board.push_uci(move)
-                            last_move_count += 1  # Increment move count after our move
-                            logger.info(f"[{game_id}] Played {move}")
+                            # Retry mechanism for network errors during move submission
+                            max_retries = 3
+                            retry_delay = 2
+                            
+                            for attempt in range(max_retries):
+                                try:
+                                    client.bots.make_move(game_id, move)
+                                    board.push_uci(move)
+                                    last_move_count += 1  # Increment move count after our move
+                                    logger.info(f"[{game_id}] Played {move}")
+                                    break  # Success - exit retry loop
+                                except (ConnectionError, Timeout, ChunkedEncodingError, ProtocolError, RequestException) as net_err:
+                                    if attempt < max_retries - 1:
+                                        logger.warning(f"[{game_id}] Network error while making move (attempt {attempt + 1}/{max_retries}): {net_err}")
+                                        time.sleep(retry_delay)
+                                        retry_delay *= 2  # Exponential backoff
+                                    else:
+                                        logger.error(f"[{game_id}] Failed to make move after {max_retries} attempts: {net_err}")
+                                        logger.info(f"[{game_id}] Game interrupted due to persistent connection issues")
+                                        raise  # Re-raise to trigger outer exception handler
                         else:
                             logger.warning(f"[{game_id}] Stockfish returned no move")
 
+                    except (ConnectionError, Timeout, ChunkedEncodingError, ProtocolError, RequestException) as e:
+                        # Network errors that couldn't be resolved after retries
+                        logger.warning(f"[{game_id}] Network error while making move: {e}")
+                        logger.info(f"[{game_id}] Game interrupted due to connection issues")
+                        break
                     except ApiError as e:
-                        # Handle network/connection errors during move submission
+                        # Handle API-specific errors
                         error_str = str(e).lower()
                         if "connection" in error_str or "remote" in error_str:
                             logger.warning(f"[{game_id}] Network error while making move: {e}")
