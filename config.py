@@ -112,6 +112,9 @@ CHALLENGE_MAX_RATING = int(os.getenv("CHALLENGE_MAX_RATING", "2900"))
 
 # Time controls to use when challenging (random selection)
 CHALLENGE_TIME_CONTROLS = [
+    {"limit": 60, "increment": 0},    # 1+0 bullet
+    {"limit": 60, "increment": 1},    # 1+1 bullet
+    {"limit": 120, "increment": 1},   # 2+1 bullet
     {"limit": 180, "increment": 0},   # 3+0 blitz
     {"limit": 180, "increment": 2},   # 3+2 blitz
     {"limit": 300, "increment": 0},   # 5+0 blitz
