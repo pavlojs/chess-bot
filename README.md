@@ -233,6 +233,9 @@ CHALLENGE_CHECK_INTERVAL=300
 ```python
 # In config.py
 CHALLENGE_TIME_CONTROLS = [
+    {"limit": 60, "increment": 0},    # 1+0 bullet (NEW!)
+    {"limit": 60, "increment": 1},    # 1+1 bullet (NEW!)
+    {"limit": 120, "increment": 1},   # 2+1 bullet (NEW!)
     {"limit": 180, "increment": 0},   # 3+0 blitz
     {"limit": 300, "increment": 3},   # 5+3 blitz
     {"limit": 600, "increment": 5},   # 10+5 rapid
@@ -264,10 +267,19 @@ export ENABLE_AUTO_CHALLENGE=false
 
 The bot supports all major real-time Lichess time control modes:
 
-- **Bullet**: Ultra-fast games (typically < 3 minutes total)
+- **Bullet**: ⚡ Ultra-fast games (typically < 3 minutes total) - **NEW!**
 - **Blitz**: Fast games (typically 3-8 minutes total)
 - **Rapid**: Medium-paced games (typically 10-25 minutes total)
 - **Classical**: Slow games (typically 30+ minutes per side)
+
+**NEW: Intelligent Time Management** ⏱️
+
+The bot now features advanced time management to prevent losses on time:
+- 🚨 **Emergency Mode (≤20s)**: Fast, high-quality moves (minimum 300ms)
+- ⚠️ **Moderate Pressure (20-60s)**: Conservative time usage (minimum 500ms)
+- ✅ **Normal Play (>60s)**: Standard opponent-based calculation
+
+This allows the bot to play bullet games professionally while maintaining playing strength!
 
 **Automatically rejected:**
 - ❌ **Correspondence**: Games with days per move (limit ≥ 259200 seconds)
@@ -278,6 +290,7 @@ You can customize which real-time time controls the bot accepts by editing `TIME
 ```python
 TIME_CONTROL = ["classical"]  # Only accept classical games
 TIME_CONTROL = ["blitz", "rapid"]  # Accept blitz and rapid only
+TIME_CONTROL = ["bullet", "blitz"]  # Fast games only
 TIME_CONTROL = ["blitz", "rapid", "classical"]  # Accept all (default)
 ```
 

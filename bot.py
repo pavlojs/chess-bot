@@ -293,39 +293,70 @@ def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
     return sf
 
 
-def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_TIME) -> int:
-    """Calculate thinking time based on opponent strength - HYBRID APPROACH.
+def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_TIME, 
+                       bot_time_remaining: int | None = None, increment: int = 0) -> int:
+    """Calculate thinking time based on opponent strength and remaining time.
     
     Strategy:
     - Weak opponents (< 1800): Reduced time (40% min) + UCI_LimitStrength handles fairness
     - Intermediate (1800-2799): Scaled time (40-95%) with full strength engine
     - Strong opponents (2800+): Full time (100%) with full strength engine
+    - Critical time (<= 20s): Fast moves to avoid time loss while maintaining strength
+    
+    Args:
+        opponent_rating: Opponent's rating for strength adjustment
+        base_time: Base thinking time in milliseconds
+        bot_time_remaining: Bot's remaining time in milliseconds
+        increment: Increment per move in milliseconds
     
     Returns:
         Thinking time in milliseconds
     """
+    # Start with opponent-based time calculation
     if not DYNAMIC_STRENGTH or not opponent_rating:
-        return base_time
-    
-    # FULL POWER for strong opponents (2800+)
-    if opponent_rating >= FULL_STRENGTH_THRESHOLD:
+        adjusted_time = base_time
+    elif opponent_rating >= FULL_STRENGTH_THRESHOLD:
+        # FULL POWER for strong opponents (2800+)
+        adjusted_time = base_time
         logger.debug(f"Strong opponent ({opponent_rating}): FULL POWER - {base_time}ms (100%)")
-        return base_time
+    elif opponent_rating < LIMIT_STRENGTH_THRESHOLD:
+        # For weak opponents (< 1800): Use minimal time since UCI_LimitStrength handles fairness
+        adjusted_time = int(base_time * 0.4)  # 40% = 1200ms (reasonable minimum)
+        logger.debug(f"Weak opponent ({opponent_rating}): {adjusted_time}ms (40%, UCI_LimitStrength active)")
+    else:
+        # For intermediate opponents (1800-2799): Time-based scaling with full strength
+        # Linear scaling: 1800 → 40%, 2799 → 95%
+        rating_range = FULL_STRENGTH_THRESHOLD - LIMIT_STRENGTH_THRESHOLD  # 1000
+        rating_offset = opponent_rating - LIMIT_STRENGTH_THRESHOLD
+        time_percentage = 0.4 + (rating_offset / rating_range) * 0.55  # 40% to 95%
+        
+        adjusted_time = int(base_time * time_percentage)
+        logger.debug(f"Intermediate opponent ({opponent_rating}): {adjusted_time}ms ({time_percentage*100:.0f}%)")
     
-    # For weak opponents (< 1800): Use minimal time since UCI_LimitStrength handles fairness
-    if opponent_rating < LIMIT_STRENGTH_THRESHOLD:
-        min_time = int(base_time * 0.4)  # 40% = 1200ms (reasonable minimum)
-        logger.debug(f"Weak opponent ({opponent_rating}): {min_time}ms (40%, UCI_LimitStrength active)")
-        return min_time
-    
-    # For intermediate opponents (1800-2799): Time-based scaling with full strength
-    # Linear scaling: 1800 → 40%, 2799 → 95%
-    rating_range = FULL_STRENGTH_THRESHOLD - LIMIT_STRENGTH_THRESHOLD  # 1000
-    rating_offset = opponent_rating - LIMIT_STRENGTH_THRESHOLD
-    time_percentage = 0.4 + (rating_offset / rating_range) * 0.55  # 40% to 95%
-    
-    adjusted_time = int(base_time * time_percentage)
-    logger.debug(f"Intermediate opponent ({opponent_rating}): {adjusted_time}ms ({time_percentage*100:.0f}%)")
+    # Apply time pressure adjustment if we're running low on time
+    if bot_time_remaining is not None:
+        time_remaining_seconds = bot_time_remaining / 1000.0
+        
+        # Critical time threshold: 20 seconds or less
+        if time_remaining_seconds <= 20:
+            # In critical time, use very fast moves to avoid timeout
+            # But ensure we maintain reasonable quality by not going below 300ms
+            # Calculate based on remaining moves (estimate ~20 moves to go)
+            estimated_moves_remaining = 20
+            time_per_move = max(300, (bot_time_remaining + increment * estimated_moves_remaining) / estimated_moves_remaining)
+            
+            # Take the minimum of adjusted_time and emergency time
+            move_time = min(adjusted_time, int(time_per_move * 0.6))  # Use 60% of available time
+            logger.info(f"TIME PRESSURE! Remaining: {time_remaining_seconds:.1f}s, using {move_time}ms (emergency mode)")
+            return max(300, move_time)  # Never go below 300ms for move quality
+        
+        # Moderate time pressure: 20-60 seconds
+        elif time_remaining_seconds <= 60:
+            # Start being more conservative with time
+            time_factor = time_remaining_seconds / 60.0  # 33%-100% scaling
+            move_time = int(adjusted_time * time_factor)
+            logger.debug(f"Moderate time pressure: {time_remaining_seconds:.1f}s, adjusted to {move_time}ms")
+            return max(500, move_time)  # Minimum 500ms in moderate pressure
     
     return adjusted_time
 
@@ -516,6 +547,8 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
     bot_is_white: bool | None = None
     opponent_rating: int | None = None  # Track opponent rating for move time calculation
     last_move_count = 0  # Track number of moves processed
+    bot_time_remaining: int | None = None  # Track bot's remaining time in milliseconds
+    increment: int = 0  # Time increment per move in milliseconds
 
     try:
         # Retry stream connection with backoff
@@ -547,6 +580,11 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 
                         opponent = event["black"] if bot_is_white else event["white"]
                         opponent_rating = opponent.get("rating")  # Store in outer scope
+                        
+                        # Extract time information from game state
+                        state = event.get("state", {})
+                        bot_time_remaining = state.get("wtime" if bot_is_white else "btime")
+                        increment = state.get("winc" if bot_is_white else "binc", 0)
 
                         stockfish = init_stockfish(opponent_rating)
 
@@ -560,6 +598,12 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                     if event["type"] == "gameState":
                         moves = event["moves"].split() if event.get("moves") else []
                         current_move_count = len(moves)
+                        
+                        # Update bot's remaining time
+                        if bot_is_white is not None:
+                            bot_time_remaining = event.get("wtime" if bot_is_white else "btime")
+                            if increment == 0:  # Only update increment if not set
+                                increment = event.get("winc" if bot_is_white else "binc", 0)
                         
                         # Check if game ended (resignation, timeout, etc.)
                         status = event.get("status")
@@ -654,8 +698,9 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         logger.debug(f"[{game_id}] Calculating move for position: {board.fen()}")
                         stockfish.set_fen_position(board.fen())
                         
-                        # Calculate appropriate thinking time based on opponent strength
-                        move_time = calculate_move_time(opponent_rating)
+                        # Calculate appropriate thinking time based on opponent strength and remaining time
+                        move_time = calculate_move_time(opponent_rating, STOCKFISH_TIME, 
+                                                       bot_time_remaining, increment)
                         move = stockfish.get_best_move_time(move_time)
 
                         if move:
