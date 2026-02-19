@@ -408,26 +408,73 @@ def _parse_pv_from_info(info_line: str, depth: int) -> tuple[str, str]:
     return eval_str, pv_display
 
 
-def get_move_prediction(stockfish: Stockfish, game_id: str, move_time_ms: int,
-                        prediction_depth: int = PREDICTION_DEPTH) -> Optional[str]:
-    """Search for the best move with a precise time budget and log the predicted continuation.
-    
-    Uses a single time-bounded search (go movetime) — the most reliable approach for
-    time management. The PV is extracted for free from the last info line already
-    produced by that search, so no second engine call is needed.
-    
+def _get_best_move_with_clocks(stockfish: Stockfish, wtime: int, btime: int,
+                                winc: int = 0, binc: int = 0) -> Optional[str]:
+    """Send go wtime/btime/winc/binc so Stockfish manages time natively.
+
+    The library's get_best_move(wtime, btime) omits winc/binc, so we use the
+    same internal two-step pattern (_put → _get_best_move_from_sf_popen_process)
+    that all library search methods use internally.
+    """
+    stockfish._put(f"go wtime {wtime} btime {btime} winc {winc} binc {binc}")
+    return stockfish._get_best_move_from_sf_popen_process()
+
+
+def _extract_cp_from_info(info_line: str) -> Optional[int]:
+    """Extract raw centipawn evaluation from a Stockfish info line.
+
+    Converts mate scores to ±30000 so comparisons with cp thresholds
+    work uniformly without special-casing the caller.
+
+    Returns:
+        cp value from white's perspective, or None if unavailable.
+    """
+    try:
+        if ' score cp ' in info_line:
+            return int(info_line.split(' score cp ')[1].split()[0])
+        if ' score mate ' in info_line:
+            mate = int(info_line.split(' score mate ')[1].split()[0])
+            return 30000 if mate > 0 else -30000
+    except (IndexError, ValueError):
+        pass
+    return None
+
+
+def get_move_prediction(stockfish: Stockfish, game_id: str,
+                         move_time_ms: int | None = None,
+                         wtime: int | None = None, btime: int | None = None,
+                         winc: int = 0, binc: int = 0,
+                         prediction_depth: int = PREDICTION_DEPTH) -> Optional[str]:
+    """Search for the best move and log the predicted continuation (PV).
+
+    Two search modes:
+    - movetime: supply move_time_ms for a fixed per-move budget
+      (weak opponents / no clock data).
+    - native clocks: supply wtime/btime/winc/binc so Stockfish manages its own
+      time. Stockfish\'s internal algorithm accounts for game phase, position
+      complexity, and increment — far superior to any manual formula.
+
+    The PV is extracted at zero cost from the info line already stored after the
+    search, so no second engine call is involved.
+
     Args:
         stockfish: Initialized Stockfish instance (position already set)
         game_id: Game ID for logging
-        move_time_ms: Exact time budget for this move in milliseconds
-        prediction_depth: Number of PV moves to display in the log
-    
+        move_time_ms: Fixed time budget in ms (movetime mode)
+        wtime: White\'s remaining clock in ms (native clock mode)
+        btime: Black\'s remaining clock in ms (native clock mode)
+        winc: White\'s increment in ms
+        binc: Black\'s increment in ms
+        prediction_depth: Number of PV half-moves to display in log
+
     Returns:
         Best move in UCI notation (e.g. "e2e4"), or None if search fails
     """
     try:
-        # Single time-precise search
-        move = stockfish.get_best_move_time(move_time_ms)
+        if move_time_ms is not None:
+            move = stockfish.get_best_move_time(move_time_ms)
+        else:
+            move = _get_best_move_with_clocks(stockfish, wtime, btime, winc, binc)
         
         if not move:
             return None
@@ -444,22 +491,20 @@ def get_move_prediction(stockfish: Stockfish, game_id: str, move_time_ms: int,
         return None
 
 
-def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_TIME, 
-                       bot_time_remaining: int | None = None, increment: int = 0) -> int:
-    """Calculate thinking time based on opponent strength and remaining time.
-    
+def calculate_move_time(opponent_rating: int | None,
+                        base_time: int = STOCKFISH_TIME) -> int:
+    """Calculate movetime budget based on opponent strength.
+
+    Used only in movetime mode: weak opponents (UCI_LimitStrength active) or as a
+    fallback when the game has no clock data. For all other opponents the caller
+    should use native clock management (_get_best_move_with_clocks) so Stockfish
+    handles time pressure, game phase, and increment itself.
+
     Strategy:
-    - Weak opponents (< 1800): Reduced time (40% min) + UCI_LimitStrength handles fairness
-    - Intermediate (1800-2799): Scaled time (40-95%) with full strength engine
-    - Strong opponents (2800+): Full time (100%) with full strength engine
-    - Critical time (<= 20s): Fast moves to avoid time loss while maintaining strength
-    
-    Args:
-        opponent_rating: Opponent's rating for strength adjustment
-        base_time: Base thinking time in milliseconds
-        bot_time_remaining: Bot's remaining time in milliseconds
-        increment: Increment per move in milliseconds
-    
+    - Weak opponents (< 1800): 40 % of base_time — UCI_LimitStrength handles fairness
+    - Intermediate (1800–2799): 40–95 % linear scaling, full-strength engine
+    - Strong opponents (2800+): 100 % of base_time
+
     Returns:
         Thinking time in milliseconds
     """
@@ -484,38 +529,6 @@ def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_
         adjusted_time = int(base_time * time_percentage)
         logger.debug(f"Intermediate opponent ({opponent_rating}): {adjusted_time}ms ({time_percentage*100:.0f}%)")
     
-    # Apply time pressure adjustment if we're running low on time
-    if bot_time_remaining is not None:
-        # Parse time value — handles timedelta strings from Lichess API
-        # (game loop stores parsed ints, but this guards any direct callers)
-        bot_time_remaining = parse_time_to_milliseconds(bot_time_remaining)
-        if bot_time_remaining is None:
-            logger.debug("Could not parse bot_time_remaining, using default time")
-            return adjusted_time
-        
-        time_remaining_seconds = bot_time_remaining / 1000.0
-        
-        # Critical time threshold: 20 seconds or less
-        if time_remaining_seconds <= 20:
-            # In critical time, use very fast moves to avoid timeout
-            # But ensure we maintain reasonable quality by not going below 300ms
-            # Calculate based on remaining moves (estimate ~20 moves to go)
-            estimated_moves_remaining = 20
-            time_per_move = max(300, (bot_time_remaining + increment * estimated_moves_remaining) / estimated_moves_remaining)
-            
-            # Take the minimum of adjusted_time and emergency time
-            move_time = min(adjusted_time, int(time_per_move * 0.6))  # Use 60% of available time
-            logger.info(f"TIME PRESSURE! Remaining: {time_remaining_seconds:.1f}s, using {move_time}ms (emergency mode)")
-            return max(300, move_time)  # Never go below 300ms for move quality
-        
-        # Moderate time pressure: 20-60 seconds
-        elif time_remaining_seconds <= 60:
-            # Start being more conservative with time
-            time_factor = time_remaining_seconds / 60.0  # 33%-100% scaling
-            move_time = int(adjusted_time * time_factor)
-            logger.debug(f"Moderate time pressure: {time_remaining_seconds:.1f}s, adjusted to {move_time}ms")
-            return max(500, move_time)  # Minimum 500ms in moderate pressure
-    
     return adjusted_time
 
 
@@ -533,28 +546,19 @@ def get_online_bots(client: berserk.Client, limit: int = 100) -> List[Dict[str, 
     Returns:
         List of bot dictionaries with user information
     """
+    online_bots = []
     try:
-        # Use berserk's built-in method to get online bots
-        online_bots = []
-        
-        try:
-            # client.bots.get_online_bots returns an iterator
-            for bot_data in client.bots.get_online_bots(limit=limit):
-                online_bots.append(bot_data)
-                
-                if len(online_bots) >= limit:
-                    break
-                    
-        except Exception as e:
-            logger.warning(f"Failed to fetch online bots: {e}")
-            return []
-        
-        logger.debug(f"Retrieved {len(online_bots)} online bots")
-        return online_bots
-        
+        # client.bots.get_online_bots returns an iterator
+        for bot_data in client.bots.get_online_bots(limit=limit):
+            online_bots.append(bot_data)
+            if len(online_bots) >= limit:
+                break
     except Exception as e:
-        logger.error(f"Error getting online bots: {e}")
+        logger.warning(f"Failed to fetch online bots: {e}")
         return []
+
+    logger.debug(f"Retrieved {len(online_bots)} online bots")
+    return online_bots
 
 
 def filter_suitable_bots(bots: List[Dict[str, Any]], min_rating: int, max_rating: int, 
@@ -705,8 +709,11 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
     bot_is_white: bool | None = None
     opponent_rating: int | None = None  # Track opponent rating for move time calculation
     last_move_count = 0  # Track number of moves processed
-    bot_time_remaining: int | None = None  # Track bot's remaining time in milliseconds
-    increment: int = 0  # Time increment per move in milliseconds
+    wtime_ms: int | None = None  # White's remaining clock in milliseconds
+    btime_ms: int | None = None  # Black's remaining clock in milliseconds
+    winc_ms: int = 0             # White's increment per move in milliseconds
+    binc_ms: int = 0             # Black's increment per move in milliseconds
+    last_eval_cp: int | None = None  # Cached eval from last move search (white's perspective)
 
     try:
         # Retry stream connection with backoff
@@ -739,21 +746,12 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         opponent = event["black"] if bot_is_white else event["white"]
                         opponent_rating = opponent.get("rating")  # Store in outer scope
                         
-                        # Extract time information from game state
+                        # Extract clock information from initial game state
                         state = event.get("state", {})
-                        raw_time = state.get("wtime" if bot_is_white else "btime")
-                        raw_inc = state.get("winc" if bot_is_white else "binc", 0)
-                        
-                        # Parse time values (handles multiple formats)
-                        bot_time_remaining = parse_time_to_milliseconds(raw_time)
-                        if bot_time_remaining is None and raw_time is not None:
-                            logger.warning(f"[{game_id}] Could not parse bot_time_remaining: {raw_time}")
-                        
-                        increment = parse_time_to_milliseconds(raw_inc)
-                        if increment is None:
-                            increment = 0
-                            if raw_inc not in (0, None, ""):
-                                logger.warning(f"[{game_id}] Could not parse increment: {raw_inc}")
+                        wtime_ms = parse_time_to_milliseconds(state.get("wtime")) or 0
+                        btime_ms = parse_time_to_milliseconds(state.get("btime")) or 0
+                        winc_ms  = parse_time_to_milliseconds(state.get("winc", 0)) or 0
+                        binc_ms  = parse_time_to_milliseconds(state.get("binc", 0)) or 0
 
                         stockfish = init_stockfish(opponent_rating)
 
@@ -768,20 +766,10 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         moves = event["moves"].split() if event.get("moves") else []
                         current_move_count = len(moves)
                         
-                        # Update bot's remaining time
+                        # Refresh both clocks on every state update
                         if bot_is_white is not None:
-                            raw_time = event.get("wtime" if bot_is_white else "btime")
-                            bot_time_remaining = parse_time_to_milliseconds(raw_time)
-                            if bot_time_remaining is None and raw_time is not None:
-                                logger.debug(f"[{game_id}] Could not parse time update: {raw_time}")
-                            
-                            if increment == 0:  # Only update increment if not set
-                                raw_inc = event.get("winc" if bot_is_white else "binc", 0)
-                                new_increment = parse_time_to_milliseconds(raw_inc)
-                                if new_increment is not None:
-                                    increment = new_increment
-                                elif raw_inc not in (0, None, ""):
-                                    logger.debug(f"[{game_id}] Could not parse increment update: {raw_inc}")
+                            wtime_ms = parse_time_to_milliseconds(event.get("wtime")) or wtime_ms
+                            btime_ms = parse_time_to_milliseconds(event.get("btime")) or btime_ms
                         
                         # Check if game ended (resignation, timeout, etc.)
                         status = event.get("status")
@@ -803,44 +791,46 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             
                             if stockfish:
                                 try:
-                                    # Evaluate position to decide
-                                    stockfish.set_fen_position(board.fen())
-                                    eval_info = stockfish.get_evaluation()
-                                    
-                                    # Get centipawn evaluation (positive = bot winning, negative = bot losing)
                                     accept_draw = False
-                                    
-                                    if eval_info["type"] == "cp":
-                                        evaluation = eval_info["value"]
-                                        # Adjust for color (Stockfish always evaluates from white's perspective)
-                                        if not bot_is_white:
-                                            evaluation = -evaluation
-                                        
-                                        logger.info(f"[{game_id}] Position evaluation: {evaluation} centipawns")
-                                        
-                                        # Accept draw only if position is close to equal (±200 centipawns)
-                                        # Decline if we have advantage OR disadvantage - let the engine play it out
-                                        if -200 <= evaluation <= 200:
-                                            accept_draw = True
-                                            logger.info(f"[{game_id}] Accepting draw offer (balanced position: {evaluation}cp)")
-                                        elif evaluation > 200:
-                                            logger.info(f"[{game_id}] Declining draw offer (we're winning: {evaluation}cp)")
-                                        else:
-                                            logger.info(f"[{game_id}] Declining draw offer (we're losing but engine can play: {evaluation}cp)")
+
+                                    # Reuse the eval cached from the last move search — no extra engine
+                                    # call needed. Fall back to get_evaluation() only at game start.
+                                    if last_eval_cp is not None:
+                                        # last_eval_cp is from white's perspective; flip for black bot
+                                        evaluation = last_eval_cp if bot_is_white else -last_eval_cp
                                     else:
-                                        # If mate evaluation, always decline - let the engine play
-                                        mate_value = eval_info["value"]
-                                        if mate_value < 0:
-                                            logger.info(f"[{game_id}] Declining draw offer (getting mated in {abs(mate_value)}, but will fight)")
+                                        # First few moves or no cache yet — quick explicit evaluation
+                                        stockfish.set_fen_position(board.fen())
+                                        eval_info = stockfish.get_evaluation()
+                                        if eval_info["type"] == "cp":
+                                            raw_cp = eval_info["value"]
                                         else:
-                                            logger.info(f"[{game_id}] Declining draw offer (we have mate in {mate_value})")
-                                    
+                                            mate = eval_info["value"]
+                                            raw_cp = 30000 if mate > 0 else -30000
+                                        evaluation = raw_cp if bot_is_white else -raw_cp
+
+                                    logger.info(f"[{game_id}] Position evaluation: {evaluation} centipawns")
+
+                                    if abs(evaluation) >= 29000:
+                                        # Mate evaluation — always decline
+                                        if evaluation > 0:
+                                            logger.info(f"[{game_id}] Declining draw offer (we have mate)")
+                                        else:
+                                            logger.info(f"[{game_id}] Declining draw offer (getting mated, but will fight)")
+                                    elif -200 <= evaluation <= 200:
+                                        accept_draw = True
+                                        logger.info(f"[{game_id}] Accepting draw offer (balanced position: {evaluation}cp)")
+                                    elif evaluation > 200:
+                                        logger.info(f"[{game_id}] Declining draw offer (we're winning: {evaluation}cp)")
+                                    else:
+                                        logger.info(f"[{game_id}] Declining draw offer (we're losing but engine can play: {evaluation}cp)")
+
                                     # Send decision via API
                                     try:
                                         client.board.handle_draw_offer(game_id, accept=accept_draw)
                                     except Exception as api_error:
                                         logger.error(f"[{game_id}] Failed to respond to draw offer: {api_error}")
-                                        
+
                                 except Exception as e:
                                     logger.error(f"[{game_id}] Error evaluating draw offer: {e}")
                                     # On error, decline draw and continue playing
@@ -875,19 +865,59 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                     try:
                         logger.debug(f"[{game_id}] Calculating move for position: {board.fen()}")
                         stockfish.set_fen_position(board.fen())
-                        
-                        # Calculate appropriate thinking time based on opponent strength and remaining time
-                        move_time = calculate_move_time(opponent_rating, STOCKFISH_TIME, 
-                                                       bot_time_remaining, increment)
-                        
-                        # Use prediction (single engine call) when enabled, else fall back to timed search
-                        if ENABLE_MOVE_PREDICTION:
-                            move = get_move_prediction(stockfish, game_id, move_time, PREDICTION_DEPTH)
-                            if not move:
-                                logger.debug(f"[{game_id}] Prediction failed, falling back to timed search")
+
+                        # Weak opponents: fixed movetime budget (UCI_LimitStrength active, intentional cap)
+                        # All others:     hand real clocks to Stockfish — native time management is far
+                        #                 superior to any manual formula (handles phase, complexity, increment)
+                        use_weak_mode = (
+                            DYNAMIC_STRENGTH
+                            and opponent_rating is not None
+                            and opponent_rating < LIMIT_STRENGTH_THRESHOLD
+                        )
+
+                        if use_weak_mode:
+                            move_time = calculate_move_time(opponent_rating, STOCKFISH_TIME)
+                            if ENABLE_MOVE_PREDICTION:
+                                move = get_move_prediction(
+                                    stockfish, game_id,
+                                    move_time_ms=move_time,
+                                    prediction_depth=PREDICTION_DEPTH,
+                                )
+                                if not move:
+                                    move = stockfish.get_best_move_time(move_time)
+                            else:
                                 move = stockfish.get_best_move_time(move_time)
+                            logger.debug(f"[{game_id}] Movetime mode: {move_time}ms (weak opponent)")
+
+                        elif wtime_ms and btime_ms:
+                            if ENABLE_MOVE_PREDICTION:
+                                move = get_move_prediction(
+                                    stockfish, game_id,
+                                    wtime=wtime_ms, btime=btime_ms,
+                                    winc=winc_ms, binc=binc_ms,
+                                    prediction_depth=PREDICTION_DEPTH,
+                                )
+                                if not move:
+                                    move = _get_best_move_with_clocks(
+                                        stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
+                                    )
+                            else:
+                                move = _get_best_move_with_clocks(
+                                    stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
+                                )
+                            logger.debug(
+                                f"[{game_id}] Native clock mode — "
+                                f"w:{wtime_ms}ms b:{btime_ms}ms inc:{winc_ms}/{binc_ms}ms"
+                            )
+
                         else:
+                            # No clock data — fall back to base movetime
+                            move_time = calculate_move_time(opponent_rating, STOCKFISH_TIME)
                             move = stockfish.get_best_move_time(move_time)
+                            logger.debug(f"[{game_id}] No clock data, movetime fallback: {move_time}ms")
+
+                        # Cache eval for draw offer decisions — free from the search info line above
+                        last_eval_cp = _extract_cp_from_info(stockfish.info())
 
                         if move:
                             # Double-check game isn't over before making move

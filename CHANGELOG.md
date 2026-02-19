@@ -2,6 +2,55 @@
 
 All notable changes to Axiom Chess Bot are documented in this file.
 
+## [2.3.1] - 2026-02-19
+
+### Performance
+
+#### ⚡ Replace Manual Time Pressure with Native Stockfish Clock Management
+- **Removed**: Manual "emergency" (≤20 s) and "moderate" (20–60 s) time-pressure branches
+  from `calculate_move_time` — both had fundamental flaws:
+  - Moderate branch used `remaining_seconds / 60` as a scaling factor, completely
+    ignoring increment; with 30 s remaining on a 3+2 game the bot has ~90 s of
+    effective budget but the formula gave only 50 % of `adjusted_time`
+  - Emergency branch hardcoded `estimated_moves_remaining = 20` regardless of
+    actual game phase (at move 50 of an endgame there may be only 5 moves left)
+- **Added**: `_get_best_move_with_clocks(wtime, btime, winc, binc)` helper that sends
+  the full UCI `go wtime … btime … winc … binc …` command — the same command all
+  chess GUIs use. Stockfish's internal time manager accounts for position complexity,
+  game phase, and increment far better than any manual heuristic
+- **Changed**: `calculate_move_time` now returns only the opponent-strength-based
+  movetime cap (used exclusively for weak opponents where `UCI_LimitStrength` is active)
+- **Changed**: `get_move_prediction` extended with `wtime/btime/winc/binc` keyword
+  arguments — selects movetime or native-clock search based on which args are supplied
+- **Changed**: `play_game` now tracks `wtime_ms`, `btime_ms`, `winc_ms`, `binc_ms`
+  (parsed for both sides) instead of a single `bot_time_remaining`/`increment` pair
+- **Logic**: weak opponent (`< 1800`) → `go movetime` with strength cap;
+  normal/strong opponent → `go wtime btime winc binc` (Stockfish manages everything);
+  no clock data → `go movetime` fallback
+
+## [2.3.0] - 2026-02-19
+
+### Performance
+
+#### ⚡ Zero-cost Draw Offer Evaluation
+- **Removed**: `stockfish.get_evaluation()` (extra depth-13 engine search) from the draw offer handler
+- **Added**: `_extract_cp_from_info()` helper — extracts centipawn or mate score from the
+  Stockfish info line that was already produced by the move search
+- **Added**: `last_eval_cp` cached in `play_game()` immediately after each move calculation
+- **Result**: Draw offer evaluation is now free — zero extra engine calls per draw offer;
+  the cached value is valid because it already accounts for the opponent's best response (PV)
+- **Fallback**: `get_evaluation()` is still called on the very first move if no cache exists yet
+
+#### ⚡ Eliminate Redundant `set_fen_position` Call
+- **Removed**: `stockfish.set_fen_position(board.fen())` from the draw handler (was followed
+  by another identical call in the move calculation block on the same turn)
+- **Result**: Saves one full position-load roundtrip to the Stockfish process per draw offer
+
+#### 🧹 Remove Dead Code in `get_online_bots`
+- **Removed**: Outer `try/except` wrapping that was unreachable dead code — the inner
+  `try/except` already caught and returned before the outer handler could ever fire
+- **Result**: Cleaner control flow, single clear error path
+
 ## [2.2.1] - 2026-02-19
 
 ### Bug Fixes
