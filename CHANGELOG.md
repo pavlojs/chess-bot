@@ -8,13 +8,18 @@ All notable changes to Axiom Chess Bot are documented in this file.
 
 #### 🐛 Time Management Type Error Fix
 - **Fixed**: TypeError when comparing bot_time_remaining with integers
-- **Fixed**: Proper type conversion for time values from Lichess API
-- **Added**: Validation and error handling for wtime/btime/winc/binc values
+- **Fixed**: Proper parsing of timedelta strings from Lichess API (e.g., `"0:08:44.640000"`)
+- **Added**: Robust `parse_time_to_milliseconds()` function supporting multiple formats:
+  - Integers (milliseconds)
+  - Floats (milliseconds)
+  - String integers ("120000")
+  - Timedelta strings ("0:08:44.640000")
+  - Timedelta objects
 - **Improved**: Graceful fallback when time data is invalid or malformed
 
-**Issue:** Bot would crash with `TypeError: '<=' not supported between instances of 'datetime.timedelta' and 'int'` during time pressure calculations.
+**Issue:** Bot would crash with `TypeError: '<=' not supported between instances of 'datetime.timedelta' and 'int'` during time pressure calculations. Lichess API sometimes sends time values as timedelta-formatted strings instead of integers.
 
-**Solution:** Added explicit type conversion to `int()` with try-except blocks for all time-related values extracted from game events.
+**Solution:** Created comprehensive time parsing function that handles all formats the Lichess API might send, with proper error handling and logging for debugging.
 
 ## [2.2.0] - 2026-02-18
 

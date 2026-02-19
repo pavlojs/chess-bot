@@ -115,6 +115,91 @@ signal.signal(signal.SIGTERM, handle_shutdown)
 
 
 # ─────────────────────────────────────────────
+# TIME PARSING UTILITIES
+# ─────────────────────────────────────────────
+
+def parse_time_to_milliseconds(time_value: Any) -> Optional[int]:
+    """Parse time value from various formats to milliseconds.
+    
+    Handles multiple input formats from Lichess API:
+    - Integers: Already in milliseconds
+    - Floats: Milliseconds as float
+    - String integers: "120000" -> 120000
+    - Timedelta strings: "0:08:44.640000" -> 524640 (8m 44.64s in ms)
+    - Timedelta objects: Direct conversion
+    
+    Args:
+        time_value: Time value in various formats
+    
+    Returns:
+        Time in milliseconds as integer, or None if parsing fails
+    """
+    if time_value is None:
+        return None
+    
+    # Already an integer (milliseconds)
+    if isinstance(time_value, int):
+        return time_value
+    
+    # Float (milliseconds)
+    if isinstance(time_value, float):
+        return int(time_value)
+    
+    # Timedelta object
+    if isinstance(time_value, timedelta):
+        return int(time_value.total_seconds() * 1000)
+    
+    # String - try multiple parsing strategies
+    if isinstance(time_value, str):
+        # Try direct integer conversion
+        try:
+            return int(time_value)
+        except ValueError:
+            pass
+        
+        # Try parsing as timedelta string format "H:MM:SS.ffffff"
+        try:
+            # Remove any whitespace
+            time_str = time_value.strip()
+            
+            # Parse format like "0:08:44.640000" or "0:08:44"
+            parts = time_str.split(':')
+            if len(parts) >= 2:
+                hours = int(parts[0])
+                minutes = int(parts[1])
+                
+                # Handle seconds (may have microseconds)
+                if len(parts) >= 3:
+                    seconds_part = parts[2]
+                    if '.' in seconds_part:
+                        sec, microsec = seconds_part.split('.')
+                        seconds = int(sec)
+                        # Pad microseconds to 6 digits if needed
+                        microsec = microsec.ljust(6, '0')[:6]
+                        microseconds = int(microsec)
+                    else:
+                        seconds = int(seconds_part)
+                        microseconds = 0
+                else:
+                    seconds = 0
+                    microseconds = 0
+                
+                # Convert to milliseconds
+                total_ms = (
+                    hours * 3600 * 1000 +
+                    minutes * 60 * 1000 +
+                    seconds * 1000 +
+                    microseconds // 1000
+                )
+                return total_ms
+        except (ValueError, IndexError, AttributeError):
+            pass
+    
+    # If all parsing attempts fail, return None
+    return None
+
+
+# ─────────────────────────────────────────────
 # RETRY LOGIC
 # ─────────────────────────────────────────────
 
@@ -385,12 +470,16 @@ def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_
     
     # Apply time pressure adjustment if we're running low on time
     if bot_time_remaining is not None:
-        # Ensure bot_time_remaining is a number (convert if needed)
-        try:
-            bot_time_remaining = int(bot_time_remaining)
-        except (TypeError, ValueError):
-            logger.debug(f"Could not convert bot_time_remaining to int: {bot_time_remaining}")
+        # Parse time value (handles multiple formats including timedelta strings)
+        bot_time_remaining = parse_time_to_milliseconds(bot_time_remaining)
+        if bot_time_remaining is None:
+            logger.debug(f"Could not parse bot_time_remaining, using default time")
             return adjusted_time
+        
+        # Parse increment value as well
+        increment = parse_time_to_milliseconds(increment)
+        if increment is None:
+            increment = 0
         
         time_remaining_seconds = bot_time_remaining / 1000.0
         
@@ -640,23 +729,19 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         
                         # Extract time information from game state
                         state = event.get("state", {})
-                        bot_time_remaining = state.get("wtime" if bot_is_white else "btime")
-                        increment = state.get("winc" if bot_is_white else "binc", 0)
+                        raw_time = state.get("wtime" if bot_is_white else "btime")
+                        raw_inc = state.get("winc" if bot_is_white else "binc", 0)
                         
-                        # Ensure time values are integers
-                        if bot_time_remaining is not None:
-                            try:
-                                bot_time_remaining = int(bot_time_remaining)
-                            except (TypeError, ValueError):
-                                logger.warning(f"[{game_id}] Invalid bot_time_remaining: {bot_time_remaining}")
-                                bot_time_remaining = None
+                        # Parse time values (handles multiple formats)
+                        bot_time_remaining = parse_time_to_milliseconds(raw_time)
+                        if bot_time_remaining is None and raw_time is not None:
+                            logger.warning(f"[{game_id}] Could not parse bot_time_remaining: {raw_time}")
                         
-                        if increment is not None:
-                            try:
-                                increment = int(increment)
-                            except (TypeError, ValueError):
-                                logger.warning(f"[{game_id}] Invalid increment: {increment}")
-                                increment = 0
+                        increment = parse_time_to_milliseconds(raw_inc)
+                        if increment is None:
+                            increment = 0
+                            if raw_inc not in (0, None, ""):
+                                logger.warning(f"[{game_id}] Could not parse increment: {raw_inc}")
 
                         stockfish = init_stockfish(opponent_rating)
 
@@ -673,21 +758,18 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         
                         # Update bot's remaining time
                         if bot_is_white is not None:
-                            bot_time_remaining = event.get("wtime" if bot_is_white else "btime")
-                            if bot_time_remaining is not None:
-                                try:
-                                    bot_time_remaining = int(bot_time_remaining)
-                                except (TypeError, ValueError):
-                                    logger.warning(f"[{game_id}] Invalid bot_time_remaining update: {bot_time_remaining}")
-                                    bot_time_remaining = None
+                            raw_time = event.get("wtime" if bot_is_white else "btime")
+                            bot_time_remaining = parse_time_to_milliseconds(raw_time)
+                            if bot_time_remaining is None and raw_time is not None:
+                                logger.debug(f"[{game_id}] Could not parse time update: {raw_time}")
                             
                             if increment == 0:  # Only update increment if not set
-                                new_increment = event.get("winc" if bot_is_white else "binc", 0)
-                                try:
-                                    increment = int(new_increment)
-                                except (TypeError, ValueError):
-                                    logger.warning(f"[{game_id}] Invalid increment update: {new_increment}")
-                                    increment = 0
+                                raw_inc = event.get("winc" if bot_is_white else "binc", 0)
+                                new_increment = parse_time_to_milliseconds(raw_inc)
+                                if new_increment is not None:
+                                    increment = new_increment
+                                elif raw_inc not in (0, None, ""):
+                                    logger.debug(f"[{game_id}] Could not parse increment update: {raw_inc}")
                         
                         # Check if game ended (resignation, timeout, etc.)
                         status = event.get("status")
