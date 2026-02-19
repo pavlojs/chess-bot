@@ -145,10 +145,11 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 - **Result: Fair, winnable games** ✅
 
 🎯 **Advanced Players (1800–2799 ELO):**
-- Uses **full-strength Stockfish** (no intentional mistakes)
+- Uses `UCI_LimitStrength` at opponent_rating + 100 (same principle as beginners, **no intentional blunders**)
 - Passes real game clocks (`wtime`/`btime`/`winc`/`binc`) directly to Stockfish via native UCI `go` command
-- Stockfish manages its own time — accounts for game phase, position complexity, and increment automatically
-- **Result: Challenging, high-quality chess** ✅
+- Engine plays high-quality moves but depth is capped — beatable by near-perfect play
+- Example: 2000-rated player faces ~2100 strength bot
+- **Result: Challenging but humanly beatable chess** ✅
 
 👑 **Elite & Super-GM (2800+ ELO):**
 - **MAXIMUM POWER**: Full strength + native clock management
@@ -157,9 +158,9 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 - **Result: Ultimate challenge** 🔥
 
 **Why this approach is better:**
-- ✅ Fair games for beginners (UCI_LimitStrength ensures balanced play)
-- ✅ No blunders for advanced players (full engine quality)
-- ✅ Maximum challenge for strong players (full power unlocked)
+- ✅ Fair games for beginners (UCI_LimitStrength at opponent+100)
+- ✅ Competitive but humanly beatable for advanced players (UCI_LimitStrength, no blunders)
+- ✅ Maximum challenge for elite players (full power unlocked at 2800+)
 - ✅ Smooth difficulty progression across all levels
 
 **Configuration options in `config.py`:**
@@ -175,9 +176,9 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 |----------------|--------|----------------------|-------|
 | **1200 ELO** | UCI_LimitStrength + movetime | ~1300 ELO | +100 ELO fair play ✅ |
 | **1500 ELO** | UCI_LimitStrength + movetime | ~1600 ELO | +100 ELO fair play ✅ |
-| **1800 ELO** | Full strength, native clock | ~2000+ ELO | Stockfish manages time ✅ |
-| **2000 ELO** | Full strength, native clock | ~2200+ ELO | Stockfish manages time ✅ |
-| **2500 ELO** | Full strength, native clock | ~2700+ ELO | Stockfish manages time ✅ |
+| **1800 ELO** | UCI_LimitStrength + native clock | ~1900 ELO | +100 ELO, native time ✅ |
+| **2000 ELO** | UCI_LimitStrength + native clock | ~2100 ELO | +100 ELO, beatable ✅ |
+| **2500 ELO** | UCI_LimitStrength + native clock | ~2600 ELO | +100 ELO, beatable ✅ |
 | **2800 ELO** | **FULL POWER**, native clock | **~3200 ELO** | Maximum power 🔥 |
 | **3000 ELO** | **FULL POWER**, native clock | **~3400 ELO** | Maximum power 🔥 |
 
@@ -310,8 +311,9 @@ The bot supports all major real-time Lichess time control modes:
 
 For all rated opponents Stockfish receives the real clock values (`wtime`, `btime`, `winc`, `binc`) directly via the UCI `go wtime … btime … winc … binc …` command — the same protocol used by every chess GUI. Stockfish's internal time manager accounts for position complexity, game phase, and increment automatically.
 
-- ✅ Weak opponents (< 1800): fixed `go movetime` budget so `UCI_LimitStrength` keeps games fair
-- ✅ All other opponents: native clock mode — Stockfish decides how long to think
+- ✅ Weak opponents (< 1800): fixed `go movetime` budget + `UCI_LimitStrength` at opponent+100
+- ✅ Advanced opponents (1800–2799): native clocks + `UCI_LimitStrength` at opponent+100 (no blunders, depth-capped)
+- ✅ Elite opponents (2800+): native clocks, full power, no handicap
 - ✅ No-clock fallback: `go movetime` used when game has no clock data
 
 This is strictly better than any manual emergency/pressure formula for bullet, blitz, rapid, and classical alike.
@@ -346,7 +348,7 @@ Based on the current configuration in `config.py`, the bot is configured as foll
 
 - **Difficulty**: Hybrid dynamic system - adapts method to opponent level
   - **Beginners (< 1800)**: UCI_LimitStrength at opponent+100 ELO (fair games)
-  - **Advanced (1800-2799)**: Full strength with scaled time (challenging)
+  - **Advanced (1800-2799)**: UCI_LimitStrength at opponent+100 with native clocks (challenging but beatable)
   - **Elite (2800+)**: **MAXIMUM POWER** - full strength + full time
 - **Playstyle**: 
   - Fair and balanced for learning players
@@ -362,7 +364,7 @@ Based on the current configuration in `config.py`, the bot is configured as foll
 
 **Effective Strength by Opponent Level:**
 - **Beginners to Intermediate** (< 1800): Plays at opponent's level + 100 ELO
-- **Advanced** (1800-2799): ~2000-2900 ELO depending on rating and time scaling
+- **Advanced** (1800-2799): ~1900-2900 ELO (opponent+100 via UCI_LimitStrength)
 - **Elite and Super-GM** (2800+): **~3200-3500 ELO** (Maximum power)
 
 This makes the bot suitable and fair for players of all levels!

@@ -85,21 +85,23 @@ MIN_RATING = 1320
 MAX_RATING = 2800
 TIME_CONTROL = ["bullet", "blitz", "rapid", "classical"]
 
-# Dynamic strength: HYBRID approach for fair games at all levels
-# Combines UCI_LimitStrength (for beginners) with time control (for advanced players)
+# Dynamic strength: THREE-TIER HYBRID approach for fair games at all levels
 DYNAMIC_STRENGTH = True
 
-# HYBRID SYSTEM THRESHOLDS:
-# 1. Below LIMIT_STRENGTH_THRESHOLD: Use UCI_LimitStrength (fair for beginners)
-# 2. Between thresholds: Full strength engine, reduced time (no blunders for intermediates)
-# 3. Above FULL_STRENGTH_THRESHOLD: MAXIMUM POWER (full time + full strength)
+# THREE-TIER HYBRID SYSTEM:
+# 1. < LIMIT_STRENGTH_THRESHOLD (1800):
+#    UCI_LimitStrength at opponent+STRENGTH_ADVANTAGE + go movetime (fair, winnable)
+# 2. LIMIT_STRENGTH_THRESHOLD – FULL_STRENGTH_THRESHOLD (1800–2799):
+#    UCI_LimitStrength at opponent+STRENGTH_ADVANTAGE + native clocks
+#    (high quality, no intentional blunders, but beatable by near-perfect play)
+# 3. >= FULL_STRENGTH_THRESHOLD (2800): MAXIMUM POWER, no handicaps
 
-LIMIT_STRENGTH_THRESHOLD = 1800  # Below this: UCI_LimitStrength for fair games
-FULL_STRENGTH_THRESHOLD = 2800   # At or above: FULL POWER (no compromises)
+LIMIT_STRENGTH_THRESHOLD = 1800  # Below this: movetime cap added on top of UCI_LimitStrength
+FULL_STRENGTH_THRESHOLD = 2800   # At or above: FULL POWER (no UCI_LimitStrength)
 
-# For opponents below LIMIT_STRENGTH_THRESHOLD:
-# Bot plays at opponent_rating + STRENGTH_ADVANTAGE using UCI_LimitStrength
-STRENGTH_ADVANTAGE = 100  # ELO advantage for weak opponents (e.g., 1500 → bot plays 1600)
+# ELO bonus applied via UCI_Elo = opponent_rating + STRENGTH_ADVANTAGE
+# Used for ALL opponents below FULL_STRENGTH_THRESHOLD
+STRENGTH_ADVANTAGE = 100  # e.g. 1500-rated → bot plays at ~1600; 2000-rated → ~2100
 
 # ─────────────────────────────────────────────
 # CHALLENGE CONFIGURATION

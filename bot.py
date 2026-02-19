@@ -354,10 +354,13 @@ def get_game_end_reason(board: chess.Board) -> str:
 def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
     """Initialize Stockfish engine with hybrid strength system.
     
-    Hybrid approach:
-    - Weak opponents (< 1800): UCI_LimitStrength for fair games
-    - Intermediate (1800-2199): Full strength, reduced time
-    - Strong (2200+): FULL POWER
+    Three-tier hybrid approach:
+    - Beginners/Intermediates (< LIMIT_STRENGTH_THRESHOLD=1800):
+        UCI_LimitStrength at opponent+100 + go movetime (fair, winnable games)
+    - Advanced (LIMIT_STRENGTH_THRESHOLD–FULL_STRENGTH_THRESHOLD = 1800–2799):
+        UCI_LimitStrength at opponent+100 + native clocks (high quality, no blunders,
+        but beatable by near-perfect play)
+    - Elite (>= FULL_STRENGTH_THRESHOLD=2800): Full power, no handicaps
     """
     sf = Stockfish(
         path=STOCKFISH_PATH,
@@ -365,17 +368,28 @@ def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
     )
     
     if DYNAMIC_STRENGTH and opponent_rating:
-        # For weak opponents: Use UCI_LimitStrength for fair, balanced games
-        if opponent_rating < LIMIT_STRENGTH_THRESHOLD:
+        if opponent_rating < FULL_STRENGTH_THRESHOLD:
+            # Apply UCI_LimitStrength for ALL opponents below the full-power threshold.
+            # < 1800: movetime mode (extra cap, see play_game use_weak_mode branch)
+            # 1800–2799: native clocks — quality capped by UCI_Elo, no intentional blunders
             target_elo = min(max(opponent_rating + STRENGTH_ADVANTAGE, 1320), 2850)
             sf.update_engine_parameters({
                 "UCI_LimitStrength": True,
                 "UCI_Elo": target_elo,
             })
-            logger.info(f"Opponent {opponent_rating} ELO: Using UCI_LimitStrength = {target_elo} (fair play mode)")
+            if opponent_rating < LIMIT_STRENGTH_THRESHOLD:
+                logger.info(
+                    f"Opponent {opponent_rating} ELO: UCI_LimitStrength = {target_elo} "
+                    f"(fair play mode, movetime cap)"
+                )
+            else:
+                logger.info(
+                    f"Opponent {opponent_rating} ELO: UCI_LimitStrength = {target_elo} "
+                    f"(intermediate mode, native clocks)"
+                )
         else:
-            # For intermediate/strong opponents: Full engine strength, time-controlled
-            logger.info(f"Opponent {opponent_rating} ELO: Using full strength engine (time-controlled)")
+            # Full power for elite opponents — no handicaps whatsoever
+            logger.info(f"Opponent {opponent_rating} ELO: Full strength engine (MAXIMUM POWER)")
     
     return sf
 

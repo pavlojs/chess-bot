@@ -243,16 +243,37 @@ class TestStockfishInitialization(unittest.TestCase):
     
     @patch('bot.Stockfish')
     @patch('bot.STOCKFISH_PATH', '/usr/local/bin/stockfish')
-    def test_stockfish_initialization_strong_opponent(self, mock_stockfish_class):
-        """Test Stockfish initialization with strong opponent - full strength."""
+    def test_stockfish_initialization_intermediate_opponent(self, mock_stockfish_class):
+        """Test Stockfish initialization with intermediate opponent (1800-2799) — UCI_LimitStrength applied."""
         mock_sf_instance = Mock()
         mock_stockfish_class.return_value = mock_sf_instance
-        
+
         with patch('bot.DYNAMIC_STRENGTH', True), \
-             patch('bot.LIMIT_STRENGTH_THRESHOLD', 1800):
+             patch('bot.LIMIT_STRENGTH_THRESHOLD', 1800), \
+             patch('bot.FULL_STRENGTH_THRESHOLD', 2800), \
+             patch('bot.STRENGTH_ADVANTAGE', 100):
             result = init_stockfish(opponent_rating=2200)
-        
-        # Verify engine parameters are not modified for strong opponents
+
+        # Intermediate opponents (1800-2799) should also get UCI_LimitStrength at opponent+100
+        mock_sf_instance.update_engine_parameters.assert_called_once_with({
+            'UCI_LimitStrength': True,
+            'UCI_Elo': 2300,
+        })
+        self.assertIsNotNone(result)
+
+    @patch('bot.Stockfish')
+    @patch('bot.STOCKFISH_PATH', '/usr/local/bin/stockfish')
+    def test_stockfish_initialization_elite_opponent(self, mock_stockfish_class):
+        """Test Stockfish initialization with elite opponent (>= 2800) — full strength, no limit."""
+        mock_sf_instance = Mock()
+        mock_stockfish_class.return_value = mock_sf_instance
+
+        with patch('bot.DYNAMIC_STRENGTH', True), \
+             patch('bot.LIMIT_STRENGTH_THRESHOLD', 1800), \
+             patch('bot.FULL_STRENGTH_THRESHOLD', 2800):
+            result = init_stockfish(opponent_rating=3000)
+
+        # Elite opponents (>= FULL_STRENGTH_THRESHOLD) get full power — no parameter changes
         mock_sf_instance.update_engine_parameters.assert_not_called()
         self.assertIsNotNone(result)
 
