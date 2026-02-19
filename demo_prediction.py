@@ -1,5 +1,7 @@
 """
-Quick test script to demonstrate move prediction feature
+Demo script — shows move prediction feature on a few positions.
+Requires a working Stockfish installation (NOT collected by pytest).
+Run manually: python demo_prediction.py
 """
 import os
 os.environ.setdefault('TOKEN', 'test_token')
