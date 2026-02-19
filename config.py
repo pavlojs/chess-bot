@@ -75,6 +75,11 @@ UCI_OPTIONS: Dict[str, Any] = {
     "Ponder": False,
 }
 
+# Move Prediction Configuration
+# Enable to see Stockfish's analysis of best continuation (principal variation)
+ENABLE_MOVE_PREDICTION = os.getenv("ENABLE_MOVE_PREDICTION", "true").lower() in ("true", "1", "yes")
+PREDICTION_DEPTH = int(os.getenv("PREDICTION_DEPTH", "10"))  # Number of moves to predict ahead
+
 ACCEPT_CHALLENGES = True
 MIN_RATING = 1320
 MAX_RATING = 2800

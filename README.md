@@ -114,12 +114,14 @@ services:
 3. For persistent config, mount the volume as in `docker-compose.yml`.
 
 
-## Modifying Playstyle
+### Modifying Playstyle
 
 The bot's playstyle can be modified by changing settings in `config.py`:
 
 - `STOCKFISH_TIME`: Base thinking time per move in milliseconds (default: `3000` = 3 seconds). Higher values = stronger play.
 - `TIME_CONTROL`: List of accepted time controls. Available options: `bullet`, `blitz`, `rapid`, `classical`.
+- `ENABLE_MOVE_PREDICTION`: Show Stockfish's predicted continuation (default: `true`). Displays best line analysis.
+- `PREDICTION_DEPTH`: Number of moves to predict ahead (default: `10`). Shows strategic plan.
 - `UCI_OPTIONS`: Dictionary of UCI options for Stockfish 18+:
   - `"Threads"`: Number of CPU threads to use (1-1024). Default: `4`
   - `"Hash"`: Hash table size in MB (1-33554432). Default: `2048` (2 GB)
@@ -262,6 +264,36 @@ Or set environment variable:
 ```bash
 export ENABLE_AUTO_CHALLENGE=false
 ```
+
+### Move Prediction & Analysis
+
+The bot can display Stockfish's predicted continuation (Principal Variation) - showing the best sequence of moves from the current position. This is enabled by default and provides valuable insight into the engine's strategic thinking.
+
+**Example Log Output:**
+```
+[game123] 🔮 Predicted line (+125 cp): e2e4 e7e5 g1f3 b8c6 f1c4 f8c5
+[game456] 🔮 Predicted line (Mate in 3): d1d8 g8h7 d8h8 h7g8 h8g7
+```
+
+**What it shows:**
+- 🎯 **Move sequence**: The best continuation according to Stockfish
+- 📊 **Evaluation**: Position score in centipawns (cp) or mate announcement
+- 🧠 **Strategic plan**: Understanding of the engine's multi-move strategy
+
+**Configuration:**
+```python
+# In config.py
+ENABLE_MOVE_PREDICTION = True  # Enable/disable prediction display
+PREDICTION_DEPTH = 10          # Number of half-moves to predict ahead
+```
+
+**Use cases:**
+- 📚 **Learning**: Understand what the engine is planning
+- 🐛 **Debugging**: See if engine is calculating correctly
+- 📈 **Analysis**: Review games to understand strategic decisions
+- 🎓 **Education**: Study engine's long-term plans
+
+**Note:** Predictions are calculated before each move and logged at INFO level. They don't affect move quality or playing strength.
 
 ### Supported Time Controls
 

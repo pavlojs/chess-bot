@@ -2,6 +2,50 @@
 
 All notable changes to Axiom Chess Bot are documented in this file.
 
+## [2.2.1] - 2026-02-19
+
+### Bug Fixes
+
+#### 🐛 Time Management Type Error Fix
+- **Fixed**: TypeError when comparing bot_time_remaining with integers
+- **Fixed**: Proper type conversion for time values from Lichess API
+- **Added**: Validation and error handling for wtime/btime/winc/binc values
+- **Improved**: Graceful fallback when time data is invalid or malformed
+
+**Issue:** Bot would crash with `TypeError: '<=' not supported between instances of 'datetime.timedelta' and 'int'` during time pressure calculations.
+
+**Solution:** Added explicit type conversion to `int()` with try-except blocks for all time-related values extracted from game events.
+
+## [2.2.0] - 2026-02-18
+
+### New Features
+
+#### 🔮 Move Prediction Analysis
+- **Added**: Stockfish now predicts and logs the best continuation (Principal Variation)
+- **Added**: `ENABLE_MOVE_PREDICTION` config option (default: enabled)
+- **Added**: `PREDICTION_DEPTH` to control how many moves ahead to predict (default: 10)
+- **Show**: Displays evaluation (centipawns or mate) with predicted line
+- **Format**: `🔮 Predicted line (+45 cp): e2e4 e7e5 g1f3 b8c6 f1c4`
+
+**Example Log Output:**
+```
+[game123] 🔮 Predicted line (+125 cp): d7d5 c2c4 e7e6 b1c3 g8f6 c1g5
+[game456] 🔮 Predicted line (Mate in 3): d1d8 g8h7 d8h8
+```
+
+**Configuration:**
+```python
+# In config.py or environment
+ENABLE_MOVE_PREDICTION = True  # Enable/disable feature
+PREDICTION_DEPTH = 10         # Number of moves to predict (half-moves)
+```
+
+**Benefits:**
+- 📊 Better understanding of bot's strategic plan
+- 🎯 Insight into engine evaluation and tactics
+- 🐛 Useful for debugging and analysis
+- 🎓 Educational value for reviewing games
+
 ## [2.1.2] - 2026-02-18
 
 ### New Features

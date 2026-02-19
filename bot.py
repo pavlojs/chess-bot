@@ -38,6 +38,8 @@ from config import (
     CHALLENGE_MAX_RATING,
     CHALLENGE_TIME_CONTROLS,
     CHALLENGE_CHECK_INTERVAL,
+    ENABLE_MOVE_PREDICTION,
+    PREDICTION_DEPTH,
 )
 
 from logging_config import setup_logger
@@ -293,6 +295,54 @@ def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
     return sf
 
 
+def get_move_prediction(stockfish: Stockfish, game_id: str, prediction_depth: int = PREDICTION_DEPTH) -> Optional[str]:
+    """Get Stockfish's predicted line of best moves (Principal Variation).
+    
+    Args:
+        stockfish: Initialized Stockfish instance
+        game_id: Game ID for logging
+        prediction_depth: Number of moves to predict (half-moves/plies)
+    
+    Returns:
+        String with predicted move sequence, or None if unavailable
+    """
+    try:
+        # Get top move with full analysis including PV (Principal Variation)
+        top_moves = stockfish.get_top_moves(num_top_moves=1, verbose=True)
+        
+        if not top_moves:
+            return None
+        
+        best_move_info = top_moves[0]
+        pv_moves = best_move_info.get('PVMoves', [])
+        
+        if not pv_moves:
+            return None
+        
+        # Limit to requested depth
+        pv_moves = pv_moves[:prediction_depth]
+        
+        # Get evaluation for context
+        eval_info = best_move_info.get('Centipawn')
+        mate_info = best_move_info.get('Mate')
+        
+        eval_str = ""
+        if mate_info is not None:
+            eval_str = f" (Mate in {mate_info})"
+        elif eval_info is not None:
+            eval_str = f" ({eval_info:+d} cp)"
+        
+        # Format the predicted line
+        prediction = " ".join(pv_moves)
+        logger.info(f"[{game_id}] 🔮 Predicted line{eval_str}: {prediction}")
+        
+        return prediction
+        
+    except Exception as e:
+        logger.debug(f"[{game_id}] Could not get move prediction: {e}")
+        return None
+
+
 def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_TIME, 
                        bot_time_remaining: int | None = None, increment: int = 0) -> int:
     """Calculate thinking time based on opponent strength and remaining time.
@@ -335,6 +385,13 @@ def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_
     
     # Apply time pressure adjustment if we're running low on time
     if bot_time_remaining is not None:
+        # Ensure bot_time_remaining is a number (convert if needed)
+        try:
+            bot_time_remaining = int(bot_time_remaining)
+        except (TypeError, ValueError):
+            logger.debug(f"Could not convert bot_time_remaining to int: {bot_time_remaining}")
+            return adjusted_time
+        
         time_remaining_seconds = bot_time_remaining / 1000.0
         
         # Critical time threshold: 20 seconds or less
@@ -585,6 +642,21 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         state = event.get("state", {})
                         bot_time_remaining = state.get("wtime" if bot_is_white else "btime")
                         increment = state.get("winc" if bot_is_white else "binc", 0)
+                        
+                        # Ensure time values are integers
+                        if bot_time_remaining is not None:
+                            try:
+                                bot_time_remaining = int(bot_time_remaining)
+                            except (TypeError, ValueError):
+                                logger.warning(f"[{game_id}] Invalid bot_time_remaining: {bot_time_remaining}")
+                                bot_time_remaining = None
+                        
+                        if increment is not None:
+                            try:
+                                increment = int(increment)
+                            except (TypeError, ValueError):
+                                logger.warning(f"[{game_id}] Invalid increment: {increment}")
+                                increment = 0
 
                         stockfish = init_stockfish(opponent_rating)
 
@@ -602,8 +674,20 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         # Update bot's remaining time
                         if bot_is_white is not None:
                             bot_time_remaining = event.get("wtime" if bot_is_white else "btime")
+                            if bot_time_remaining is not None:
+                                try:
+                                    bot_time_remaining = int(bot_time_remaining)
+                                except (TypeError, ValueError):
+                                    logger.warning(f"[{game_id}] Invalid bot_time_remaining update: {bot_time_remaining}")
+                                    bot_time_remaining = None
+                            
                             if increment == 0:  # Only update increment if not set
-                                increment = event.get("winc" if bot_is_white else "binc", 0)
+                                new_increment = event.get("winc" if bot_is_white else "binc", 0)
+                                try:
+                                    increment = int(new_increment)
+                                except (TypeError, ValueError):
+                                    logger.warning(f"[{game_id}] Invalid increment update: {new_increment}")
+                                    increment = 0
                         
                         # Check if game ended (resignation, timeout, etc.)
                         status = event.get("status")
@@ -697,6 +781,10 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                     try:
                         logger.debug(f"[{game_id}] Calculating move for position: {board.fen()}")
                         stockfish.set_fen_position(board.fen())
+                        
+                        # Get move prediction (principal variation) if enabled
+                        if ENABLE_MOVE_PREDICTION:
+                            get_move_prediction(stockfish, game_id, PREDICTION_DEPTH)
                         
                         # Calculate appropriate thinking time based on opponent strength and remaining time
                         move_time = calculate_move_time(opponent_rating, STOCKFISH_TIME, 
