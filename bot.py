@@ -961,7 +961,10 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                     except ApiError as e:
                         # Handle API-specific errors
                         error_str = str(e).lower()
-                        if "connection" in error_str or "remote" in error_str:
+                        if "not your turn" in error_str or "game already over" in error_str:
+                            # Race condition: engine finished computing after game ended (abort/flag)
+                            logger.info(f"[{game_id}] Game ended while making move (race condition)")
+                        elif "connection" in error_str or "remote" in error_str:
                             logger.warning(f"[{game_id}] Network error while making move: {e}")
                             logger.info(f"[{game_id}] Game interrupted due to connection issues")
                         else:
@@ -1192,15 +1195,11 @@ def main():
 
                     elif event["type"] == "gameStart":
                         game_id = event["game"]["id"]
-                        # If a pending challenge just got accepted, clear it and wake the loop
-                        if pending_challenge:
-                            logger.info(
-                                f"Challenge accepted — game {game_id} started "
-                                f"(challenge id: {pending_challenge.get('id', '?')})"
-                            )
-                            pending_challenge.clear()
-                            retry_event.set()
 
+                        # Start game thread and register in active_games FIRST —
+                        # before clearing pending_challenge or waking the challenge loop.
+                        # This ensures the loop's active_count check sees the new game
+                        # and won't send a second challenge.
                         thread = threading.Thread(
                             target=play_game,
                             args=(client, game_id, bot_username),
@@ -1208,6 +1207,15 @@ def main():
                         )
                         active_games[game_id] = thread
                         thread.start()
+
+                        # Now safe to clear pending challenge and wake the loop
+                        if pending_challenge:
+                            logger.info(
+                                f"Challenge accepted — game {game_id} started "
+                                f"(challenge id: {pending_challenge.get('id', '?')})"
+                            )
+                            pending_challenge.clear()
+                            retry_event.set()
 
                         logger.info(f"Game {game_id} started")
 
