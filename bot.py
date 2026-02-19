@@ -380,61 +380,64 @@ def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
     return sf
 
 
+def _parse_pv_from_info(info_line: str, depth: int) -> tuple[str, str]:
+    """Parse evaluation and PV from a Stockfish info line.
+    
+    Returns:
+        (eval_str, pv_display) - formatted evaluation and move sequence strings
+    """
+    eval_str = ""
+    pv_display = ""
+    
+    try:
+        # Parse evaluation: 'score cp VALUE' or 'score mate VALUE'
+        if ' score mate ' in info_line:
+            mate_val = int(info_line.split(' score mate ')[1].split()[0])
+            eval_str = f" (Mate in {mate_val})"
+        elif ' score cp ' in info_line:
+            cp_val = int(info_line.split(' score cp ')[1].split()[0])
+            eval_str = f" ({cp_val:+d} cp)"
+        
+        # Parse PV: everything after ' pv '
+        if ' pv ' in info_line:
+            pv_moves = info_line.split(' pv ')[1].split()
+            pv_display = " ".join(pv_moves[:depth])
+    except (IndexError, ValueError):
+        pass
+    
+    return eval_str, pv_display
+
+
 def get_move_prediction(stockfish: Stockfish, game_id: str, move_time_ms: int,
                         prediction_depth: int = PREDICTION_DEPTH) -> Optional[str]:
-    """Analyze position, log the predicted continuation (PV), and return the best move.
+    """Search for the best move with a precise time budget and log the predicted continuation.
     
-    Uses a single Stockfish analysis to both determine the move to play and log the
-    predicted line. The first move of the PV is used as the actual move.
-    num_nodes is estimated from move_time_ms to approximate time-based search depth.
+    Uses a single time-bounded search (go movetime) — the most reliable approach for
+    time management. The PV is extracted for free from the last info line already
+    produced by that search, so no second engine call is needed.
     
     Args:
         stockfish: Initialized Stockfish instance (position already set)
         game_id: Game ID for logging
-        move_time_ms: Time budget for this move in milliseconds
+        move_time_ms: Exact time budget for this move in milliseconds
         prediction_depth: Number of PV moves to display in the log
     
     Returns:
-        Best move in UCI notation (e.g. "e2e4"), or None if analysis fails
+        Best move in UCI notation (e.g. "e2e4"), or None if search fails
     """
     try:
-        # Estimate search nodes from move time:
-        # ~300K nodes/sec is a conservative baseline (works on weak hardware too).
-        # Capped at 10M to avoid spending too long on a single depth-based search.
-        estimated_nodes = max(50_000, min(move_time_ms * 300, 10_000_000))
+        # Single time-precise search
+        move = stockfish.get_best_move_time(move_time_ms)
         
-        # Single analysis call: returns best move + full PV
-        top_moves = stockfish.get_top_moves(num_top_moves=1, verbose=True,
-                                            num_nodes=estimated_nodes)
-        
-        if not top_moves:
+        if not move:
             return None
         
-        best_move_info = top_moves[0]
-        best_move = best_move_info.get('Move')
+        # Log PV from the info line already produced by that search — no extra work
+        if logger.isEnabledFor(logging.INFO):
+            eval_str, pv_display = _parse_pv_from_info(stockfish.info(), prediction_depth)
+            logger.info(f"[{game_id}] 🔮 Predicted line{eval_str}: {pv_display or move}")
         
-        if not best_move:
-            return None
-        
-        # PVMoves is a space-separated string of UCI moves, e.g. "e2e4 e7e5 g1f3"
-        pv_raw = best_move_info.get('PVMoves', '')
-        pv_moves = pv_raw.split() if isinstance(pv_raw, str) else list(pv_raw)
-        
-        # Get evaluation for logging
-        eval_info = best_move_info.get('Centipawn')
-        mate_info = best_move_info.get('Mate')
-        
-        eval_str = ""
-        if mate_info is not None:
-            eval_str = f" (Mate in {mate_info})"
-        elif eval_info is not None:
-            eval_str = f" ({eval_info:+d} cp)"
-        
-        # Log the predicted continuation
-        pv_display = " ".join(pv_moves[:prediction_depth]) if pv_moves else best_move
-        logger.info(f"[{game_id}] 🔮 Predicted line{eval_str}: {pv_display}")
-        
-        return best_move
+        return move
         
     except Exception as e:
         logger.debug(f"[{game_id}] Move prediction failed: {e}")
@@ -483,16 +486,12 @@ def calculate_move_time(opponent_rating: int | None, base_time: int = STOCKFISH_
     
     # Apply time pressure adjustment if we're running low on time
     if bot_time_remaining is not None:
-        # Parse time value (handles multiple formats including timedelta strings)
+        # Parse time value — handles timedelta strings from Lichess API
+        # (game loop stores parsed ints, but this guards any direct callers)
         bot_time_remaining = parse_time_to_milliseconds(bot_time_remaining)
         if bot_time_remaining is None:
-            logger.debug(f"Could not parse bot_time_remaining, using default time")
+            logger.debug("Could not parse bot_time_remaining, using default time")
             return adjusted_time
-        
-        # Parse increment value as well
-        increment = parse_time_to_milliseconds(increment)
-        if increment is None:
-            increment = 0
         
         time_remaining_seconds = bot_time_remaining / 1000.0
         
