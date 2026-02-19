@@ -244,7 +244,12 @@ class TestStockfishInitialization(unittest.TestCase):
     @patch('bot.Stockfish')
     @patch('bot.STOCKFISH_PATH', '/usr/local/bin/stockfish')
     def test_stockfish_initialization_intermediate_opponent(self, mock_stockfish_class):
-        """Test Stockfish initialization with intermediate opponent (1800-2799) — UCI_LimitStrength applied."""
+        """Test Stockfish init with intermediate opponent (1800-2799).
+        
+        UCI_LimitStrength must be set (go movetime is required with UCI_LimitStrength;
+        native clocks would cause Stockfish to time-manage as a limited human
+        and potentially hang 30+ seconds, triggering Lichess game abort).
+        """
         mock_sf_instance = Mock()
         mock_stockfish_class.return_value = mock_sf_instance
 

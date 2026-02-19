@@ -142,49 +142,55 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 
 **How the Hybrid System Works:**
 
+**Two key rules drive all tiers:**
+1. **`UCI_LimitStrength`** (engine quality cap) — active for ALL opponents below `FULL_STRENGTH_THRESHOLD`. The engine plays at `opponent_rating + STRENGTH_ADVANTAGE` ELO, choosing high-quality moves without deliberate blunders.
+2. **`go movetime`** (time per move) — fixed budget for all capped opponents. Native clock mode (`go wtime`) **cannot** be used together with `UCI_LimitStrength` (Stockfish would time-manage like a limited human and could hang 30+ seconds on move 1). Native clocks are reserved for full-strength mode only.
+
+---
+
 👶 **Beginners & Intermediates (< 1800 ELO):**
-- Uses `UCI_LimitStrength` to play at opponent_rating + 100
-- Intentionally limits engine to fair playing level
-- Example: 1500-rated player faces ~1600 strength bot
+- `UCI_LimitStrength` at opponent+100 ELO
+- Minimal `go movetime` (40 % of base, ~1200 ms) — fast moves that don’t intimidate
+- Example: 1500-rated player faces a ~1600 strength bot with quick, natural play
 - **Result: Fair, winnable games** ✅
 
 🎯 **Advanced Players (1800–2799 ELO):**
-- Uses `UCI_LimitStrength` at opponent_rating + 100 (same principle as beginners, **no intentional blunders**)
-- Passes real game clocks (`wtime`/`btime`/`winc`/`binc`) directly to Stockfish via native UCI `go` command
-- Engine plays high-quality moves but depth is capped — beatable by near-perfect play
-- Example: 2000-rated player faces ~2100 strength bot
+- `UCI_LimitStrength` at opponent+100 ELO (same cap, same rule — **no intentional blunders**)
+- Scaled `go movetime` (40–95 % of base, proportional to rating)
+- More thinking time = plays closer to its ELO ceiling
+- Example: 2000-rated player faces a ~2100 strength bot
 - **Result: Challenging but humanly beatable chess** ✅
 
 👑 **Elite & Super-GM (2800+ ELO):**
-- **MAXIMUM POWER**: Full strength + native clock management
-- No handicaps, no compromises
+- **No `UCI_LimitStrength`** — full engine quality, maximum depth
+- **Native clocks** (`go wtime btime winc binc`) — Stockfish manages time optimally
 - Effective strength: ~3200–3500 ELO
 - **Result: Ultimate challenge** 🔥
 
 **Why this approach is better:**
-- ✅ Fair games for beginners (UCI_LimitStrength at opponent+100)
-- ✅ Competitive but humanly beatable for advanced players (UCI_LimitStrength, no blunders)
-- ✅ Maximum challenge for elite players (full power unlocked at 2800+)
-- ✅ Smooth difficulty progression across all levels
+- ✅ Fair, winnable games for beginners (ELO-capped at opponent+100, quick moves)
+- ✅ Competitive but beatable for advanced players (same ELO cap, more thinking time)
+- ✅ Maximum challenge for elite players (full power + native clocks at 2800+)
+- ✅ No game aborts — `go movetime` guarantees a reply within the budget
 
 **Configuration options — all settable via `.env` file:**
 - `DYNAMIC_STRENGTH`: Enable/disable feature (default: `true`)
-- `LIMIT_STRENGTH_THRESHOLD`: Below this rating, movetime cap added on top of UCI_LimitStrength (default: `1800`)
-- `FULL_STRENGTH_THRESHOLD`: At or above this rating, full power — no UCI_LimitStrength (default: `2800`)
-- `STRENGTH_ADVANTAGE`: ELO bonus bot plays above opponent for all below FULL_STRENGTH_THRESHOLD (default: `100`)
-- `STOCKFISH_TIME`: Base thinking time in ms for weak opponents and fallback (default: `3000`)
+- `LIMIT_STRENGTH_THRESHOLD`: Divides minimal-time and scaled-time movetime zones (default: `1800`). Below: 40 % movetime. Above (up to `FULL_STRENGTH_THRESHOLD`): 40–95 % scaled.
+- `FULL_STRENGTH_THRESHOLD`: At or above, `UCI_LimitStrength` is disabled and native clocks are used (default: `2800`)
+- `STRENGTH_ADVANTAGE`: ELO bonus bot plays above opponent for all below `FULL_STRENGTH_THRESHOLD` (default: `100`)
+- `STOCKFISH_TIME`: Base thinking time in ms — movetime budget is a fraction of this (default: `3000`)
 
-**Effective Strength Examples:**
+**Move timing by tier:**
 
-| Opponent Rating | Method | Effective Bot Strength | Notes |
-|----------------|--------|----------------------|-------|
-| **1200 ELO** | UCI_LimitStrength + movetime | ~1300 ELO | +100 ELO fair play ✅ |
-| **1500 ELO** | UCI_LimitStrength + movetime | ~1600 ELO | +100 ELO fair play ✅ |
-| **1800 ELO** | UCI_LimitStrength + native clock | ~1900 ELO | +100 ELO, native time ✅ |
-| **2000 ELO** | UCI_LimitStrength + native clock | ~2100 ELO | +100 ELO, beatable ✅ |
-| **2500 ELO** | UCI_LimitStrength + native clock | ~2600 ELO | +100 ELO, beatable ✅ |
-| **2800 ELO** | **FULL POWER**, native clock | **~3200 ELO** | Maximum power 🔥 |
-| **3000 ELO** | **FULL POWER**, native clock | **~3400 ELO** | Maximum power 🔥 |
+| Opponent Rating | UCI_LimitStrength | Movetime | Effective Strength |
+|----------------|-------------------|----------|--------------------|
+| **1200 ELO** | ✅ at ~1300 ELO | 40 % (~1200 ms) | ~1300 ELO ✅ |
+| **1500 ELO** | ✅ at ~1600 ELO | 40 % (~1200 ms) | ~1600 ELO ✅ |
+| **1800 ELO** | ✅ at ~1900 ELO | 40 % (~1200 ms) | ~1900 ELO ✅ |
+| **2000 ELO** | ✅ at ~2100 ELO | 51 % (~1530 ms) | ~2100 ELO ✅ |
+| **2500 ELO** | ✅ at ~2600 ELO | 79 % (~2360 ms) | ~2600 ELO ✅ |
+| **2800 ELO** | ❌ FULL POWER | native clocks | **~3200 ELO** 🔥 |
+| **3000 ELO** | ❌ FULL POWER | native clocks | **~3400 ELO** 🔥 |
 
 **To customize (`.env` file — no code changes needed):**
 ```bash
@@ -308,16 +314,13 @@ The bot supports all major real-time Lichess time control modes:
 - **Rapid**: Medium-paced games (typically 10-25 minutes total)
 - **Classical**: Slow games (typically 30+ minutes per side)
 
-**Native Clock Management** ⏱️
+**Move Search** ⏱️
 
-For all rated opponents Stockfish receives the real clock values (`wtime`, `btime`, `winc`, `binc`) directly via the UCI `go wtime … btime … winc … binc …` command — the same protocol used by every chess GUI. Stockfish's internal time manager accounts for position complexity, game phase, and increment automatically.
+`UCI_LimitStrength` is active for all opponents below `FULL_STRENGTH_THRESHOLD` (2800). Because native clock mode (`go wtime`) combined with `UCI_LimitStrength` causes Stockfish to time-manage like a limited human (potentially hanging 30+ seconds on move 1 and triggering Lichess abort), all capped opponents use **`go movetime`** with a rating-proportional budget instead.
 
-- ✅ Weak opponents (< 1800): fixed `go movetime` budget + `UCI_LimitStrength` at opponent+100
-- ✅ Advanced opponents (1800–2799): native clocks + `UCI_LimitStrength` at opponent+100 (no blunders, depth-capped)
-- ✅ Elite opponents (2800+): native clocks, full power, no handicap
+- ✅ All capped opponents (< 2800): `UCI_LimitStrength` at opponent+100 + `go movetime` (40–95 % of base)
+- ✅ Full-strength opponents (2800+): no cap, native clocks (`go wtime btime winc binc`)
 - ✅ No-clock fallback: `go movetime` used when game has no clock data
-
-This is strictly better than any manual emergency/pressure formula for bullet, blitz, rapid, and classical alike.
 
 **Automatically rejected:**
 - ❌ **Correspondence**: Games with days per move (limit ≥ 259200 seconds)
@@ -349,7 +352,7 @@ Based on the current configuration in `config.py`, the bot is configured as foll
 
 - **Difficulty**: Hybrid dynamic system - adapts method to opponent level
   - **Beginners (< 1800)**: UCI_LimitStrength at opponent+100 ELO (fair games)
-  - **Advanced (1800-2799)**: UCI_LimitStrength at opponent+100 with native clocks (challenging but beatable)
+  - **Advanced (1800-2799)**: UCI_LimitStrength at opponent+100 with scaled movetime (challenging but beatable)
   - **Elite (2800+)**: **MAXIMUM POWER** - full strength + full time
 - **Playstyle**: 
   - Fair and balanced for learning players

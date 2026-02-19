@@ -91,14 +91,16 @@ DYNAMIC_STRENGTH = os.getenv("DYNAMIC_STRENGTH", "true").lower() in ("true", "1"
 # 1. < LIMIT_STRENGTH_THRESHOLD (1800):
 #    UCI_LimitStrength at opponent+STRENGTH_ADVANTAGE + go movetime (fair, winnable)
 # 2. LIMIT_STRENGTH_THRESHOLD – FULL_STRENGTH_THRESHOLD (1800–2799):
-#    UCI_LimitStrength at opponent+STRENGTH_ADVANTAGE + native clocks
-#    (high quality, no intentional blunders, but beatable by near-perfect play)
-# 3. >= FULL_STRENGTH_THRESHOLD (2800): MAXIMUM POWER, no handicaps
+#    UCI_LimitStrength at opponent+STRENGTH_ADVANTAGE + go movetime (scaled time)
+#    NOTE: native clocks cannot be used with UCI_LimitStrength — causes Stockfish
+#    to time-manage as a limited player, potentially hanging 30+ seconds on first move.
+# 3. >= FULL_STRENGTH_THRESHOLD (2800): MAXIMUM POWER + native clocks, no handicaps
 
-LIMIT_STRENGTH_THRESHOLD = int(os.getenv("LIMIT_STRENGTH_THRESHOLD", "1800"))  # Below: movetime + UCI_LimitStrength
-FULL_STRENGTH_THRESHOLD = int(os.getenv("FULL_STRENGTH_THRESHOLD", "2800"))    # At or above: FULL POWER
+LIMIT_STRENGTH_THRESHOLD = int(os.getenv("LIMIT_STRENGTH_THRESHOLD", "1800"))  # Below: minimal movetime (40%); above: scaled movetime (40-95%)
+FULL_STRENGTH_THRESHOLD = int(os.getenv("FULL_STRENGTH_THRESHOLD", "2800"))    # At or above: FULL POWER + native clocks (no UCI_LimitStrength)
 
-# ELO bonus: UCI_Elo = opponent_rating + STRENGTH_ADVANTAGE (for all < FULL_STRENGTH_THRESHOLD)
+# ELO bonus: UCI_Elo = opponent_rating + STRENGTH_ADVANTAGE
+# Applied for ALL opponents below FULL_STRENGTH_THRESHOLD
 STRENGTH_ADVANTAGE = int(os.getenv("STRENGTH_ADVANTAGE", "100"))  # e.g. 1500 → ~1600; 2000 → ~2100
 
 # ─────────────────────────────────────────────

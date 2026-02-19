@@ -358,9 +358,10 @@ def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
     - Beginners/Intermediates (< LIMIT_STRENGTH_THRESHOLD=1800):
         UCI_LimitStrength at opponent+100 + go movetime (fair, winnable games)
     - Advanced (LIMIT_STRENGTH_THRESHOLD–FULL_STRENGTH_THRESHOLD = 1800–2799):
-        UCI_LimitStrength at opponent+100 + native clocks (high quality, no blunders,
-        but beatable by near-perfect play)
-    - Elite (>= FULL_STRENGTH_THRESHOLD=2800): Full power, no handicaps
+        UCI_LimitStrength at opponent+100 + go movetime (scaled time).
+        NO native clocks — UCI_LimitStrength + go wtime causes Stockfish to
+        time-manage as a limited player, potentially hanging 30+ seconds.
+    - Elite (>= FULL_STRENGTH_THRESHOLD=2800): Full power + native clocks
     """
     sf = Stockfish(
         path=STOCKFISH_PATH,
@@ -385,7 +386,7 @@ def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
             else:
                 logger.info(
                     f"Opponent {opponent_rating} ELO: UCI_LimitStrength = {target_elo} "
-                    f"(intermediate mode, native clocks)"
+                    f"(intermediate mode, movetime cap)"
                 )
         else:
             # Full power for elite opponents — no handicaps whatsoever
@@ -509,15 +510,18 @@ def calculate_move_time(opponent_rating: int | None,
                         base_time: int = STOCKFISH_TIME) -> int:
     """Calculate movetime budget based on opponent strength.
 
-    Used only in movetime mode: weak opponents (UCI_LimitStrength active) or as a
-    fallback when the game has no clock data. For all other opponents the caller
-    should use native clock management (_get_best_move_with_clocks) so Stockfish
-    handles time pressure, game phase, and increment itself.
+    Used for ALL opponents with UCI_LimitStrength active (< FULL_STRENGTH_THRESHOLD),
+    and as a fallback when the game has no clock data.
+
+    IMPORTANT: native clocks (go wtime) cannot be used with UCI_LimitStrength —
+    Stockfish time-manages like a limited human and may hang 30+ seconds on move 1.
 
     Strategy:
-    - Weak opponents (< 1800): 40 % of base_time — UCI_LimitStrength handles fairness
-    - Intermediate (1800–2799): 40–95 % linear scaling, full-strength engine
-    - Strong opponents (2800+): 100 % of base_time
+    - Below LIMIT_STRENGTH_THRESHOLD (1800): 40 % of base_time (1200ms default)
+      UCI_LimitStrength already handles fairness, minimal time keeps things lively.
+    - Between thresholds (1800–2799): 40–95 % linear scaling
+      More time = plays closer to its capped ELO ceiling.
+    - At or above FULL_STRENGTH_THRESHOLD (2800): 100 % (full power, native clocks)
 
     Returns:
         Thinking time in milliseconds
@@ -530,12 +534,12 @@ def calculate_move_time(opponent_rating: int | None,
         adjusted_time = base_time
         logger.debug(f"Strong opponent ({opponent_rating}): FULL POWER - {base_time}ms (100%)")
     elif opponent_rating < LIMIT_STRENGTH_THRESHOLD:
-        # For weak opponents (< 1800): Use minimal time since UCI_LimitStrength handles fairness
-        adjusted_time = int(base_time * 0.4)  # 40% = 1200ms (reasonable minimum)
+        # Below 1800: minimal time — UCI_LimitStrength already limits quality
+        adjusted_time = int(base_time * 0.4)  # 40% = 1200ms default
         logger.debug(f"Weak opponent ({opponent_rating}): {adjusted_time}ms (40%, UCI_LimitStrength active)")
     else:
-        # For intermediate opponents (1800-2799): Time-based scaling with full strength
-        # Linear scaling: 1800 → 40%, 2799 → 95%
+        # Intermediate opponents (1800–2799): scale 40–95%, UCI_LimitStrength active
+        # More time at higher rating = plays closer to the capped ELO ceiling
         rating_range = FULL_STRENGTH_THRESHOLD - LIMIT_STRENGTH_THRESHOLD  # 1000
         rating_offset = opponent_rating - LIMIT_STRENGTH_THRESHOLD
         time_percentage = 0.4 + (rating_offset / rating_range) * 0.55  # 40% to 95%
@@ -775,9 +779,11 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             wtime_ms = parse_time_to_milliseconds(event.get("wtime")) or wtime_ms
                             btime_ms = parse_time_to_milliseconds(event.get("btime")) or btime_ms
                         
-                        # Check if game ended (resignation, timeout, etc.)
+                        # Check if game ended (resignation, timeout, abort, etc.)
                         status = event.get("status")
-                        if status in ["mate", "resign", "stalemate", "timeout", "draw", "outoftime", "cheat", "noStart", "unknownFinish", "variantEnd"]:
+                        if status in ["mate", "resign", "stalemate", "timeout", "draw",
+                                      "outoftime", "aborted", "cheat", "noStart",
+                                      "unknownFinish", "variantEnd"]:
                             logger.info(f"[{game_id}] Game ended: {status}")
                             break
                         
@@ -786,7 +792,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             new_moves = moves[last_move_count:]
                             for move in new_moves:
                                 board.push_uci(move)
-                                logger.debug(f"[{game_id}] Applied move {move}, board turn: {board.turn}")
+                                logger.info(f"[{game_id}] Opponent played {move}")
                             last_move_count = current_move_count
 
                         # Handle draw offers
@@ -860,26 +866,29 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                     )
 
                     if not is_my_turn:
-                        logger.debug(
-                            f"[{game_id}] Not my turn (board.turn={board.turn}, "
-                            f"bot_is_white={bot_is_white})"
+                        logger.info(
+                            f"[{game_id}] Waiting for opponent"
                         )
                         continue
 
                     try:
-                        logger.debug(f"[{game_id}] Calculating move for position: {board.fen()}")
+                        logger.info(f"[{game_id}] Calculating move (move {board.fullmove_number})...")
                         stockfish.set_fen_position(board.fen())
 
-                        # Weak opponents: fixed movetime budget (UCI_LimitStrength active, intentional cap)
-                        # All others:     hand real clocks to Stockfish — native time management is far
-                        #                 superior to any manual formula (handles phase, complexity, increment)
-                        use_weak_mode = (
+                        # Decide search mode:
+                        # - UCI_LimitStrength active (< FULL_STRENGTH_THRESHOLD):
+                        #   MUST use go movetime. Native clocks + UCI_LimitStrength causes
+                        #   Stockfish to time-manage as a limited player would, potentially
+                        #   thinking 30+ seconds on the first move → Lichess abort.
+                        # - Full strength (>= FULL_STRENGTH_THRESHOLD):
+                        #   Native clocks — Stockfish manages time optimally.
+                        use_movetime_mode = (
                             DYNAMIC_STRENGTH
                             and opponent_rating is not None
-                            and opponent_rating < LIMIT_STRENGTH_THRESHOLD
+                            and opponent_rating < FULL_STRENGTH_THRESHOLD
                         )
 
-                        if use_weak_mode:
+                        if use_movetime_mode:
                             move_time = calculate_move_time(opponent_rating, STOCKFISH_TIME)
                             if ENABLE_MOVE_PREDICTION:
                                 move = get_move_prediction(
@@ -891,7 +900,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                     move = stockfish.get_best_move_time(move_time)
                             else:
                                 move = stockfish.get_best_move_time(move_time)
-                            logger.debug(f"[{game_id}] Movetime mode: {move_time}ms (weak opponent)")
+                            logger.debug(f"[{game_id}] Movetime mode: {move_time}ms (UCI_LimitStrength active)")
 
                         elif wtime_ms and btime_ms:
                             if ENABLE_MOVE_PREDICTION:
