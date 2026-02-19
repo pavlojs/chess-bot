@@ -4,7 +4,7 @@ Unit tests for Axiom Chess Bot
 
 import unittest
 from unittest.mock import Mock, patch, MagicMock
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 import chess
@@ -629,6 +629,188 @@ class TestStockfishUpdater(unittest.TestCase):
         except Exception as e:
             # Network errors are acceptable in tests
             self.skipTest(f"Network request failed: {e}")
+
+
+class TestParseTimeToMilliseconds(unittest.TestCase):
+    """Test parse_time_to_milliseconds utility for all Lichess API time formats."""
+
+    def setUp(self):
+        from bot import parse_time_to_milliseconds
+        self.parse = parse_time_to_milliseconds
+
+    def test_none_returns_none(self):
+        self.assertIsNone(self.parse(None))
+
+    def test_integer_passthrough(self):
+        self.assertEqual(self.parse(120000), 120000)
+        self.assertEqual(self.parse(0), 0)
+
+    def test_float_truncated(self):
+        self.assertEqual(self.parse(120000.9), 120000)
+        self.assertEqual(self.parse(0.0), 0)
+
+    def test_string_integer(self):
+        self.assertEqual(self.parse("120000"), 120000)
+        self.assertEqual(self.parse("0"), 0)
+
+    def test_timedelta_string_minutes_seconds(self):
+        # "0:01:00.000000" = 60 seconds = 60000 ms
+        self.assertEqual(self.parse("0:01:00.000000"), 60000)
+
+    def test_timedelta_string_hours_minutes_seconds_microseconds(self):
+        # "0:08:44.640000" = 8*60000 + 44*1000 + 640 = 524640 ms
+        self.assertEqual(self.parse("0:08:44.640000"), 524640)
+
+    def test_timedelta_string_no_microseconds(self):
+        # "0:03:00" = 180000 ms
+        self.assertEqual(self.parse("0:03:00"), 180000)
+
+    def test_timedelta_object(self):
+        td = timedelta(minutes=3)
+        self.assertEqual(self.parse(td), 180000)
+
+    def test_timedelta_object_with_microseconds(self):
+        td = timedelta(minutes=8, seconds=44, microseconds=640000)
+        self.assertEqual(self.parse(td), 524640)
+
+    def test_invalid_string_returns_none(self):
+        self.assertIsNone(self.parse("not_a_time"))
+        self.assertIsNone(self.parse("abc:def:ghi"))
+
+
+class TestExtractCpFromInfo(unittest.TestCase):
+    """Test _extract_cp_from_info helper."""
+
+    def setUp(self):
+        from bot import _extract_cp_from_info
+        self.extract = _extract_cp_from_info
+
+    def test_positive_cp(self):
+        line = "info depth 20 score cp 42 nodes 500000 pv e2e4 e7e5"
+        self.assertEqual(self.extract(line), 42)
+
+    def test_negative_cp(self):
+        line = "info depth 15 score cp -130 nodes 400000 pv d2d4"
+        self.assertEqual(self.extract(line), -130)
+
+    def test_cp_with_bound_token(self):
+        # upperbound/lowerbound appear between 'cp' and the next token
+        line = "info depth 18 seldepth 30 score cp -30 upperbound wdl 7 928 65 pv f8c5"
+        self.assertEqual(self.extract(line), -30)
+
+    def test_mate_positive(self):
+        line = "info depth 10 score mate 3 nodes 1000 pv e1g1"
+        self.assertEqual(self.extract(line), 30000)
+
+    def test_mate_negative(self):
+        line = "info depth 10 score mate -2 nodes 1000 pv e8g8"
+        self.assertEqual(self.extract(line), -30000)
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(self.extract(""))
+
+    def test_no_score_returns_none(self):
+        self.assertIsNone(self.extract("info depth 5 nodes 100 pv e2e4"))
+
+
+class TestParsePvFromInfo(unittest.TestCase):
+    """Test _parse_pv_from_info helper."""
+
+    def setUp(self):
+        from bot import _parse_pv_from_info
+        self.parse_pv = _parse_pv_from_info
+
+    def test_cp_eval_and_pv(self):
+        line = "info depth 20 score cp 42 nodes 500000 pv e2e4 e7e5 g1f3"
+        eval_str, pv = self.parse_pv(line, depth=10)
+        self.assertEqual(eval_str, " (+42 cp)")
+        self.assertEqual(pv, "e2e4 e7e5 g1f3")
+
+    def test_negative_cp_eval(self):
+        line = "info depth 15 score cp -130 pv d2d4 d7d5"
+        eval_str, _ = self.parse_pv(line, depth=10)
+        self.assertEqual(eval_str, " (-130 cp)")
+
+    def test_mate_eval(self):
+        line = "info depth 10 score mate 2 pv e1g1 f7f8"
+        eval_str, _ = self.parse_pv(line, depth=10)
+        self.assertEqual(eval_str, " (Mate in 2)")
+
+    def test_pv_truncated_to_depth(self):
+        line = "info depth 20 score cp 10 pv e2e4 e7e5 g1f3 g8f6 f1c4 f8c5"
+        _, pv = self.parse_pv(line, depth=3)
+        self.assertEqual(pv, "e2e4 e7e5 g1f3")
+
+    def test_no_pv_section(self):
+        line = "info depth 5 score cp 10 nodes 1000"
+        _, pv = self.parse_pv(line, depth=10)
+        self.assertEqual(pv, "")
+
+    def test_empty_line(self):
+        eval_str, pv = self.parse_pv("", depth=10)
+        self.assertEqual(eval_str, "")
+        self.assertEqual(pv, "")
+
+
+class TestMoveTimeCalculationSignature(unittest.TestCase):
+    """Verify calculate_move_time no longer accepts time-pressure arguments."""
+
+    def test_signature_has_two_params_only(self):
+        import inspect
+        from bot import calculate_move_time
+        params = list(inspect.signature(calculate_move_time).parameters)
+        self.assertEqual(params, ["opponent_rating", "base_time"],
+                         "calculate_move_time should only take opponent_rating and base_time")
+
+    @patch('bot.DYNAMIC_STRENGTH', True)
+    @patch('bot.LIMIT_STRENGTH_THRESHOLD', 1800)
+    @patch('bot.FULL_STRENGTH_THRESHOLD', 2200)
+    def test_returns_int(self):
+        from bot import calculate_move_time
+        result = calculate_move_time(2000, 3000)
+        self.assertIsInstance(result, int)
+
+
+class TestBulletChallengeAcceptance(unittest.TestCase):
+    """Test that bullet time controls are accepted."""
+
+    def _challenge(self, limit, increment, speed=None):
+        c = {
+            'challenger': {'rating': 1500},
+            'timeControl': {'limit': limit, 'increment': increment},
+            'id': 'test_bullet',
+        }
+        if speed:
+            c['speed'] = speed
+        return c
+
+    def test_accept_bullet_1_0(self):
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['bullet', 'blitz', 'rapid', 'classical']):
+            self.assertTrue(should_accept_challenge(self._challenge(60, 0)))
+
+    def test_accept_bullet_1_1(self):
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['bullet', 'blitz', 'rapid', 'classical']):
+            self.assertTrue(should_accept_challenge(self._challenge(60, 1)))
+
+    def test_accept_bullet_2_1(self):
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['bullet', 'blitz', 'rapid', 'classical']):
+            self.assertTrue(should_accept_challenge(self._challenge(120, 1)))
+
+    def test_reject_bullet_when_not_in_time_control(self):
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
+            self.assertFalse(should_accept_challenge(self._challenge(60, 0)))
 
 
 if __name__ == '__main__':
