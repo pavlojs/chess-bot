@@ -601,21 +601,14 @@ def filter_suitable_bots(bots: List[Dict[str, Any]], min_rating: int, max_rating
     return suitable
 
 
-def challenge_bot(client: berserk.Client, opponent_username: str, 
-                  time_control: Dict[str, int], color: str = "random") -> bool:
+def challenge_bot(client: berserk.Client, opponent_username: str,
+                  time_control: Dict[str, int], color: str = "random") -> Optional[str]:
     """Challenge a bot to a game.
-    
-    Args:
-        client: Berserk client instance
-        opponent_username: Username of the bot to challenge
-        time_control: Dictionary with 'limit' and 'increment' keys (in seconds)
-        color: Color preference ("white", "black", or "random")
-    
+
     Returns:
-        True if challenge was sent successfully, False otherwise
+        Challenge ID string if sent successfully, None otherwise
     """
     try:
-        # Use berserk to create a challenge
         challenge = client.challenges.create(
             opponent_username,
             rated=True,
@@ -624,77 +617,74 @@ def challenge_bot(client: berserk.Client, opponent_username: str,
             color=color,
             variant="standard",
         )
-        
-        logger.info(
-            f"Challenged {opponent_username} to {time_control['limit']}+{time_control['increment']} game"
+        challenge_id = (
+            challenge.get("id", "")
+            if isinstance(challenge, dict)
+            else getattr(challenge, "id", "")
         )
-        return True
+        logger.info(
+            f"Challenged {opponent_username} to "
+            f"{time_control['limit']}+{time_control['increment']} "
+            f"(id: {challenge_id})"
+        )
+        return challenge_id or None
     except berserk.exceptions.ResponseError as e:
         logger.warning(f"Failed to challenge {opponent_username}: {e}")
-        return False
+        return None
     except Exception as e:
         logger.error(f"Error challenging {opponent_username}: {e}")
-        return False
+        return None
 
 
-def try_challenge_random_bot(client: berserk.Client, bot_username: str, 
-                             tracker: ChallengeTracker) -> bool:
+def try_challenge_random_bot(client: berserk.Client, bot_username: str,
+                             tracker: ChallengeTracker) -> Optional[str]:
     """Attempt to challenge a random suitable bot.
-    
-    Args:
-        client: Berserk client instance
-        bot_username: Our bot's username
-        tracker: Challenge tracker to enforce rate limits
-    
+
     Returns:
-        True if challenge was sent, False otherwise
+        Challenge ID if a challenge was sent, None otherwise
     """
     if not ENABLE_AUTO_CHALLENGE:
-        return False
-    
+        return None
+
     if not tracker.can_challenge():
         remaining = tracker.get_remaining_challenges()
-        logger.debug(f"Challenge limit reached. Remaining this hour: {remaining}")
-        return False
-    
-    # Get online bots
+        logger.info(f"Challenge rate limit reached — {remaining} challenges left this hour")
+        return None
+
     logger.debug("Fetching online bots...")
     online_bots = get_online_bots(client, limit=100)
-    
+
     if not online_bots:
-        logger.debug("No online bots found")
-        return False
-    
-    # Filter by rating
+        logger.info("No online bots found")
+        return None
+
     suitable_bots = filter_suitable_bots(
-        online_bots, 
-        CHALLENGE_MIN_RATING, 
-        CHALLENGE_MAX_RATING, 
+        online_bots,
+        CHALLENGE_MIN_RATING,
+        CHALLENGE_MAX_RATING,
         bot_username
     )
-    
+
     if not suitable_bots:
-        logger.debug(
-            f"No suitable bots found (rating range: {CHALLENGE_MIN_RATING}-{CHALLENGE_MAX_RATING})"
+        logger.info(
+            f"No suitable bots online (rating range: {CHALLENGE_MIN_RATING}–{CHALLENGE_MAX_RATING})"
         )
-        return False
-    
-    # Select random bot and time control
+        return None
+
     target_bot = random.choice(suitable_bots)
     time_control = random.choice(CHALLENGE_TIME_CONTROLS)
-    
-    # Send challenge
-    success = challenge_bot(
-        client, 
-        target_bot["username"], 
+
+    challenge_id = challenge_bot(
+        client,
+        target_bot["username"],
         time_control,
         color="random"
     )
-    
-    if success:
+
+    if challenge_id:
         tracker.record_challenge()
-    
-    return success
+
+    return challenge_id
 
 
 # ─────────────────────────────────────────────
@@ -1005,35 +995,79 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 # MAIN LOOP
 # ─────────────────────────────────────────────
 
-def challenge_loop(client: berserk.Client, bot_username: str, 
-                  active_games: Dict[str, threading.Thread],
-                  challenge_tracker: ChallengeTracker):
-    """Background thread that periodically challenges other bots."""
+def challenge_loop(client: berserk.Client, bot_username: str,
+                   active_games: Dict[str, threading.Thread],
+                   challenge_tracker: ChallengeTracker,
+                   retry_event: threading.Event,
+                   pending_challenge: Dict):
+    """Background thread that challenges bots whenever the bot is idle.
+
+    Uses an event-based wait so the loop reacts immediately when a challenge
+    is declined or canceled instead of sleeping through the full interval.
+
+    pending_challenge is a shared dict written here and read by the main event
+    loop: {'id': str, 'opponent': str, 'sent_at': float} or empty {}.
+    """
     logger.info("Challenge loop started")
-    
+    ACCEPT_TIMEOUT = 90   # seconds to wait for opponent to accept
+    RETRY_DELAY   = 30   # seconds to wait after a decline before trying again
+
     while not shutdown_requested:
         try:
-            time.sleep(CHALLENGE_CHECK_INTERVAL)
-            
-            if shutdown_requested:
-                break
-            
-            if not ENABLE_AUTO_CHALLENGE:
-                continue
-            
-            # Count active games (threads that are still alive)
             active_count = sum(1 for t in active_games.values() if t.is_alive())
-            
-            if active_count == 0:
-                logger.info("No active games, attempting to challenge a bot...")
-                try_challenge_random_bot(client, bot_username, challenge_tracker)
+
+            if not ENABLE_AUTO_CHALLENGE or active_count > 0:
+                if active_count > 0:
+                    logger.debug(f"Skipping challenge: {active_count} active game(s)")
+                retry_event.clear()
+                retry_event.wait(timeout=CHALLENGE_CHECK_INTERVAL)
+                retry_event.clear()
+                continue
+
+            # ── A challenge was already sent — check its status ──────────────
+            if pending_challenge:
+                elapsed = time.monotonic() - pending_challenge["sent_at"]
+                if elapsed < ACCEPT_TIMEOUT:
+                    wait_left = ACCEPT_TIMEOUT - elapsed
+                    logger.debug(
+                        f"Waiting for {pending_challenge['opponent']} to accept "
+                        f"challenge {pending_challenge['id']} ({wait_left:.0f}s left)"
+                    )
+                    retry_event.clear()
+                    retry_event.wait(timeout=wait_left)
+                    retry_event.clear()
+                    continue
+                else:
+                    logger.info(
+                        f"No response from {pending_challenge['opponent']} after "
+                        f"{elapsed:.0f}s — they may be offline. Trying another bot in {RETRY_DELAY}s..."
+                    )
+                    pending_challenge.clear()
+                    retry_event.wait(timeout=RETRY_DELAY)
+                    retry_event.clear()
+
+            # ── Send a new challenge ─────────────────────────────────────────
+            logger.info("No active games — looking for a bot to challenge...")
+            challenge_id = try_challenge_random_bot(client, bot_username, challenge_tracker)
+
+            if challenge_id:
+                pending_challenge["id"] = challenge_id
+                pending_challenge["opponent"] = "unknown"
+                pending_challenge["sent_at"] = time.monotonic()
+                # Wait up to ACCEPT_TIMEOUT; fires early on decline/cancel
+                retry_event.clear()
+                retry_event.wait(timeout=ACCEPT_TIMEOUT)
+                retry_event.clear()
             else:
-                logger.debug(f"Skipping challenge check: {active_count} active game(s)")
-                
+                # Nothing to challenge right now — wait normal interval
+                retry_event.clear()
+                retry_event.wait(timeout=CHALLENGE_CHECK_INTERVAL)
+                retry_event.clear()
+
         except Exception as e:
             logger.error(f"Challenge loop error: {e}", exc_info=True)
             time.sleep(10)
-    
+
     logger.info("Challenge loop stopped")
 
 
@@ -1058,11 +1092,14 @@ def main():
 
     active_games: Dict[str, threading.Thread] = {}
     challenge_tracker = ChallengeTracker(MAX_CHALLENGES_PER_HOUR)
-    
+    retry_event = threading.Event()   # signals challenge loop to wake up immediately
+    pending_challenge: Dict = {}      # shared state: {id, opponent, sent_at}
+
     # Start challenge loop in background thread
     challenge_thread = threading.Thread(
         target=challenge_loop,
-        args=(client, bot_username, active_games, challenge_tracker),
+        args=(client, bot_username, active_games, challenge_tracker,
+              retry_event, pending_challenge),
         daemon=True
     )
     challenge_thread.start()
@@ -1107,21 +1144,48 @@ def main():
                                     else:
                                         logger.warning(f"Failed to decline challenge: {e}")
                         else:
-                            # Outgoing challenge - just log it
+                            # Outgoing challenge — update opponent name in pending tracker
                             logger.debug(f"Outgoing challenge to {dest_username}: {cid}")
+                            if pending_challenge.get("id") == cid:
+                                pending_challenge["opponent"] = dest_username
                     
                     elif event["type"] == "challengeDeclined":
                         challenge = event.get("challenge", {})
                         decliner = challenge.get("destUser", {}).get("name", "Unknown")
-                        logger.info(f"Challenge declined by {decliner}")
-                    
+                        reason = challenge.get("declineReason", challenge.get("declineReasonKey", "no reason given"))
+                        cid = challenge.get("id", "")
+                        is_ours = pending_challenge.get("id") == cid
+                        logger.info(
+                            f"Challenge {'(ours) ' if is_ours else ''}declined by {decliner}"
+                            f" — reason: {reason}"
+                        )
+                        if is_ours:
+                            pending_challenge.clear()
+                        # Always signal retry so challenge loop can pick the next bot
+                        threading.Timer(30, retry_event.set).start()
+
                     elif event["type"] == "challengeCanceled":
                         challenge = event.get("challenge", {})
                         challenger = challenge.get("challenger", {}).get("name", "Unknown")
-                        logger.info(f"Challenge canceled by {challenger}")
+                        cid = challenge.get("id", "")
+                        is_ours = pending_challenge.get("id") == cid
+                        logger.info(
+                            f"Challenge {'(ours) ' if is_ours else ''}canceled by {challenger}"
+                        )
+                        if is_ours:
+                            pending_challenge.clear()
+                            retry_event.set()
 
                     elif event["type"] == "gameStart":
                         game_id = event["game"]["id"]
+                        # If a pending challenge just got accepted, clear it and wake the loop
+                        if pending_challenge:
+                            logger.info(
+                                f"Challenge accepted — game {game_id} started "
+                                f"(challenge id: {pending_challenge.get('id', '?')})"
+                            )
+                            pending_challenge.clear()
+                            retry_event.set()
 
                         thread = threading.Thread(
                             target=play_game,
@@ -1132,14 +1196,15 @@ def main():
                         thread.start()
 
                         logger.info(f"Game {game_id} started")
-                    
+
                     elif event["type"] == "gameFinish":
                         game_id = event["game"]["id"]
                         if game_id in active_games:
                             # Clean up finished game thread
                             active_games[game_id].join(timeout=1)
                             del active_games[game_id]
-                            logger.info(f"Game {game_id} finished and cleaned up")
+                            logger.info(f"Game {game_id} finished — looking for next challenge...")
+                            retry_event.set()  # wake challenge loop immediately when game ends
 
                 except Exception as e:
                     logger.error(f"Event processing error: {e}", exc_info=True)

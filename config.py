@@ -109,7 +109,7 @@ STRENGTH_ADVANTAGE = 100  # ELO advantage for weak opponents (e.g., 1500 → bot
 ENABLE_AUTO_CHALLENGE = os.getenv("ENABLE_AUTO_CHALLENGE", "true").lower() in ("true", "1", "yes")
 
 # Maximum number of games to challenge per hour
-MAX_CHALLENGES_PER_HOUR = int(os.getenv("MAX_CHALLENGES_PER_HOUR", "3"))
+MAX_CHALLENGES_PER_HOUR = int(os.getenv("MAX_CHALLENGES_PER_HOUR", "5"))
 
 # ELO limits for challenging bots
 CHALLENGE_MIN_RATING = int(os.getenv("CHALLENGE_MIN_RATING", "1500"))
@@ -132,4 +132,4 @@ CHALLENGE_TIME_CONTROLS = [
 ]
 
 # Challenge check interval (seconds) - how often to check if we should challenge
-CHALLENGE_CHECK_INTERVAL = int(os.getenv("CHALLENGE_CHECK_INTERVAL", "300"))  # 5 minutes
+CHALLENGE_CHECK_INTERVAL = int(os.getenv("CHALLENGE_CHECK_INTERVAL", "60"))  # 1 minute

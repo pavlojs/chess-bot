@@ -66,13 +66,19 @@ Current test coverage includes:
 ### Challenge Acceptance Tests (9 tests)
 - ✅ Valid challenges (correct rating and time control)
 - ✅ Challenges with rating too low
-- ✅ Challenges with rating too high  
+- ✅ Challenges with rating too high
 - ✅ Challenges with unsupported time controls
 - ✅ Challenges with classical time control
 - ✅ Behavior when challenges are disabled
 - ✅ Handling of missing rating data
 - ✅ Rejection of correspondence challenges
 - ✅ Rejection of unlimited time challenges
+
+### Bullet Challenge Acceptance Tests (4 tests)
+- ✅ Accept 1+0 bullet challenge
+- ✅ Accept 1+1 bullet challenge
+- ✅ Accept 2+1 bullet challenge
+- ✅ Reject bullet challenges when `TIME_CONTROL` excludes bullet
 
 ### Board State Tests (5 tests)
 - ✅ Board initialization
@@ -86,21 +92,78 @@ Current test coverage includes:
 - ✅ UCI_LimitStrength for weak opponents (< 1800 ELO)
 - ✅ Full strength for strong opponents (≥ 1800 ELO)
 
-### Move Time Calculation Tests (4 tests)
+### Move Time Calculation Tests — Opponent Scaling (4 tests)
 - ✅ Full thinking time for strong opponents (≥ 2200 ELO)
-- ✅ Minimum time for weak opponents (< 1800 ELO, UCI_LimitStrength handles fairness)
-- ✅ Scaled time for intermediate opponents (1800-2199 ELO)
+- ✅ 40% movetime for weak opponents (< 1800 ELO, UCI_LimitStrength active)
+- ✅ Scaled time for intermediate opponents (1800–2199 ELO)
 - ✅ Consistent time when dynamic strength is disabled
+
+### Move Time Calculation Tests — Signature (2 tests)
+- ✅ `calculate_move_time` signature has exactly `(opponent_rating, base_time)` — no time-pressure args
+- ✅ Return value is `int`
+
+### Time Parsing Tests (10 tests)
+- ✅ `None` input returns `None`
+- ✅ Integer passthrough
+- ✅ Float truncated to int
+- ✅ String integer (`"120000"`)
+- ✅ Timedelta string `"0:01:00.000000"` (minutes + seconds)
+- ✅ Timedelta string `"0:08:44.640000"` (hours + minutes + seconds + microseconds)
+- ✅ Timedelta string without microseconds `"0:03:00"`
+- ✅ `datetime.timedelta` object
+- ✅ `datetime.timedelta` with microseconds
+- ✅ Invalid string returns `None`
+
+### Info Line Parsing Tests — `_extract_cp_from_info` (7 tests)
+- ✅ Positive centipawn score
+- ✅ Negative centipawn score
+- ✅ Score with bound token (`upperbound`/`lowerbound`) between `cp` and value
+- ✅ Mate score → `+30000`
+- ✅ Losing mate score → `−30000`
+- ✅ Empty string returns `None`
+- ✅ No score token returns `None`
+
+### Info Line Parsing Tests — `_parse_pv_from_info` (6 tests)
+- ✅ Positive cp eval and full PV
+- ✅ Negative cp eval formatting
+- ✅ Mate eval formatting
+- ✅ PV truncated to requested depth
+- ✅ No PV section → empty string
+- ✅ Empty info line → empty strings
+
+### Game End Reason Tests (5 tests)
+- ✅ Checkmate (black wins)
+- ✅ Stalemate
+- ✅ Insufficient material
+- ✅ Threefold repetition
+- ✅ Fifty-move rule
+
+### Error Handling Tests (2 tests)
+- ✅ `ApiError` importable from `berserk.exceptions`
+- ✅ `ResponseError` importable from `berserk.exceptions`
+
+### Logging Tests (1 test)
+- ✅ Logger configuration and handler setup
+
+### Challenge Tracker Tests (4 tests)
+- ✅ Initial state: no challenges recorded
+- ✅ Recording challenges reduces remaining count
+- ✅ Challenges older than 1 hour are pruned automatically
+- ✅ `filter_suitable_bots` excludes self and out-of-range bots
+
+### Draw Offer Handling Tests (5 tests)
+- ✅ Accept draw in balanced position (±200 cp)
+- ✅ Decline draw when winning (> 200 cp)
+- ✅ Decline draw when losing (< −200 cp)
+- ✅ Decline draw when bot has mate
+- ✅ Evaluation sign correctly flipped for black
 
 ### Stockfish Updater Tests (3 tests)
 - ✅ Binary name detection (platform-specific)
 - ✅ Version detection from installed binary
 - ✅ Latest release info retrieval from GitHub API
 
-### Logging Tests (1 test)
-- ✅ Logger configuration and handler setup
-
-**Total: 25 tests, 100% pass rate**
+**Total: 70 tests, 100% pass rate**
 
 ### Network Error Handling & Retry Logic
 The bot now includes robust error handling for network issues:
@@ -144,12 +207,22 @@ pytest && git add .
 Tests are organized in `test_bot.py` with separate test classes for different functionality:
 
 ```python
-class TestChallengeAcceptance(unittest.TestCase)    # 9 tests
-class TestBoardState(unittest.TestCase)              # 5 tests
-class TestStockfishInitialization(unittest.TestCase) # 3 tests
-class TestMoveTimeCalculation(unittest.TestCase)     # 4 tests (HYBRID)
-class TestStockfishUpdater(unittest.TestCase)        # 3 tests
-class TestLogging(unittest.TestCase)                 # 1 test
+class TestChallengeAcceptance(unittest.TestCase)        #  9 tests
+class TestBulletChallengeAcceptance(unittest.TestCase)  #  4 tests
+class TestBoardState(unittest.TestCase)                 #  5 tests
+class TestStockfishInitialization(unittest.TestCase)    #  3 tests
+class TestMoveTimeCalculation(unittest.TestCase)        #  4 tests
+class TestMoveTimeCalculationSignature(unittest.TestCase) # 2 tests
+class TestParseTimeToMilliseconds(unittest.TestCase)    # 10 tests
+class TestExtractCpFromInfo(unittest.TestCase)          #  7 tests
+class TestParsePvFromInfo(unittest.TestCase)            #  6 tests
+class TestGameEndReason(unittest.TestCase)              #  5 tests
+class TestErrorHandling(unittest.TestCase)              #  2 tests
+class TestLogging(unittest.TestCase)                    #  1 test
+class TestChallengeTracker(unittest.TestCase)           #  4 tests
+class TestDrawOfferHandling(unittest.TestCase)          #  5 tests
+class TestStockfishUpdater(unittest.TestCase)           #  3 tests
+# Total: 70 tests
 ```
 
 ## Mocking

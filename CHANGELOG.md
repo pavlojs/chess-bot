@@ -2,6 +2,38 @@
 
 All notable changes to Axiom Chess Bot are documented in this file.
 
+## [2.4.0] - 2026-02-19
+
+### Improved
+
+#### 🔔 Challenge Loop — Event-Driven Retry & Full Feedback
+- **Fixed**: No feedback when an outgoing challenge was ignored — the loop now logs
+  `"No response from <bot> after 90s — they may be offline. Trying another bot in 30s..."`
+- **Fixed**: 5-minute flat sleep after a decline/cancel — loop now uses `threading.Event`
+  so it wakes up **immediately** on `challengeDeclined`, `challengeCanceled`, or `gameFinish`
+- **Added**: `pending_challenge` shared dict tracks the in-flight challenge
+  (`id`, `opponent`, `sent_at`) so events can be correlated back to our own challenge
+- **Added**: `challengeDeclined` now logs the **decline reason** from Lichess
+  (e.g. "later", "tooFast", "noBot", etc.) and whether it was our challenge
+- **Added**: 30-second back-off after a decline before trying the next bot (avoids
+  hammering the API if multiple bots decline in quick succession)
+- **Added**: `gameFinish` now immediately wakes the challenge loop so the bot looks
+  for the next game as soon as the current one ends (instead of waiting up to 1 minute)
+- **Changed**: `challenge_bot()` now returns the challenge ID string (was `bool`)
+- **Changed**: `try_challenge_random_bot()` now returns the challenge ID (was `bool`)
+- **Changed**: `challenge_loop()` accepts two new arguments: `retry_event` and
+  `pending_challenge`
+
+#### ⚙️ Config defaults updated
+- `MAX_CHALLENGES_PER_HOUR`: `3` → `5`
+- `CHALLENGE_CHECK_INTERVAL`: `300` (5 min) → `60` (1 min)
+
+**Timeline example (before vs. after):**
+
+Before: declined at 14:24:19 → next attempt 14:29:19 (5-minute wait, silent)
+After:  declined at 14:24:19 → "declined by X — reason: tooFast" logged instantly
+        → retry at 14:24:49 (30-second back-off), reason printed
+
 ## [2.3.1] - 2026-02-19
 
 ### Performance

@@ -144,17 +144,16 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 - Example: 1500-rated player faces ~1600 strength bot
 - **Result: Fair, winnable games** ✅
 
-🎯 **Advanced Players (1800-2799 ELO):**
+🎯 **Advanced Players (1800–2799 ELO):**
 - Uses **full-strength Stockfish** (no intentional mistakes)
-- Adjusts difficulty via thinking time (40-95% of base time)
-- Example: 2000-rated player faces full strength with 1420ms thinking time
-- Example: 2500-rated player faces full strength with 2485ms thinking time
-- **Result: Challenging but quality chess** ✅
+- Passes real game clocks (`wtime`/`btime`/`winc`/`binc`) directly to Stockfish via native UCI `go` command
+- Stockfish manages its own time — accounts for game phase, position complexity, and increment automatically
+- **Result: Challenging, high-quality chess** ✅
 
 👑 **Elite & Super-GM (2800+ ELO):**
-- **MAXIMUM POWER**: Full strength + Full thinking time (3 seconds)
+- **MAXIMUM POWER**: Full strength + native clock management
 - No handicaps, no compromises
-- Effective strength: ~3200-3500 ELO
+- Effective strength: ~3200–3500 ELO
 - **Result: Ultimate challenge** 🔥
 
 **Why this approach is better:**
@@ -172,15 +171,15 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 
 **Effective Strength Examples:**
 
-| Opponent Rating | Method | Thinking Time | Effective Bot Strength | Advantage |
-|----------------|--------|---------------|----------------------|------------|
-| **1200 ELO** | UCI_LimitStrength | 1200ms (40%) | ~1300 ELO | +100 ELO ✅ |
-| **1500 ELO** | UCI_LimitStrength | 1200ms (40%) | ~1600 ELO | +100 ELO ✅ |
-| **1800 ELO** | Time Control (40%) | 1200ms | ~2000 ELO | +200 ELO ✅ |
-| **2000 ELO** | Time Control (51%) | 1530ms | ~2200 ELO | +200 ELO ✅ |
-| **2500 ELO** | Time Control (79%) | 2370ms | ~2700 ELO | +200 ELO ✅ |
-| **2800 ELO** | **FULL POWER** | **3000ms (100%)** | **~3200 ELO** | **+400 ELO** 🔥 |
-| **3000 ELO** | **FULL POWER** | **3000ms (100%)** | **~3400 ELO** | **+400 ELO** 🔥 |
+| Opponent Rating | Method | Effective Bot Strength | Notes |
+|----------------|--------|----------------------|-------|
+| **1200 ELO** | UCI_LimitStrength + movetime | ~1300 ELO | +100 ELO fair play ✅ |
+| **1500 ELO** | UCI_LimitStrength + movetime | ~1600 ELO | +100 ELO fair play ✅ |
+| **1800 ELO** | Full strength, native clock | ~2000+ ELO | Stockfish manages time ✅ |
+| **2000 ELO** | Full strength, native clock | ~2200+ ELO | Stockfish manages time ✅ |
+| **2500 ELO** | Full strength, native clock | ~2700+ ELO | Stockfish manages time ✅ |
+| **2800 ELO** | **FULL POWER**, native clock | **~3200 ELO** | Maximum power 🔥 |
+| **3000 ELO** | **FULL POWER**, native clock | **~3400 ELO** | Maximum power 🔥 |
 
 **To customize:**
 ```python
@@ -205,30 +204,33 @@ DYNAMIC_STRENGTH = False
 The bot can automatically challenge other bots on Lichess when it has no active games. This feature **runs in a separate background thread** and operates independently of the main event stream.
 
 **How it works:**
-- ✅ Runs in background thread - doesn't block event processing
+- ✅ Runs in background thread — doesn't block event processing
 - ✅ Automatically challenges online bots when idle (no active games)
-- ✅ Respects rate limits (max 3 challenges per hour by default)
-- ✅ Only challenges bots within specified ELO range (1500-2900 by default)
-- ✅ Uses variety of time controls (blitz, rapid, and classical)
-- ✅ Also accepts challenges from other bots and human players (if user logs into bot account)
-- ✅ Handles declined/canceled challenges gracefully
-- ✅ Distinguishes between incoming and outgoing challenges automatically
+- ✅ Respects rate limits (max **5** challenges per hour by default)
+- ✅ Only challenges bots within specified ELO range (1500–2900 by default)
+- ✅ Uses a variety of time controls (bullet, blitz, rapid, and classical)
+- ✅ Also accepts challenges from other bots and human players
+- ✅ **Event-driven retry** — reacts immediately to declined/canceled challenges instead of waiting
+- ✅ **Decline reason logged** — shows Lichess's reason (e.g. `tooFast`, `later`, `noBot`)
+- ✅ **90-second acceptance timeout** — if the opponent never responds, moves on after 90 s
+- ✅ **30-second back-off** after a decline before trying a different bot
+- ✅ **Instant retry after game ends** — looks for the next challenge the moment a game finishes
 
 **Configuration options in `config.py`:**
 - `ENABLE_AUTO_CHALLENGE`: Enable/disable auto-challenge feature (default: `True`)
-- `MAX_CHALLENGES_PER_HOUR`: Maximum challenges to send per hour (default: `3`)
+- `MAX_CHALLENGES_PER_HOUR`: Maximum challenges to send per hour (default: `5`)
 - `CHALLENGE_MIN_RATING`: Minimum ELO to challenge (default: `1500`)
 - `CHALLENGE_MAX_RATING`: Maximum ELO to challenge (default: `2900`)
-- `CHALLENGE_CHECK_INTERVAL`: How often to check for challenging (default: `300` seconds = 5 minutes)
+- `CHALLENGE_CHECK_INTERVAL`: Idle poll interval when no challenge is pending (default: `60` seconds)
 - `CHALLENGE_TIME_CONTROLS`: List of time controls to use when challenging
 
 **Environment variables** (can be set in `.env` file):
 ```bash
 ENABLE_AUTO_CHALLENGE=true
-MAX_CHALLENGES_PER_HOUR=3
+MAX_CHALLENGES_PER_HOUR=5
 CHALLENGE_MIN_RATING=1500
 CHALLENGE_MAX_RATING=2900
-CHALLENGE_CHECK_INTERVAL=300
+CHALLENGE_CHECK_INTERVAL=60
 ```
 
 **To customize time controls:**
@@ -251,8 +253,8 @@ CHALLENGE_TIME_CONTROLS = [
 - 🎯 **Smart targeting**: Only challenges bots within your specified ELO range
 - ⏱️ **Rate limiting**: Respects Lichess API limits with configurable hourly cap
 - 🎲 **Variety**: Randomly selects bots and time controls for diverse games
-- 🔄 **Auto-retry**: Periodically checks for new opponents when idle
-- 📝 **Decline handling**: Logs when challenges are declined or canceled by opponents
+- ⚡ **Event-driven**: Reacts instantly to declines, cancels, and game-end events — no unnecessary waiting
+- 📝 **Decline reason**: Logs the Lichess decline reason (e.g. `tooFast`, `later`, `noBot`) for every outgoing challenge that is declined
 
 **To disable auto-challenging:**
 ```python
@@ -293,25 +295,26 @@ PREDICTION_DEPTH = 10          # Number of half-moves to predict ahead
 - 📈 **Analysis**: Review games to understand strategic decisions
 - 🎓 **Education**: Study engine's long-term plans
 
-**Note:** Predictions are calculated before each move and logged at INFO level. They don't affect move quality or playing strength.
+**Note:** The prediction is extracted for free from the info line Stockfish already produces during the move search — no second engine call is made. It does not affect move quality, playing strength, or time usage.
 
 ### Supported Time Controls
 
 The bot supports all major real-time Lichess time control modes:
 
-- **Bullet**: ⚡ Ultra-fast games (typically < 3 minutes total) - **NEW!**
+- **Bullet**: ⚡ Ultra-fast games (typically < 3 minutes total)
 - **Blitz**: Fast games (typically 3-8 minutes total)
 - **Rapid**: Medium-paced games (typically 10-25 minutes total)
 - **Classical**: Slow games (typically 30+ minutes per side)
 
-**NEW: Intelligent Time Management** ⏱️
+**Native Clock Management** ⏱️
 
-The bot now features advanced time management to prevent losses on time:
-- 🚨 **Emergency Mode (≤20s)**: Fast, high-quality moves (minimum 300ms)
-- ⚠️ **Moderate Pressure (20-60s)**: Conservative time usage (minimum 500ms)
-- ✅ **Normal Play (>60s)**: Standard opponent-based calculation
+For all rated opponents Stockfish receives the real clock values (`wtime`, `btime`, `winc`, `binc`) directly via the UCI `go wtime … btime … winc … binc …` command — the same protocol used by every chess GUI. Stockfish's internal time manager accounts for position complexity, game phase, and increment automatically.
 
-This allows the bot to play bullet games professionally while maintaining playing strength!
+- ✅ Weak opponents (< 1800): fixed `go movetime` budget so `UCI_LimitStrength` keeps games fair
+- ✅ All other opponents: native clock mode — Stockfish decides how long to think
+- ✅ No-clock fallback: `go movetime` used when game has no clock data
+
+This is strictly better than any manual emergency/pressure formula for bullet, blitz, rapid, and classical alike.
 
 **Automatically rejected:**
 - ❌ **Correspondence**: Games with days per move (limit ≥ 259200 seconds)
