@@ -63,15 +63,14 @@ def find_stockfish_path():
 
 STOCKFISH_PATH = find_stockfish_path()
 
-# Stockfish time per move (ms) - dynamically adjusted based on opponent strength
-# Base time for calculation, can be adjusted per opponent
-STOCKFISH_TIME = 3000  # Default: 3 seconds per move
+# Stockfish time per move (ms) — used for weak opponents and fallback (no clock data)
+STOCKFISH_TIME = int(os.getenv("STOCKFISH_TIME", "3000"))
 
 UCI_OPTIONS: Dict[str, Any] = {
-    "Threads": 4,
-    "Hash": 2048,
-    "UCI_LimitStrength": False,  # Never use UCI_LimitStrength - it introduces blunders
-    "Move Overhead": 30,  # Note: space in key name (ms)
+    "Threads": int(os.getenv("SF_THREADS", "4")),
+    "Hash": int(os.getenv("SF_HASH", "2048")),
+    "UCI_LimitStrength": False,  # Managed dynamically by init_stockfish() — do not set here
+    "Move Overhead": int(os.getenv("SF_MOVE_OVERHEAD", "30")),  # Note: space in key name (ms)
     "Ponder": False,
 }
 
@@ -86,7 +85,7 @@ MAX_RATING = 2800
 TIME_CONTROL = ["bullet", "blitz", "rapid", "classical"]
 
 # Dynamic strength: THREE-TIER HYBRID approach for fair games at all levels
-DYNAMIC_STRENGTH = True
+DYNAMIC_STRENGTH = os.getenv("DYNAMIC_STRENGTH", "true").lower() in ("true", "1", "yes")
 
 # THREE-TIER HYBRID SYSTEM:
 # 1. < LIMIT_STRENGTH_THRESHOLD (1800):
@@ -96,12 +95,11 @@ DYNAMIC_STRENGTH = True
 #    (high quality, no intentional blunders, but beatable by near-perfect play)
 # 3. >= FULL_STRENGTH_THRESHOLD (2800): MAXIMUM POWER, no handicaps
 
-LIMIT_STRENGTH_THRESHOLD = 1800  # Below this: movetime cap added on top of UCI_LimitStrength
-FULL_STRENGTH_THRESHOLD = 2800   # At or above: FULL POWER (no UCI_LimitStrength)
+LIMIT_STRENGTH_THRESHOLD = int(os.getenv("LIMIT_STRENGTH_THRESHOLD", "1800"))  # Below: movetime + UCI_LimitStrength
+FULL_STRENGTH_THRESHOLD = int(os.getenv("FULL_STRENGTH_THRESHOLD", "2800"))    # At or above: FULL POWER
 
-# ELO bonus applied via UCI_Elo = opponent_rating + STRENGTH_ADVANTAGE
-# Used for ALL opponents below FULL_STRENGTH_THRESHOLD
-STRENGTH_ADVANTAGE = 100  # e.g. 1500-rated → bot plays at ~1600; 2000-rated → ~2100
+# ELO bonus: UCI_Elo = opponent_rating + STRENGTH_ADVANTAGE (for all < FULL_STRENGTH_THRESHOLD)
+STRENGTH_ADVANTAGE = int(os.getenv("STRENGTH_ADVANTAGE", "100"))  # e.g. 1500 → ~1600; 2000 → ~2100
 
 # ─────────────────────────────────────────────
 # CHALLENGE CONFIGURATION

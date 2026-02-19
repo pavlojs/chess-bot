@@ -103,7 +103,7 @@ services:
     environment:
       - TOKEN=${TOKEN}  # Set TOKEN in .env file or environment
     volumes:
-      - ./config.py:/app/config.py  # Mount config for easy editing
+      - ./config.py:/app/config.py  # Optional: mount config for time-control/challenge customisation
     restart: unless-stopped
 ```
 
@@ -116,21 +116,25 @@ services:
 
 ### Modifying Playstyle
 
-The bot's playstyle can be modified by changing settings in `config.py`:
+Most settings can be changed via a `.env` file (copy `.env.example` to `.env`) **without editing any code**. A few options that require a list (e.g. `TIME_CONTROL`, `CHALLENGE_TIME_CONTROLS`) still need to be set in `config.py`.
 
-- `STOCKFISH_TIME`: Base thinking time per move in milliseconds (default: `3000` = 3 seconds). Higher values = stronger play.
-- `TIME_CONTROL`: List of accepted time controls. Available options: `bullet`, `blitz`, `rapid`, `classical`.
-- `ENABLE_MOVE_PREDICTION`: Show Stockfish's predicted continuation (default: `true`). Displays best line analysis.
-- `PREDICTION_DEPTH`: Number of moves to predict ahead (default: `10`). Shows strategic plan.
-- `UCI_OPTIONS`: Dictionary of UCI options for Stockfish 18+:
-  - `"Threads"`: Number of CPU threads to use (1-1024). Default: `4`
-  - `"Hash"`: Hash table size in MB (1-33554432). Default: `2048` (2 GB)
-  - `"Move Overhead"`: Network latency compensation in ms (0-5000). **Note:** space in key name.
-  - `"Ponder"`: True/False to enable pondering.
-  
-  For full list of available options, run: `/usr/local/bin/stockfish` and type `uci`
+**Available via `.env` or environment variable:**
 
-Other options can be added as needed. Refer to Stockfish documentation for available UCI options.
+- `STOCKFISH_TIME`: Base thinking time per move in ms (default: `3000`). Higher = stronger play.
+- `SF_THREADS`: CPU threads for Stockfish (default: `4`).
+- `SF_HASH`: Hash table size in MB (default: `2048`).
+- `SF_MOVE_OVERHEAD`: Network latency compensation in ms (default: `30`).
+- `ENABLE_MOVE_PREDICTION`: Show predicted continuation in logs (default: `true`).
+- `PREDICTION_DEPTH`: Half-moves to show in predicted line (default: `10`).
+- `DYNAMIC_STRENGTH` / `LIMIT_STRENGTH_THRESHOLD` / `FULL_STRENGTH_THRESHOLD` / `STRENGTH_ADVANTAGE`: see *Dynamic Strength* section below.
+
+**Requires editing `config.py`:**
+
+- `TIME_CONTROL`: List of accepted time control categories. Options: `bullet`, `blitz`, `rapid`, `classical`.
+- `CHALLENGE_TIME_CONTROLS`: List of time controls used when auto-challenging bots.
+- `UCI_OPTIONS`: Any extra Stockfish UCI options not covered above.
+
+For full Stockfish UCI options, run `/usr/local/bin/stockfish` and type `uci`.
 
 ### Dynamic Strength Based on Opponent Rating
 
@@ -163,12 +167,12 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 - ✅ Maximum challenge for elite players (full power unlocked at 2800+)
 - ✅ Smooth difficulty progression across all levels
 
-**Configuration options in `config.py`:**
-- `DYNAMIC_STRENGTH`: Enable/disable feature (default: `True`)
-- `LIMIT_STRENGTH_THRESHOLD`: Below this rating, use UCI_LimitStrength (default: `1800`)
-- `FULL_STRENGTH_THRESHOLD`: At or above this rating, use full power (default: `2800`)
-- `STRENGTH_ADVANTAGE`: ELO bonus for weak opponents (default: `100`)
-- `STOCKFISH_TIME`: Base thinking time in milliseconds (default: `3000`)
+**Configuration options — all settable via `.env` file:**
+- `DYNAMIC_STRENGTH`: Enable/disable feature (default: `true`)
+- `LIMIT_STRENGTH_THRESHOLD`: Below this rating, movetime cap added on top of UCI_LimitStrength (default: `1800`)
+- `FULL_STRENGTH_THRESHOLD`: At or above this rating, full power — no UCI_LimitStrength (default: `2800`)
+- `STRENGTH_ADVANTAGE`: ELO bonus bot plays above opponent for all below FULL_STRENGTH_THRESHOLD (default: `100`)
+- `STOCKFISH_TIME`: Base thinking time in ms for weak opponents and fallback (default: `3000`)
 
 **Effective Strength Examples:**
 
@@ -182,22 +186,20 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 | **2800 ELO** | **FULL POWER**, native clock | **~3200 ELO** | Maximum power 🔥 |
 | **3000 ELO** | **FULL POWER**, native clock | **~3400 ELO** | Maximum power 🔥 |
 
-**To customize:**
-```python
-# In config.py
-
+**To customize (`.env` file — no code changes needed):**
+```bash
 # Adjust thresholds
-LIMIT_STRENGTH_THRESHOLD = 1600  # Use UCI_LimitStrength below 1600
-FULL_STRENGTH_THRESHOLD = 2600   # Full power at 2600+
+LIMIT_STRENGTH_THRESHOLD=1600   # UCI_LimitStrength below 1600
+FULL_STRENGTH_THRESHOLD=2600    # Full power at 2600+
 
-# Adjust advantage for weak opponents
-STRENGTH_ADVANTAGE = 150  # Play 150 ELO above opponent
+# Adjust ELO bonus
+STRENGTH_ADVANTAGE=150          # Play 150 ELO above opponent
 
 # Increase base thinking time for stronger play
-STOCKFISH_TIME = 5000  # 5 seconds (very strong)
+STOCKFISH_TIME=5000             # 5 seconds (very strong)
 
-# Or disable dynamic strength for consistent maximum strength
-DYNAMIC_STRENGTH = False
+# Or disable dynamic strength for consistent maximum power
+DYNAMIC_STRENGTH=false
 ```
 
 ### Automatic Bot Challenging
@@ -283,11 +285,10 @@ The bot can display Stockfish's predicted continuation (Principal Variation) - s
 - 📊 **Evaluation**: Position score in centipawns (cp) or mate announcement
 - 🧠 **Strategic plan**: Understanding of the engine's multi-move strategy
 
-**Configuration:**
-```python
-# In config.py
-ENABLE_MOVE_PREDICTION = True  # Enable/disable prediction display
-PREDICTION_DEPTH = 10          # Number of half-moves to predict ahead
+**Configuration (`.env` file — no code changes needed):**
+```bash
+ENABLE_MOVE_PREDICTION=true   # Enable/disable prediction display
+PREDICTION_DEPTH=10           # Number of half-moves to predict ahead
 ```
 
 **Use cases:**
