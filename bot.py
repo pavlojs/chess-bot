@@ -380,34 +380,47 @@ def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
     return sf
 
 
-def get_move_prediction(stockfish: Stockfish, game_id: str, prediction_depth: int = PREDICTION_DEPTH) -> Optional[str]:
-    """Get Stockfish's predicted line of best moves (Principal Variation).
+def get_move_prediction(stockfish: Stockfish, game_id: str, move_time_ms: int,
+                        prediction_depth: int = PREDICTION_DEPTH) -> Optional[str]:
+    """Analyze position, log the predicted continuation (PV), and return the best move.
+    
+    Uses a single Stockfish analysis to both determine the move to play and log the
+    predicted line. The first move of the PV is used as the actual move.
+    num_nodes is estimated from move_time_ms to approximate time-based search depth.
     
     Args:
-        stockfish: Initialized Stockfish instance
+        stockfish: Initialized Stockfish instance (position already set)
         game_id: Game ID for logging
-        prediction_depth: Number of moves to predict (half-moves/plies)
+        move_time_ms: Time budget for this move in milliseconds
+        prediction_depth: Number of PV moves to display in the log
     
     Returns:
-        String with predicted move sequence, or None if unavailable
+        Best move in UCI notation (e.g. "e2e4"), or None if analysis fails
     """
     try:
-        # Get top move with full analysis including PV (Principal Variation)
-        top_moves = stockfish.get_top_moves(num_top_moves=1, verbose=True)
+        # Estimate search nodes from move time:
+        # ~300K nodes/sec is a conservative baseline (works on weak hardware too).
+        # Capped at 10M to avoid spending too long on a single depth-based search.
+        estimated_nodes = max(50_000, min(move_time_ms * 300, 10_000_000))
+        
+        # Single analysis call: returns best move + full PV
+        top_moves = stockfish.get_top_moves(num_top_moves=1, verbose=True,
+                                            num_nodes=estimated_nodes)
         
         if not top_moves:
             return None
         
         best_move_info = top_moves[0]
-        pv_moves = best_move_info.get('PVMoves', [])
+        best_move = best_move_info.get('Move')
         
-        if not pv_moves:
+        if not best_move:
             return None
         
-        # Limit to requested depth
-        pv_moves = pv_moves[:prediction_depth]
+        # PVMoves is a space-separated string of UCI moves, e.g. "e2e4 e7e5 g1f3"
+        pv_raw = best_move_info.get('PVMoves', '')
+        pv_moves = pv_raw.split() if isinstance(pv_raw, str) else list(pv_raw)
         
-        # Get evaluation for context
+        # Get evaluation for logging
         eval_info = best_move_info.get('Centipawn')
         mate_info = best_move_info.get('Mate')
         
@@ -417,14 +430,14 @@ def get_move_prediction(stockfish: Stockfish, game_id: str, prediction_depth: in
         elif eval_info is not None:
             eval_str = f" ({eval_info:+d} cp)"
         
-        # Format the predicted line
-        prediction = " ".join(pv_moves)
-        logger.info(f"[{game_id}] 🔮 Predicted line{eval_str}: {prediction}")
+        # Log the predicted continuation
+        pv_display = " ".join(pv_moves[:prediction_depth]) if pv_moves else best_move
+        logger.info(f"[{game_id}] 🔮 Predicted line{eval_str}: {pv_display}")
         
-        return prediction
+        return best_move
         
     except Exception as e:
-        logger.debug(f"[{game_id}] Could not get move prediction: {e}")
+        logger.debug(f"[{game_id}] Move prediction failed: {e}")
         return None
 
 
@@ -864,14 +877,18 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         logger.debug(f"[{game_id}] Calculating move for position: {board.fen()}")
                         stockfish.set_fen_position(board.fen())
                         
-                        # Get move prediction (principal variation) if enabled
-                        if ENABLE_MOVE_PREDICTION:
-                            get_move_prediction(stockfish, game_id, PREDICTION_DEPTH)
-                        
                         # Calculate appropriate thinking time based on opponent strength and remaining time
                         move_time = calculate_move_time(opponent_rating, STOCKFISH_TIME, 
                                                        bot_time_remaining, increment)
-                        move = stockfish.get_best_move_time(move_time)
+                        
+                        # Use prediction (single engine call) when enabled, else fall back to timed search
+                        if ENABLE_MOVE_PREDICTION:
+                            move = get_move_prediction(stockfish, game_id, move_time, PREDICTION_DEPTH)
+                            if not move:
+                                logger.debug(f"[{game_id}] Prediction failed, falling back to timed search")
+                                move = stockfish.get_best_move_time(move_time)
+                        else:
+                            move = stockfish.get_best_move_time(move_time)
 
                         if move:
                             # Double-check game isn't over before making move
