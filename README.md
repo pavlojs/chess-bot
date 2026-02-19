@@ -100,8 +100,7 @@ Or using Docker Compose:
 services:
   axiom-bot:
     image: ghcr.io/whiteravens20/axiom-chess-bot:latest
-    environment:
-      - TOKEN=${TOKEN}  # Set TOKEN in .env file or environment
+    env_file: .env  # Load environment variables from .env file
     volumes:
       - ./config.py:/app/config.py  # Optional: mount config for time-control/challenge customisation
     restart: unless-stopped
@@ -109,9 +108,10 @@ services:
 
 #### Option 2: Build Locally
 
-1. Build and run with Docker Compose: `docker-compose up --build`
-2. Or manually: `docker build -t axiom-bot .` then `docker run -e TOKEN=your_token axiom-bot`
-3. For persistent config, mount the volume as in `docker-compose.yml`.
+1. Copy `.env.example` to `.env` and fill in your `TOKEN` and any settings you want to change.
+2. Build and run: `docker-compose up --build`
+3. **After changing `.env`** (e.g. `MAX_CHALLENGES_PER_HOUR`): just `docker-compose up -d` — **no rebuild needed**. `env_file` is read fresh on every container start.
+4. To rebuild the image (only needed after code changes): `docker-compose up --build`.
 
 
 ### Modifying Playstyle

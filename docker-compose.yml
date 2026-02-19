@@ -2,8 +2,7 @@ services:
   axiom-bot:
     build: .
     container_name: axiom-bot
-    environment:
-      - TOKEN=${TOKEN}  # Set TOKEN in .env file or environment
+    env_file: .env  # Load environment variables from .env file
     volumes:
       - ./config.py:/app/config.py  # Mount config for easy editing
     restart: unless-stopped
