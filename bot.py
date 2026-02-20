@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 from stockfish import Stockfish, StockfishException
 from typing import Dict, Any, List, Optional
+import requests
 from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout, RequestException
 from urllib3.exceptions import ProtocolError
 
@@ -835,19 +836,40 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                     else:
                                         logger.info(f"[{game_id}] Declining draw offer (we're losing but engine can play: {evaluation}cp)")
 
-                                    # Send decision via API
+                                    # Send decision via API (try library first, then fall back to BOT endpoint)
                                     try:
                                         client.board.handle_draw_offer(game_id, accept=accept_draw)
                                     except Exception as api_error:
-                                        logger.error(f"[{game_id}] Failed to respond to draw offer: {api_error}")
+                                        # If the error indicates this endpoint isn't for BOT accounts,
+                                        # fallback to the BOT HTTP endpoint which supports bot tokens.
+                                        err_text = str(api_error).lower()
+                                        if "not for bot accounts" in err_text or "403" in err_text or getattr(api_error, 'response', None) and getattr(api_error.response, 'status_code', None) == 403:
+                                            try:
+                                                url_action = "accept" if accept_draw else "decline"
+                                                url = f"https://lichess.org/api/bot/game/{game_id}/draw/{url_action}"
+                                                headers = {"Authorization": f"Bearer {TOKEN}"}
+                                                resp = requests.post(url, headers=headers, timeout=10)
+                                                if resp.status_code >= 400:
+                                                    logger.error(f"[{game_id}] BOT endpoint responded {resp.status_code}: {resp.text}")
+                                                else:
+                                                    logger.info(f"[{game_id}] Responded to draw via BOT endpoint: {url_action}")
+                                            except Exception as http_err:
+                                                logger.error(f"[{game_id}] Failed to respond to draw offer via BOT endpoint: {http_err}")
+                                        else:
+                                            logger.error(f"[{game_id}] Failed to respond to draw offer: {api_error}")
 
                                 except Exception as e:
                                     logger.error(f"[{game_id}] Error evaluating draw offer: {e}")
-                                    # On error, decline draw and continue playing
+                                    # On error, attempt to decline draw and continue playing
                                     try:
                                         client.board.handle_draw_offer(game_id, accept=False)
-                                    except:
-                                        pass
+                                    except Exception as api_error:
+                                        try:
+                                            url = f"https://lichess.org/api/bot/game/{game_id}/draw/decline"
+                                            headers = {"Authorization": f"Bearer {TOKEN}"}
+                                            requests.post(url, headers=headers, timeout=10)
+                                        except Exception:
+                                            pass
 
                     # After processing event, check if game is over
                     if board.is_game_over():
