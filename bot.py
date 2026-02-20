@@ -41,6 +41,7 @@ from config import (
     CHALLENGE_CHECK_INTERVAL,
     ENABLE_MOVE_PREDICTION,
     PREDICTION_DEPTH,
+    PREDICTION_MIN_USE_ELO,
 )
 
 from logging_config import setup_logger
