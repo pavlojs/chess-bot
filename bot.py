@@ -456,12 +456,30 @@ def _extract_cp_from_info(info_line: str) -> Optional[int]:
     return None
 
 
+def _extract_mate_from_info(info_line: str) -> Optional[int]:
+    """Extract raw mate distance from a Stockfish info line.
+
+    Returns the mate value (positive or negative) if present, otherwise None.
+    Positive mate means mate for side to move; negative means being mated.
+    """
+    try:
+        if ' score mate ' in info_line:
+            return int(info_line.split(' score mate ')[1].split()[0])
+    except (IndexError, ValueError):
+        pass
+    return None
+
+
 def get_move_prediction(stockfish: Stockfish, game_id: str,
                          move_time_ms: int | None = None,
                          wtime: int | None = None, btime: int | None = None,
                          winc: int = 0, binc: int = 0,
-                         prediction_depth: int = PREDICTION_DEPTH) -> Optional[str]:
+                         prediction_depth: int = PREDICTION_DEPTH) -> tuple[Optional[str], Optional[int]]:
     """Search for the best move and log the predicted continuation (PV).
+
+    Returns a tuple `(best_move, mate_value)` where `mate_value` is the mate
+    distance parsed from the engine info (positive for mate for side-to-move,
+    negative for being mated), or `None` if no mate score was present.
 
     Two search modes:
     - movetime: supply move_time_ms for a fixed per-move budget
@@ -491,20 +509,25 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
             move = stockfish.get_best_move_time(move_time_ms)
         else:
             move = _get_best_move_with_clocks(stockfish, wtime, btime, winc, binc)
-        
+
         if not move:
-            return None
-        
-        # Log PV from the info line already produced by that search — no extra work
+            return None, None
+
+        # Capture engine info once and reuse
+        info_line = stockfish.info()
+
+        # Parse PV and mate info for logging and decision-making
         if logger.isEnabledFor(logging.INFO):
-            eval_str, pv_display = _parse_pv_from_info(stockfish.info(), prediction_depth)
+            eval_str, pv_display = _parse_pv_from_info(info_line, prediction_depth)
             logger.info(f"[{game_id}] 🔮 Predicted line{eval_str}: {pv_display or move}")
-        
-        return move
+
+        mate_val = _extract_mate_from_info(info_line)
+
+        return move, mate_val
         
     except Exception as e:
         logger.debug(f"[{game_id}] Move prediction failed: {e}")
-        return None
+        return None, None
 
 
 def calculate_move_time(opponent_rating: int | None,
@@ -921,13 +944,23 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             )
 
                             if allow_prediction_for_move:
-                                move = get_move_prediction(
+                                predicted_move, mate_val = get_move_prediction(
                                     stockfish, game_id,
                                     move_time_ms=move_time,
                                     prediction_depth=PREDICTION_DEPTH,
                                 )
-                                if not move:
+
+                                # If predictor found a mating sequence for us, follow it.
+                                if mate_val is not None and mate_val > 0:
+                                    move = predicted_move or stockfish.get_best_move_time(move_time)
+                                    logger.info(f"[{game_id}] Following mating sequence (mate in {mate_val})")
+                                # If predictor indicates we're being mated, avoid using the
+                                # predicted (losing) continuation and pick an alternative.
+                                elif mate_val is not None and mate_val < 0:
+                                    logger.info(f"[{game_id}] Prediction: forced mate against us (mate in {abs(mate_val)}) — choosing defensive move")
                                     move = stockfish.get_best_move_time(move_time)
+                                else:
+                                    move = predicted_move or stockfish.get_best_move_time(move_time)
                             else:
                                 # Use the engine's standard search result for the move,
                                 # but still log the PV if prediction is enabled.
@@ -948,14 +981,25 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             )
 
                             if allow_prediction_for_move:
-                                move = get_move_prediction(
+                                predicted_move, mate_val = get_move_prediction(
                                     stockfish, game_id,
                                     wtime=wtime_ms, btime=btime_ms,
                                     winc=winc_ms, binc=binc_ms,
                                     prediction_depth=PREDICTION_DEPTH,
                                 )
-                                if not move:
+
+                                if mate_val is not None and mate_val > 0:
+                                    move = predicted_move or _get_best_move_with_clocks(
+                                        stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
+                                    )
+                                    logger.info(f"[{game_id}] Following mating sequence (mate in {mate_val})")
+                                elif mate_val is not None and mate_val < 0:
+                                    logger.info(f"[{game_id}] Prediction: forced mate against us (mate in {abs(mate_val)}) — choosing defensive move")
                                     move = _get_best_move_with_clocks(
+                                        stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
+                                    )
+                                else:
+                                    move = predicted_move or _get_best_move_with_clocks(
                                         stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
                                     )
                             else:

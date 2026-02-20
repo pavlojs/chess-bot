@@ -304,6 +304,10 @@ PREDICTION_DEPTH=10           # Number of half-moves to predict ahead
   `PREDICTION_MIN_USE_ELO` (default: 2200). For weaker opponents the PV is logged but the
   engine's regular search result is used for the move.
 
+Behavior for mating predictions:
+- If the predicted principal variation contains a mate in N for our side, the bot will prefer to follow the mating continuation (execute the mating pattern) when possible.
+- If the predicted principal variation contains a mate in N against our side, the bot will avoid using the predicted continuation as the played move and will instead choose an alternative (defensive) move from the engine search.
+
 You can override the default threshold in your `.env`:
 
 ```bash

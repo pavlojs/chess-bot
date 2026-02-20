@@ -2,6 +2,16 @@
 
 All notable changes to Axiom Chess Bot are documented in this file.
 
+## [2.4.1] - 2026-02-20
+
+### Fixed / Improved
+
+- **Draw offer handling fallback:** When the library API endpoint is unavailable for BOT accounts, the bot now falls back to the BOT HTTP endpoint (`/api/bot/game/<id>/draw/<accept|decline>`). This improves reliability when responding to draw offers. (commit 8367bb0)
+- **Prediction usage threshold:** Added `PREDICTION_MIN_USE_ELO` — predictions are logged for all opponents, but the engine's predicted move is only allowed to decide the played move when the opponent's rating is at-or-above this threshold. This prevents unintentionally strengthening play vs low-rated opponents. (commit 00d9282)
+- **Follow / avoid mating PVs:** If the predictor reports a mate for our side in the PV, the bot will follow the mating continuation; if the predictor reports a mate against us, the bot will avoid playing the predicted (losing) continuation and selects a defensive alternative.
+- **Misc:** Rename and demo changes — `test_prediction.py` → `demo_prediction.py` (commit 74a45ae)
+
+
 ## [2.4.0] - 2026-02-19
 
 ### Improved
