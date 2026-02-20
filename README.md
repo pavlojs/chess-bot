@@ -297,6 +297,20 @@ ENABLE_MOVE_PREDICTION=true   # Enable/disable prediction display
 PREDICTION_DEPTH=10           # Number of half-moves to predict ahead
 ```
 
+**Behaviour detail:**
+- The bot **logs** Stockfish's predicted continuation (PV) when `ENABLE_MOVE_PREDICTION` is true.
+- To avoid unintentionally strengthening play for lower-rated opponents, the prediction is
+  only allowed to *decide the actual played move* when the opponent's rating is at or above
+  `PREDICTION_MIN_USE_ELO` (default: 2200). For weaker opponents the PV is logged but the
+  engine's regular search result is used for the move.
+
+You can override the default threshold in your `.env`:
+
+```bash
+# Only allow predicted moves to be used as the played move vs opponents >= 2200
+PREDICTION_MIN_USE_ELO=2200
+```
+
 **Use cases:**
 - 📚 **Learning**: Understand what the engine is planning
 - 🐛 **Debugging**: See if engine is calculating correctly

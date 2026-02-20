@@ -890,7 +890,15 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 
                         if use_movetime_mode:
                             move_time = calculate_move_time(opponent_rating, STOCKFISH_TIME)
-                            if ENABLE_MOVE_PREDICTION:
+                            # Only allow the predicted move to be used as the played move
+                            # for opponents at or above the configured prediction threshold.
+                            allow_prediction_for_move = (
+                                ENABLE_MOVE_PREDICTION
+                                and opponent_rating is not None
+                                and opponent_rating >= PREDICTION_MIN_USE_ELO
+                            )
+
+                            if allow_prediction_for_move:
                                 move = get_move_prediction(
                                     stockfish, game_id,
                                     move_time_ms=move_time,
@@ -899,11 +907,25 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 if not move:
                                     move = stockfish.get_best_move_time(move_time)
                             else:
+                                # Use the engine's standard search result for the move,
+                                # but still log the PV if prediction is enabled.
                                 move = stockfish.get_best_move_time(move_time)
+                                if ENABLE_MOVE_PREDICTION:
+                                    eval_str, pv_display = _parse_pv_from_info(stockfish.info(), PREDICTION_DEPTH)
+                                    logger.info(f"[{game_id}] 🔮 Predicted line{eval_str}: {pv_display or move}")
+
                             logger.debug(f"[{game_id}] Movetime mode: {move_time}ms (UCI_LimitStrength active)")
 
                         elif wtime_ms and btime_ms:
-                            if ENABLE_MOVE_PREDICTION:
+                            # For native clock games, only allow prediction to decide
+                            # the actual played move when opponent meets the threshold.
+                            allow_prediction_for_move = (
+                                ENABLE_MOVE_PREDICTION
+                                and opponent_rating is not None
+                                and opponent_rating >= PREDICTION_MIN_USE_ELO
+                            )
+
+                            if allow_prediction_for_move:
                                 move = get_move_prediction(
                                     stockfish, game_id,
                                     wtime=wtime_ms, btime=btime_ms,
@@ -918,6 +940,10 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 move = _get_best_move_with_clocks(
                                     stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
                                 )
+                                if ENABLE_MOVE_PREDICTION:
+                                    eval_str, pv_display = _parse_pv_from_info(stockfish.info(), PREDICTION_DEPTH)
+                                    logger.info(f"[{game_id}] 🔮 Predicted line{eval_str}: {pv_display or move}")
+
                             logger.debug(
                                 f"[{game_id}] Native clock mode — "
                                 f"w:{wtime_ms}ms b:{btime_ms}ms inc:{winc_ms}/{binc_ms}ms"
