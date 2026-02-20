@@ -84,6 +84,10 @@ PREDICTION_DEPTH = int(os.getenv("PREDICTION_DEPTH", "10"))  # Number of moves t
 # strengthening the bot for low-rated opponents.
 PREDICTION_MIN_USE_ELO = int(os.getenv("PREDICTION_MIN_USE_ELO", "2200"))
 
+# When prediction is active and the predicted evaluation for the bot is worse
+# than this threshold (in centipawns), attempt an alternative (recovery) move.
+PREDICTION_RECOVER_THRESHOLD = int(os.getenv("PREDICTION_RECOVER_THRESHOLD", "400"))
+
 ACCEPT_CHALLENGES = True
 MIN_RATING = 1320
 MAX_RATING = 2800
