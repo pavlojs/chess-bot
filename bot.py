@@ -94,6 +94,15 @@ class ChallengeTracker:
 
 
 # ─────────────────────────────────────────────
+# CUSTOM EXCEPTIONS
+# ─────────────────────────────────────────────
+
+class RateLimitError(Exception):
+    """Raised when the Lichess API returns HTTP 429 Too Many Requests."""
+    pass
+
+
+# ─────────────────────────────────────────────
 # SIGNAL HANDLING
 # ─────────────────────────────────────────────
 
@@ -729,6 +738,10 @@ def challenge_bot(client: berserk.Client, opponent_username: str,
         return challenge_id or None
     except berserk.exceptions.ResponseError as e:
         logger.warning(f"Failed to challenge {opponent_username}: {e}")
+        # Propagate rate-limit errors so callers can apply backoff
+        status = getattr(e, 'status_code', None)
+        if status == 429 or '429' in str(e):
+            raise RateLimitError(str(e))
         return None
     except Exception as e:
         logger.error(f"Error challenging {opponent_username}: {e}")
@@ -1243,6 +1256,11 @@ def challenge_loop(client: berserk.Client, bot_username: str,
     ACCEPT_TIMEOUT = 90   # seconds to wait for opponent to accept
     RETRY_DELAY   = 30   # seconds to wait after a decline before trying again
 
+    # Exponential backoff state for HTTP 429 responses
+    RATE_LIMIT_BASE  = 300   # initial backoff: 5 minutes
+    RATE_LIMIT_MAX   = 3600  # maximum backoff: 60 minutes
+    rate_limit_backoff = RATE_LIMIT_BASE  # current backoff duration (reset after success)
+
     while not shutdown_requested:
         try:
             active_count = sum(1 for t in active_games.values() if t.is_alive())
@@ -1279,7 +1297,21 @@ def challenge_loop(client: berserk.Client, bot_username: str,
 
             # ── Send a new challenge ─────────────────────────────────────────
             logger.info("No active games — looking for a bot to challenge...")
-            challenge_id = try_challenge_random_bot(client, bot_username, challenge_tracker)
+            try:
+                challenge_id = try_challenge_random_bot(client, bot_username, challenge_tracker)
+            except RateLimitError:
+                logger.warning(
+                    f"Rate limited by Lichess API (HTTP 429) — backing off for "
+                    f"{rate_limit_backoff // 60}m {rate_limit_backoff % 60}s before next attempt"
+                )
+                retry_event.clear()
+                retry_event.wait(timeout=rate_limit_backoff)
+                retry_event.clear()
+                rate_limit_backoff = min(rate_limit_backoff * 2, RATE_LIMIT_MAX)
+                continue
+
+            # Successful challenge attempt — reset backoff
+            rate_limit_backoff = RATE_LIMIT_BASE
 
             if challenge_id:
                 pending_challenge["id"] = challenge_id
