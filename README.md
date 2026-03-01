@@ -314,7 +314,7 @@ PREDICTION_DEPTH=10           # Number of half-moves to predict ahead
 |---|---|---|
 | Mate in N for us (`mate_val > 0`) | **Full power** (UCI_LimitStrength off) | `move_time` |
 | Forced mate against us (`mate_val < 0`) | **Full power** (UCI_LimitStrength off) | `move_time` |
-| Eval ≤ −`PREDICTION_RECOVER_THRESHOLD` cp | **ELO boost** (+`PREDICTION_RECOVER_ELO_BOOST`) | 1.5× `move_time` |
+| Eval ≤ −`PREDICTION_RECOVER_THRESHOLD` cp | **ELO boost** (+`PREDICTION_RECOVER_ELO_BOOST`); **full power** if boosted ELO ≥ `FULL_STRENGTH_THRESHOLD` | 1.5× `move_time` |
 | Normal position | Normal UCI_LimitStrength cap | `move_time` |
 
 Mate branches use full-power Stockfish to guarantee correct execution or the best defensive resource. Recovery keeps `UCI_LimitStrength` active but raises the ELO cap by `PREDICTION_RECOVER_ELO_BOOST` (default: 200) and thinks 1.5× longer — this gives meaningfully stronger defensive play while keeping the game winnable for the opponent. After each special search the original ELO cap is always restored.

@@ -1048,16 +1048,32 @@ class TestPredictionRecoverThreshold(unittest.TestCase):
         self.assertFalse(eval_for_bot <= -threshold)
 
     def test_recovery_uses_full_power_not_limited_engine(self):
-        """Recovery must use ELO boost (not full power), so opponent can still win (v2.4.2).
+        """Recovery uses ELO boost when below FULL_STRENGTH_THRESHOLD (v2.4.2).
 
-        UCI_LimitStrength stays active but UCI_Elo is raised by PREDICTION_RECOVER_ELO_BOOST.
-        Full-power recovery would unfairly neutralise a deserved opponent advantage.
+        Below the threshold: UCI_LimitStrength stays active, ELO raised by
+        PREDICTION_RECOVER_ELO_BOOST. Keeps the game winnable for the opponent.
         """
-        from bot import PREDICTION_RECOVER_ELO_BOOST
-        target_elo = 1600
+        from bot import PREDICTION_RECOVER_ELO_BOOST, FULL_STRENGTH_THRESHOLD
+        target_elo = 1600   # well below 2800
         recover_elo = min(target_elo + PREDICTION_RECOVER_ELO_BOOST, 2850)
-        # Should be exactly target + boost (well within 2850 cap)
         self.assertEqual(recover_elo, target_elo + PREDICTION_RECOVER_ELO_BOOST)
+        # Below threshold — should use ELO boost path, not full power
+        self.assertLess(recover_elo, FULL_STRENGTH_THRESHOLD)
+
+    def test_recovery_escalates_to_full_power_near_threshold(self):
+        """When boosted ELO >= FULL_STRENGTH_THRESHOLD, switch to full-power instead.
+
+        An opponent near 2800 already has _target_elo at 2850 (max cap).
+        Adding PREDICTION_RECOVER_ELO_BOOST still gives 2850, which is >= 2800
+        (FULL_STRENGTH_THRESHOLD). In this case recovery should use full-power
+        Stockfish, not the ELO-capped engine.
+        """
+        from bot import PREDICTION_RECOVER_ELO_BOOST, FULL_STRENGTH_THRESHOLD
+        # Opponent near 2800: _target_elo already at Stockfish max
+        target_elo = 2850
+        recover_elo = min(target_elo + PREDICTION_RECOVER_ELO_BOOST, 2850)
+        # recover_elo is capped at 2850 — >= FULL_STRENGTH_THRESHOLD → full power path
+        self.assertGreaterEqual(recover_elo, FULL_STRENGTH_THRESHOLD)
 
     def test_recovery_elo_boost_caps_at_2850(self):
         """ELO boost must never exceed the Stockfish max of 2850."""
