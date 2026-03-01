@@ -1010,19 +1010,25 @@ class TestPredictionRecoverThreshold(unittest.TestCase):
         self.assertIsInstance(PREDICTION_RECOVER_THRESHOLD, int)
         self.assertGreater(PREDICTION_RECOVER_THRESHOLD, 0)
 
-    def test_eval_for_bot_white_positive(self):
-        """When bot is white, eval_for_bot == pred_cp."""
-        pred_cp = -450
-        bot_is_white = True
-        eval_for_bot = pred_cp if bot_is_white else -pred_cp
+    def test_eval_for_bot_is_pred_cp_directly(self):
+        """UCI score cp is from side-to-move (always the bot) — no colour flip needed."""
+        # Losing as white: pred_cp already negative from bot's perspective
+        pred_cp_white = -450
+        eval_for_bot = pred_cp_white  # no negation
         self.assertEqual(eval_for_bot, -450)
 
-    def test_eval_for_bot_black_negated(self):
-        """When bot is black, eval_for_bot is negated pred_cp."""
-        pred_cp = 300   # engine sees white ahead (bad for bot as black)
-        bot_is_white = False
-        eval_for_bot = pred_cp if bot_is_white else -pred_cp
-        self.assertEqual(eval_for_bot, -300)
+    def test_eval_for_bot_black_no_negation(self):
+        """When bot is black and losing, pred_cp is negative — should NOT be negated.
+
+        Old (wrong): eval_for_bot = -pred_cp → positive when losing as black → recovery never fired.
+        New (correct): eval_for_bot = pred_cp → negative when losing as black → recovery fires.
+        """
+        # bot is black, down 9 pawns — Stockfish reports -915 from side-to-move (black)
+        pred_cp = -915
+        eval_for_bot = pred_cp   # direct, no negation
+        self.assertEqual(eval_for_bot, -915)
+        # must trigger recovery
+        self.assertTrue(eval_for_bot <= -400)
 
     def test_recovery_triggered_when_below_threshold(self):
         """Recovery path taken when eval is worse than -threshold."""

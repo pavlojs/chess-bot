@@ -1091,10 +1091,12 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 if _my_remaining else None
                             )
 
-                            # Evaluate prediction from our side's perspective
-                            eval_for_bot = None
-                            if pred_cp is not None:
-                                eval_for_bot = pred_cp if bot_is_white else -pred_cp
+                            # Evaluate prediction from the bot's perspective.
+                            # UCI 'score cp' is always from the side-to-move
+                            # perspective, and get_move_prediction is called only
+                            # on the bot's turn — so pred_cp is already the bot's
+                            # score.  No colour flip needed.
+                            eval_for_bot = pred_cp
 
                             # If predictor found a mating sequence for us, follow it
                             # using full-power Stockfish to guarantee the fastest/best mate.
@@ -1147,9 +1149,9 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 prediction_depth=PREDICTION_DEPTH,
                             )
 
-                            eval_for_bot = None
-                            if pred_cp is not None:
-                                eval_for_bot = pred_cp if bot_is_white else -pred_cp
+                            # UCI 'score cp' is always from the side-to-move
+                            # perspective — which is always the bot here.
+                            eval_for_bot = pred_cp
 
                             if mate_val is not None and mate_val > 0:
                                 move = predicted_move or _get_best_move_with_clocks(
