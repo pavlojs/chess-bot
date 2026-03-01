@@ -89,11 +89,6 @@ UCI_OPTIONS: Dict[str, Any] = {
 # Enable to see Stockfish's analysis of best continuation (principal variation)
 ENABLE_MOVE_PREDICTION = os.getenv("ENABLE_MOVE_PREDICTION", "true").lower() in ("true", "1", "yes")
 PREDICTION_DEPTH = int(os.getenv("PREDICTION_DEPTH", "10"))  # Number of moves to predict ahead
-# Minimum opponent ELO for which the predicted move may be used as the
-# actual played move. Below this threshold predictions are logged but the
-# engine's standard search result is used to avoid unintentionally
-# strengthening the bot for low-rated opponents.
-PREDICTION_MIN_USE_ELO = int(os.getenv("PREDICTION_MIN_USE_ELO", "2200"))
 
 # When prediction is active and the predicted evaluation for the bot is worse
 # than this threshold (in centipawns), attempt an alternative (recovery) move.

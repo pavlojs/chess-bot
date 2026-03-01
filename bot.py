@@ -41,7 +41,6 @@ from config import (
     CHALLENGE_CHECK_INTERVAL,
     ENABLE_MOVE_PREDICTION,
     PREDICTION_DEPTH,
-    PREDICTION_MIN_USE_ELO,
     PREDICTION_RECOVER_THRESHOLD,
     MOVETIME_CLOCK_SAFETY,
     MOVETIME_MIN_MS,
@@ -535,7 +534,7 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
         info_line = stockfish.info()
 
         # Parse PV, mate and cp info for logging and decision-making
-        if logger.isEnabledFor(logging.INFO):
+        if ENABLE_MOVE_PREDICTION and logger.isEnabledFor(logging.INFO):
             eval_str, pv_display = _parse_pv_from_info(info_line, prediction_depth)
             logger.info(f"[{game_id}] 🔮 Predicted line{eval_str}: {pv_display or move}")
 
@@ -1033,108 +1032,76 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 opponent_rating, STOCKFISH_TIME,
                                 _my_remaining, _my_inc, _moves_left,
                             )
-                            # Only allow the predicted move to be used as the played move
-                            # for opponents at or above the configured prediction threshold.
-                            allow_prediction_for_move = (
-                                ENABLE_MOVE_PREDICTION
-                                and opponent_rating is not None
-                                and opponent_rating >= PREDICTION_MIN_USE_ELO
+                            predicted_move, mate_val, pred_cp = get_move_prediction(
+                                stockfish, game_id,
+                                move_time_ms=move_time,
+                                prediction_depth=PREDICTION_DEPTH,
                             )
 
-                            if allow_prediction_for_move:
-                                predicted_move, mate_val, pred_cp = get_move_prediction(
-                                    stockfish, game_id,
-                                    move_time_ms=move_time,
-                                    prediction_depth=PREDICTION_DEPTH,
-                                )
+                            # Evaluate prediction from our side's perspective
+                            eval_for_bot = None
+                            if pred_cp is not None:
+                                eval_for_bot = pred_cp if bot_is_white else -pred_cp
 
-                                # Evaluate prediction from our side's perspective
-                                eval_for_bot = None
-                                if pred_cp is not None:
-                                    eval_for_bot = pred_cp if bot_is_white else -pred_cp
-
-                                # If predictor found a mating sequence for us, follow it.
-                                if mate_val is not None and mate_val > 0:
-                                    move = predicted_move or stockfish.get_best_move_time(move_time)
-                                    logger.info(f"[{game_id}] Following mating sequence (mate in {mate_val})")
-                                # If predictor indicates we're being mated, avoid using the
-                                # predicted (losing) continuation and pick an alternative.
-                                elif mate_val is not None and mate_val < 0:
-                                    logger.info(f"[{game_id}] Prediction: forced mate against us (mate in {abs(mate_val)}) — choosing defensive move")
-                                    move = stockfish.get_best_move_time(move_time)
-                                # If predicted eval shows we are significantly down, try to recover
-                                elif eval_for_bot is not None and eval_for_bot <= -PREDICTION_RECOVER_THRESHOLD:
-                                    logger.info(f"[{game_id}] Prediction shows we're down {eval_for_bot}cp — attempting recovery search")
-                                    # Recovery: allow up to 1.5× budget but still respect the clock cap
-                                    try:
-                                        alt_time = clock_aware_move_time(
-                                            opponent_rating, int(STOCKFISH_TIME * 1.5),
-                                            _my_remaining, _my_inc, _moves_left,
-                                        )
-                                        move = stockfish.get_best_move_time(alt_time) or predicted_move
-                                        logger.info(f"[{game_id}] Recovery move chosen (movetime {alt_time}ms): {move}")
-                                    except Exception:
-                                        move = predicted_move or stockfish.get_best_move_time(move_time)
-                                else:
+                            # If predictor found a mating sequence for us, follow it.
+                            if mate_val is not None and mate_val > 0:
+                                move = predicted_move or stockfish.get_best_move_time(move_time)
+                                logger.info(f"[{game_id}] Following mating sequence (mate in {mate_val})")
+                            # If predictor indicates we're being mated, avoid using the
+                            # predicted (losing) continuation and pick an alternative.
+                            elif mate_val is not None and mate_val < 0:
+                                logger.info(f"[{game_id}] Prediction: forced mate against us (mate in {abs(mate_val)}) — choosing defensive move")
+                                move = stockfish.get_best_move_time(move_time)
+                            # If predicted eval shows we are significantly down, try to recover
+                            elif eval_for_bot is not None and eval_for_bot <= -PREDICTION_RECOVER_THRESHOLD:
+                                logger.info(f"[{game_id}] Prediction shows we're down {eval_for_bot}cp — attempting recovery search")
+                                # Recovery: allow up to 1.5× budget but still respect the clock cap
+                                try:
+                                    alt_time = clock_aware_move_time(
+                                        opponent_rating, int(STOCKFISH_TIME * 1.5),
+                                        _my_remaining, _my_inc, _moves_left,
+                                    )
+                                    move = stockfish.get_best_move_time(alt_time) or predicted_move
+                                    logger.info(f"[{game_id}] Recovery move chosen (movetime {alt_time}ms): {move}")
+                                except Exception:
                                     move = predicted_move or stockfish.get_best_move_time(move_time)
                             else:
-                                # Use the engine's standard search result for the move,
-                                # but still log the PV if prediction is enabled.
-                                move = stockfish.get_best_move_time(move_time)
-                                if ENABLE_MOVE_PREDICTION:
-                                    eval_str, pv_display = _parse_pv_from_info(stockfish.info(), PREDICTION_DEPTH)
-                                    logger.info(f"[{game_id}] 🔮 Predicted line{eval_str}: {pv_display or move}")
+                                move = predicted_move or stockfish.get_best_move_time(move_time)
 
                             logger.debug(f"[{game_id}] Movetime mode: {move_time}ms (UCI_LimitStrength active)")
 
                         elif wtime_ms and btime_ms:
-                            # For native clock games, only allow prediction to decide
-                            # the actual played move when opponent meets the threshold.
-                            allow_prediction_for_move = (
-                                ENABLE_MOVE_PREDICTION
-                                and opponent_rating is not None
-                                and opponent_rating >= PREDICTION_MIN_USE_ELO
+                            predicted_move, mate_val, pred_cp = get_move_prediction(
+                                stockfish, game_id,
+                                wtime=wtime_ms, btime=btime_ms,
+                                winc=winc_ms, binc=binc_ms,
+                                prediction_depth=PREDICTION_DEPTH,
                             )
 
-                            if allow_prediction_for_move:
-                                predicted_move, mate_val, pred_cp = get_move_prediction(
-                                    stockfish, game_id,
-                                    wtime=wtime_ms, btime=btime_ms,
-                                    winc=winc_ms, binc=binc_ms,
-                                    prediction_depth=PREDICTION_DEPTH,
+                            eval_for_bot = None
+                            if pred_cp is not None:
+                                eval_for_bot = pred_cp if bot_is_white else -pred_cp
+
+                            if mate_val is not None and mate_val > 0:
+                                move = predicted_move or _get_best_move_with_clocks(
+                                    stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
                                 )
-
-                                eval_for_bot = None
-                                if pred_cp is not None:
-                                    eval_for_bot = pred_cp if bot_is_white else -pred_cp
-
-                                if mate_val is not None and mate_val > 0:
-                                    move = predicted_move or _get_best_move_with_clocks(
-                                        stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
-                                    )
-                                    logger.info(f"[{game_id}] Following mating sequence (mate in {mate_val})")
-                                elif mate_val is not None and mate_val < 0:
-                                    logger.info(f"[{game_id}] Prediction: forced mate against us (mate in {abs(mate_val)}) — choosing defensive move")
-                                    move = _get_best_move_with_clocks(
-                                        stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
-                                    )
-                                elif eval_for_bot is not None and eval_for_bot <= -PREDICTION_RECOVER_THRESHOLD:
-                                    logger.info(f"[{game_id}] Prediction shows we're down {eval_for_bot}cp — attempting recovery search (native clocks)")
-                                    move = _get_best_move_with_clocks(
-                                        stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
-                                    )
-                                    logger.info(f"[{game_id}] Recovery move chosen: {move}")
-                                else:
-                                    move = predicted_move or _get_best_move_with_clocks(
-                                        stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
-                                    )
-                            else:
+                                logger.info(f"[{game_id}] Following mating sequence (mate in {mate_val})")
+                            elif mate_val is not None and mate_val < 0:
+                                logger.info(f"[{game_id}] Prediction: forced mate against us (mate in {abs(mate_val)}) — choosing defensive move")
                                 move = _get_best_move_with_clocks(
                                     stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
                                 )
-                                if ENABLE_MOVE_PREDICTION:
-                                    eval_str, pv_display = _parse_pv_from_info(stockfish.info(), PREDICTION_DEPTH)
-                                    logger.info(f"[{game_id}] 🔮 Predicted line{eval_str}: {pv_display or move}")
+                            elif eval_for_bot is not None and eval_for_bot <= -PREDICTION_RECOVER_THRESHOLD:
+                                logger.info(f"[{game_id}] Prediction shows we're down {eval_for_bot}cp — attempting recovery search (native clocks)")
+                                move = _get_best_move_with_clocks(
+                                    stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
+                                )
+                                logger.info(f"[{game_id}] Recovery move chosen: {move}")
+                            else:
+                                move = predicted_move or _get_best_move_with_clocks(
+                                    stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
+                                )
 
                             logger.debug(
                                 f"[{game_id}] Native clock mode — "

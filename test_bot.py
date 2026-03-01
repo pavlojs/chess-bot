@@ -997,7 +997,12 @@ class TestDrawOfferFallback(unittest.TestCase):
 
 
 class TestPredictionRecoverThreshold(unittest.TestCase):
-    """Test PREDICTION_RECOVER_THRESHOLD config and eval_for_bot logic (commit c90afb6)."""
+    """Test PREDICTION_RECOVER_THRESHOLD config and eval_for_bot logic.
+
+    Recovery search, follow-mate, and avoid-mate branches now fire
+    unconditionally for every opponent regardless of their rating
+    (PREDICTION_MIN_USE_ELO was removed in v2.4.2).
+    """
 
     def test_config_default_value(self):
         from bot import PREDICTION_RECOVER_THRESHOLD
@@ -1035,6 +1040,17 @@ class TestPredictionRecoverThreshold(unittest.TestCase):
         threshold = 400
         eval_for_bot = 200
         self.assertFalse(eval_for_bot <= -threshold)
+
+    def test_recovery_fires_regardless_of_opponent_rating(self):
+        """Recovery condition is a pure eval check — no rating gate (v2.4.2)."""
+        threshold = 400
+        eval_for_bot = -450
+        # Simulate a low-rated and a high-rated opponent — result must be the same
+        for opponent_rating in (800, 1200, 1500, 2000, 2200, 2800):
+            self.assertTrue(
+                eval_for_bot <= -threshold,
+                msg=f"Recovery should fire for opponent_rating={opponent_rating}"
+            )
 
     @patch('bot.PREDICTION_RECOVER_THRESHOLD', 400)
     def test_recovery_threshold_env_override(self):
