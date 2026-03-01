@@ -127,6 +127,10 @@ Most settings can be changed via a `.env` file (copy `.env.example` to `.env`) *
 - `ENABLE_MOVE_PREDICTION`: Show predicted continuation in logs (default: `true`).
 - `PREDICTION_DEPTH`: Half-moves to show in predicted line (default: `10`).
 - `DYNAMIC_STRENGTH` / `LIMIT_STRENGTH_THRESHOLD` / `FULL_STRENGTH_THRESHOLD` / `STRENGTH_ADVANTAGE`: see *Dynamic Strength* section below.
+- `MOVETIME_CLOCK_SAFETY`: Safety multiplier applied to the per-move clock budget (default: `0.8`). The bot will use at most `(remaining / moves_left + increment) × MOVETIME_CLOCK_SAFETY` ms per move, preventing outoftime losses.
+- `MOVETIME_MIN_MS`: Hard floor for any calculated movetime in ms (default: `50`). Even with seconds on the clock the bot will always think at least this long.
+- `MOVETIME_ESTIMATED_MOVES`: Baseline moves-to-go estimate used in the clock budget formula (default: `40`). Reduced dynamically as the game progresses.
+- `MOVETIME_MIN_MOVES_LEFT`: Minimum moves-to-go value in the clock budget denominator (default: `10`). Prevents over-spending in very long endgames.
 
 **Requires editing `config.py`:**
 
@@ -184,13 +188,15 @@ The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fai
 
 | Opponent Rating | UCI_LimitStrength | Movetime | Effective Strength |
 |----------------|-------------------|----------|--------------------|
-| **1200 ELO** | ✅ at ~1300 ELO | 40 % (~1200 ms) | ~1300 ELO ✅ |
-| **1500 ELO** | ✅ at ~1600 ELO | 40 % (~1200 ms) | ~1600 ELO ✅ |
-| **1800 ELO** | ✅ at ~1900 ELO | 40 % (~1200 ms) | ~1900 ELO ✅ |
-| **2000 ELO** | ✅ at ~2100 ELO | 51 % (~1530 ms) | ~2100 ELO ✅ |
-| **2500 ELO** | ✅ at ~2600 ELO | 79 % (~2360 ms) | ~2600 ELO ✅ |
+| **1200 ELO** | ✅ at ~1300 ELO | 40 % (~1200 ms) ¹ | ~1300 ELO ✅ |
+| **1500 ELO** | ✅ at ~1600 ELO | 40 % (~1200 ms) ¹ | ~1600 ELO ✅ |
+| **1800 ELO** | ✅ at ~1900 ELO | 40 % (~1200 ms) ¹ | ~1900 ELO ✅ |
+| **2000 ELO** | ✅ at ~2100 ELO | 51 % (~1530 ms) ¹ | ~2100 ELO ✅ |
+| **2500 ELO** | ✅ at ~2600 ELO | 79 % (~2360 ms) ¹ | ~2600 ELO ✅ |
 | **2800 ELO** | ❌ FULL POWER | native clocks | **~3200 ELO** 🔥 |
 | **3000 ELO** | ❌ FULL POWER | native clocks | **~3400 ELO** 🔥 |
+
+¹ *Maximum budget — the clock-aware cap may reduce this further in short time controls (see Clock-Aware Movetime Cap below).*
 
 **To customize (`.env` file — no code changes needed):**
 ```bash
@@ -343,6 +349,43 @@ The bot supports all major real-time Lichess time control modes:
 - ✅ All capped opponents (< 2800): `UCI_LimitStrength` at opponent+100 + `go movetime` (40–95 % of base)
 - ✅ Full-strength opponents (2800+): no cap, native clocks (`go wtime btime winc binc`)
 - ✅ No-clock fallback: `go movetime` used when game has no clock data
+
+**Clock-Aware Movetime Cap** 🕑
+
+When `UCI_LimitStrength` is active, the bot calculates a movetime budget from the opponent's rating (40–95 % of `STOCKFISH_TIME`). However, this ideal budget is also hard-capped by the bot's *actual remaining clock* to prevent outoftime losses in short time controls.
+
+Formula applied every move:
+```
+moves_left  = max(MOVETIME_MIN_MOVES_LEFT, MOVETIME_ESTIMATED_MOVES − fullmove_number // 2)
+clock_cap   = (remaining_ms / moves_left + increment_ms) × MOVETIME_CLOCK_SAFETY
+move_time   = min(rating_based_budget, clock_cap)
+```
+
+This means the bot automatically plays faster when the clock is tight, and uses its full rating-based budget when time allows — without any manual tuning per time control.
+
+**Example — 1+0 Bullet, move 32, 8 s remaining:**
+
+| Opponent ELO | Rating budget | Clock cap | Actual movetime |
+|---|---|---|---|
+| 1500 | 1200 ms | (8000 / 10) × 0.8 = **640 ms** | **640 ms** |
+| 2200 | 1860 ms | (8000 / 10) × 0.8 = **640 ms** | **640 ms** |
+
+**Example — 5+3 Blitz, move 10, 60 s remaining:**
+
+| Opponent ELO | Rating budget | Clock cap | Actual movetime |
+|---|---|---|---|
+| 1500 | 1200 ms | (60000 / 35 + 3000) × 0.8 = **3771 ms** | **1200 ms** |
+| 2200 | 1860 ms | (60000 / 35 + 3000) × 0.8 = **3771 ms** | **1860 ms** |
+
+The recovery search (triggered when the bot is losing by > `PREDICTION_RECOVER_THRESHOLD` cp) also respects the clock cap — it requests up to 1.5× the base budget but never exceeds the clock-safe limit.
+
+**Configuration (`.env` file):**
+```bash
+MOVETIME_CLOCK_SAFETY=0.8    # Fraction of clock budget to use (lower = more conservative)
+MOVETIME_MIN_MS=50            # Never think less than 50 ms
+MOVETIME_ESTIMATED_MOVES=40   # Assumed remaining game length
+MOVETIME_MIN_MOVES_LEFT=10    # Floor for moves-left denominator
+```
 
 **Automatically rejected:**
 - ❌ **Correspondence**: Games with days per move (limit ≥ 259200 seconds)

@@ -66,6 +66,17 @@ STOCKFISH_PATH = find_stockfish_path()
 # Stockfish time per move (ms) — used for weak opponents and fallback (no clock data)
 STOCKFISH_TIME = int(os.getenv("STOCKFISH_TIME", "3000"))
 
+# Clock-aware movetime safety settings
+# MOVETIME_CLOCK_SAFETY: fraction of (remaining/moves_left + inc) to use as hard cap
+# Prevents outoftime by ensuring bot never overspends its clock budget per move.
+MOVETIME_CLOCK_SAFETY = float(os.getenv("MOVETIME_CLOCK_SAFETY", "0.8"))
+# MOVETIME_MIN_MS: floor for calculated movetime — never think less than this
+MOVETIME_MIN_MS = int(os.getenv("MOVETIME_MIN_MS", "50"))
+# MOVETIME_ESTIMATED_MOVES: baseline moves-to-go estimate for clock budget calculation
+MOVETIME_ESTIMATED_MOVES = int(os.getenv("MOVETIME_ESTIMATED_MOVES", "40"))
+# MOVETIME_MIN_MOVES_LEFT: minimum moves-to-go used in division to avoid over-spending late in game
+MOVETIME_MIN_MOVES_LEFT = int(os.getenv("MOVETIME_MIN_MOVES_LEFT", "10"))
+
 UCI_OPTIONS: Dict[str, Any] = {
     "Threads": int(os.getenv("SF_THREADS", "4")),
     "Hash": int(os.getenv("SF_HASH", "2048")),

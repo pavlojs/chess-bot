@@ -43,6 +43,10 @@ from config import (
     PREDICTION_DEPTH,
     PREDICTION_MIN_USE_ELO,
     PREDICTION_RECOVER_THRESHOLD,
+    MOVETIME_CLOCK_SAFETY,
+    MOVETIME_MIN_MS,
+    MOVETIME_ESTIMATED_MOVES,
+    MOVETIME_MIN_MOVES_LEFT,
 )
 
 from logging_config import setup_logger
@@ -580,6 +584,53 @@ def calculate_move_time(opponent_rating: int | None,
     return adjusted_time
 
 
+def clock_aware_move_time(
+    opponent_rating: int | None,
+    base_time: int,
+    remaining_ms: int | None,
+    increment_ms: int = 0,
+    moves_left_estimate: int = 20,
+) -> int:
+    """Return a movetime budget that respects the remaining clock.
+
+    Combines calculate_move_time (rating-based ideal budget) with a hard cap
+    derived from the bot's actual remaining time, preventing outoftime losses.
+
+    Clock budget formula:
+        clock_budget = (remaining_ms / moves_left_estimate + increment_ms) * MOVETIME_CLOCK_SAFETY
+        result       = min(ideal_budget, clock_budget)  -- capped by clock
+        result       = max(result, MOVETIME_MIN_MS)     -- floored to stay legal
+
+    Args:
+        opponent_rating:   Opponent ELO (forwarded to calculate_move_time).
+        base_time:         Base movetime in ms (forwarded to calculate_move_time).
+        remaining_ms:      Bot's remaining clock in ms.  None → no cap applied.
+        increment_ms:      Bot's per-move increment in ms.
+        moves_left_estimate: Estimated number of moves remaining in the game.
+
+    Returns:
+        Thinking time in milliseconds.
+    """
+    ideal = calculate_move_time(opponent_rating, base_time)
+
+    if not remaining_ms:
+        return ideal
+
+    clock_budget = int(
+        (remaining_ms / moves_left_estimate + increment_ms) * MOVETIME_CLOCK_SAFETY
+    )
+    clock_budget = max(clock_budget, MOVETIME_MIN_MS)
+
+    result = min(ideal, clock_budget)
+    if result < ideal:
+        logger.debug(
+            f"Clock-aware cap: ideal={ideal}ms → {result}ms "
+            f"(remaining={remaining_ms}ms, inc={increment_ms}ms, "
+            f"moves_left~{moves_left_estimate})"
+        )
+    return result
+
+
 # ─────────────────────────────────────────────
 # CHALLENGE FUNCTIONS
 # ─────────────────────────────────────────────
@@ -959,7 +1010,16 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         )
 
                         if use_movetime_mode:
-                            move_time = calculate_move_time(opponent_rating, STOCKFISH_TIME)
+                            _my_remaining = wtime_ms if bot_is_white else btime_ms
+                            _my_inc = winc_ms if bot_is_white else binc_ms
+                            _moves_left = max(
+                                MOVETIME_MIN_MOVES_LEFT,
+                                MOVETIME_ESTIMATED_MOVES - board.fullmove_number // 2,
+                            )
+                            move_time = clock_aware_move_time(
+                                opponent_rating, STOCKFISH_TIME,
+                                _my_remaining, _my_inc, _moves_left,
+                            )
                             # Only allow the predicted move to be used as the played move
                             # for opponents at or above the configured prediction threshold.
                             allow_prediction_for_move = (
@@ -992,9 +1052,12 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 # If predicted eval shows we are significantly down, try to recover
                                 elif eval_for_bot is not None and eval_for_bot <= -PREDICTION_RECOVER_THRESHOLD:
                                     logger.info(f"[{game_id}] Prediction shows we're down {eval_for_bot}cp — attempting recovery search")
-                                    # Try an alternative search with larger movetime to seek counterplay
+                                    # Recovery: allow up to 1.5× budget but still respect the clock cap
                                     try:
-                                        alt_time = int(move_time * 2)
+                                        alt_time = clock_aware_move_time(
+                                            opponent_rating, int(STOCKFISH_TIME * 1.5),
+                                            _my_remaining, _my_inc, _moves_left,
+                                        )
                                         move = stockfish.get_best_move_time(alt_time) or predicted_move
                                         logger.info(f"[{game_id}] Recovery move chosen (movetime {alt_time}ms): {move}")
                                     except Exception:
@@ -1066,7 +1129,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             )
 
                         else:
-                            # No clock data — fall back to base movetime
+                            # No clock data — fall back to base movetime (no clock cap)
                             move_time = calculate_move_time(opponent_rating, STOCKFISH_TIME)
                             move = stockfish.get_best_move_time(move_time)
                             logger.debug(f"[{game_id}] No clock data, movetime fallback: {move_time}ms")
