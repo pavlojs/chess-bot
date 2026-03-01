@@ -42,6 +42,7 @@ from config import (
     ENABLE_MOVE_PREDICTION,
     PREDICTION_DEPTH,
     PREDICTION_RECOVER_THRESHOLD,
+    PREDICTION_RECOVER_ELO_BOOST,
     MOVETIME_CLOCK_SAFETY,
     MOVETIME_MIN_MS,
     MOVETIME_ESTIMATED_MOVES,
@@ -1124,18 +1125,27 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 )
                             # If predicted eval shows we are significantly down, try to recover
                             elif eval_for_bot is not None and eval_for_bot <= -PREDICTION_RECOVER_THRESHOLD:
-                                logger.info(f"[{game_id}] Prediction shows we're down {eval_for_bot}cp — attempting recovery search")
-                                # Recovery: allow up to 1.5× budget but still respect the clock cap.
-                                # Use remaining_after_pred so the total time stays within the clock.
+                                logger.info(f"[{game_id}] Prediction shows we're down {eval_for_bot}cp — attempting recovery search (+{PREDICTION_RECOVER_ELO_BOOST} ELO boost)")
+                                # Recovery: UCI_LimitStrength stays active but ELO cap is
+                                # temporarily raised by PREDICTION_RECOVER_ELO_BOOST.
+                                # Keeps the game winnable for the opponent while giving
+                                # the bot slightly stronger defensive resources.
+                                alt_time = clock_aware_move_time(
+                                    opponent_rating, int(STOCKFISH_TIME * 1.5),
+                                    _remaining_after_pred, _my_inc, _moves_left,
+                                )
+                                _recover_elo = min(_target_elo + PREDICTION_RECOVER_ELO_BOOST, 2850) if _target_elo else None
                                 try:
-                                    alt_time = clock_aware_move_time(
-                                        opponent_rating, int(STOCKFISH_TIME * 1.5),
-                                        _remaining_after_pred, _my_inc, _moves_left,
-                                    )
+                                    if _recover_elo:
+                                        stockfish.update_engine_parameters({"UCI_LimitStrength": True, "UCI_Elo": _recover_elo})
                                     move = stockfish.get_best_move_time(alt_time) or predicted_move
-                                    logger.info(f"[{game_id}] Recovery move chosen (movetime {alt_time}ms): {move}")
-                                except Exception:
-                                    move = predicted_move or stockfish.get_best_move_time(MOVETIME_MIN_MS)
+                                    logger.info(f"[{game_id}] Recovery move chosen (ELO {_recover_elo}, movetime {alt_time}ms): {move}")
+                                finally:
+                                    if _target_elo:
+                                        try:
+                                            stockfish.update_engine_parameters({"UCI_LimitStrength": True, "UCI_Elo": _target_elo})
+                                        except Exception:
+                                            pass
                             else:
                                 move = predicted_move or stockfish.get_best_move_time(move_time)
 

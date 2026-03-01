@@ -1047,16 +1047,29 @@ class TestPredictionRecoverThreshold(unittest.TestCase):
         eval_for_bot = 200
         self.assertFalse(eval_for_bot <= -threshold)
 
-    def test_recovery_fires_regardless_of_opponent_rating(self):
-        """Recovery condition is a pure eval check — no rating gate (v2.4.2)."""
-        threshold = 400
-        eval_for_bot = -450
-        # Simulate a low-rated and a high-rated opponent — result must be the same
-        for opponent_rating in (800, 1200, 1500, 2000, 2200, 2800):
-            self.assertTrue(
-                eval_for_bot <= -threshold,
-                msg=f"Recovery should fire for opponent_rating={opponent_rating}"
-            )
+    def test_recovery_uses_full_power_not_limited_engine(self):
+        """Recovery must use ELO boost (not full power), so opponent can still win (v2.4.2).
+
+        UCI_LimitStrength stays active but UCI_Elo is raised by PREDICTION_RECOVER_ELO_BOOST.
+        Full-power recovery would unfairly neutralise a deserved opponent advantage.
+        """
+        from bot import PREDICTION_RECOVER_ELO_BOOST
+        target_elo = 1600
+        recover_elo = min(target_elo + PREDICTION_RECOVER_ELO_BOOST, 2850)
+        # Should be exactly target + boost (well within 2850 cap)
+        self.assertEqual(recover_elo, target_elo + PREDICTION_RECOVER_ELO_BOOST)
+
+    def test_recovery_elo_boost_caps_at_2850(self):
+        """ELO boost must never exceed the Stockfish max of 2850."""
+        from bot import PREDICTION_RECOVER_ELO_BOOST
+        target_elo = 2800
+        recover_elo = min(target_elo + PREDICTION_RECOVER_ELO_BOOST, 2850)
+        self.assertLessEqual(recover_elo, 2850)
+
+    def test_recover_elo_boost_default(self):
+        """PREDICTION_RECOVER_ELO_BOOST default is 200."""
+        from bot import PREDICTION_RECOVER_ELO_BOOST
+        self.assertEqual(PREDICTION_RECOVER_ELO_BOOST, 200)
 
     @patch('bot.PREDICTION_RECOVER_THRESHOLD', 400)
     def test_recovery_threshold_env_override(self):

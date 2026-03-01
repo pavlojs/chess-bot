@@ -93,6 +93,10 @@ PREDICTION_DEPTH = int(os.getenv("PREDICTION_DEPTH", "10"))  # Number of moves t
 # When prediction is active and the predicted evaluation for the bot is worse
 # than this threshold (in centipawns), attempt an alternative (recovery) move.
 PREDICTION_RECOVER_THRESHOLD = int(os.getenv("PREDICTION_RECOVER_THRESHOLD", "400"))
+# ELO boost applied to UCI_LimitStrength during recovery search.
+# Keeps the game winnable for the opponent while giving the bot a slightly
+# stronger defensive resource than its normal play level.
+PREDICTION_RECOVER_ELO_BOOST = int(os.getenv("PREDICTION_RECOVER_ELO_BOOST", "200"))
 
 ACCEPT_CHALLENGES = True
 MIN_RATING = 1320
