@@ -479,9 +479,11 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
                          prediction_depth: int = PREDICTION_DEPTH) -> tuple[Optional[str], Optional[int], Optional[int]]:
     """Search for the best move and log the predicted continuation (PV).
 
-    Returns a tuple `(best_move, mate_value)` where `mate_value` is the mate
-    distance parsed from the engine info (positive for mate for side-to-move,
-    negative for being mated), or `None` if no mate score was present.
+    Returns a tuple `(best_move, mate_value, cp_value)` where `mate_value` is
+    the mate distance parsed from the engine info (positive for mate for
+    side-to-move, negative for being mated), or `None` if no mate score was
+    present. `cp_value` is the centipawn evaluation (or ±30000 for mate
+    scores), or `None` if unavailable.
 
     Two search modes:
     - movetime: supply move_time_ms for a fixed per-move budget
@@ -504,7 +506,8 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
         prediction_depth: Number of PV half-moves to display in log
 
     Returns:
-        Best move in UCI notation (e.g. "e2e4"), or None if search fails
+        Tuple of (best_move, mate_value, cp_value).  Each element is None
+        when the search fails or the corresponding info is not available.
     """
     try:
         if move_time_ms is not None:
@@ -513,7 +516,7 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
             move = _get_best_move_with_clocks(stockfish, wtime, btime, winc, binc)
 
         if not move:
-            return None, None
+            return None, None, None
 
         # Capture engine info once and reuse
         info_line = stockfish.info()
@@ -869,7 +872,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                         # If the error indicates this endpoint isn't for BOT accounts,
                                         # fallback to the BOT HTTP endpoint which supports bot tokens.
                                         err_text = str(api_error).lower()
-                                        if "not for bot accounts" in err_text or "403" in err_text or getattr(api_error, 'response', None) and getattr(api_error.response, 'status_code', None) == 403:
+                                        if "not for bot accounts" in err_text or "403" in err_text or (getattr(api_error, 'response', None) and getattr(api_error.response, 'status_code', None) == 403):
                                             try:
                                                 url_action = "accept" if accept_draw else "decline"
                                                 url = f"https://lichess.org/api/bot/game/{game_id}/draw/{url_action}"

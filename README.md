@@ -307,12 +307,16 @@ PREDICTION_DEPTH=10           # Number of half-moves to predict ahead
 Behavior for mating predictions:
 - If the predicted principal variation contains a mate in N for our side, the bot will prefer to follow the mating continuation (execute the mating pattern) when possible.
 - If the predicted principal variation contains a mate in N against our side, the bot will avoid using the predicted continuation as the played move and will instead choose an alternative (defensive) move from the engine search.
+- If the predicted evaluation for the bot is worse than `PREDICTION_RECOVER_THRESHOLD` centipawns (default: 400), the bot will attempt a recovery search (longer movetime or alternative engine search) to seek counterplay.
 
-You can override the default threshold in your `.env`:
+You can override the default thresholds in your `.env`:
 
 ```bash
 # Only allow predicted moves to be used as the played move vs opponents >= 2200
 PREDICTION_MIN_USE_ELO=2200
+
+# Trigger recovery search when predicted eval is worse than -400cp for the bot
+PREDICTION_RECOVER_THRESHOLD=400
 ```
 
 **Use cases:**

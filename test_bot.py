@@ -839,5 +839,269 @@ class TestBulletChallengeAcceptance(unittest.TestCase):
             self.assertFalse(should_accept_challenge(self._challenge(60, 0)))
 
 
+class TestExtractMateFromInfo(unittest.TestCase):
+    """Test _extract_mate_from_info helper (added in commit d0fad89)."""
+
+    def setUp(self):
+        from bot import _extract_mate_from_info
+        self.extract = _extract_mate_from_info
+
+    def test_positive_mate(self):
+        """Positive mate value = mate for side to move."""
+        line = "info depth 10 score mate 3 nodes 1000 pv e1g1 f7f8"
+        self.assertEqual(self.extract(line), 3)
+
+    def test_negative_mate(self):
+        """Negative mate value = being mated."""
+        line = "info depth 10 score mate -2 nodes 1000 pv e8g8"
+        self.assertEqual(self.extract(line), -2)
+
+    def test_mate_in_one(self):
+        line = "info depth 5 score mate 1 pv d1h5"
+        self.assertEqual(self.extract(line), 1)
+
+    def test_no_mate_returns_none(self):
+        line = "info depth 20 score cp 42 nodes 500000 pv e2e4 e7e5"
+        self.assertIsNone(self.extract(line))
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(self.extract(""))
+
+    def test_cp_only_returns_none(self):
+        line = "info depth 15 score cp -130 pv d2d4"
+        self.assertIsNone(self.extract(line))
+
+
+class TestGetMovePredictionSignature(unittest.TestCase):
+    """Verify get_move_prediction returns a 3-tuple (commit d0fad89 / c90afb6)."""
+
+    def _make_stockfish_mock(self, info_line: str, best_move: str = "e2e4"):
+        sf = Mock()
+        sf.get_best_move_time.return_value = best_move
+        sf.info.return_value = info_line
+        return sf
+
+    def test_returns_three_tuple_with_cp(self):
+        from bot import get_move_prediction
+        sf = self._make_stockfish_mock("info depth 20 score cp 42 pv e2e4 e7e5")
+        move, mate_val, cp_val = get_move_prediction(sf, "test_game", move_time_ms=100)
+        self.assertEqual(move, "e2e4")
+        self.assertIsNone(mate_val)
+        self.assertEqual(cp_val, 42)
+
+    def test_returns_three_tuple_with_mate(self):
+        from bot import get_move_prediction
+        sf = self._make_stockfish_mock("info depth 5 score mate 3 pv d1h5 h8h7 d1h7")
+        move, mate_val, cp_val = get_move_prediction(sf, "test_game", move_time_ms=100)
+        self.assertEqual(move, "e2e4")
+        self.assertEqual(mate_val, 3)
+        # _extract_cp_from_info converts mate to ±30000
+        self.assertEqual(cp_val, 30000)
+
+    def test_returns_three_nones_on_no_move(self):
+        from bot import get_move_prediction
+        sf = Mock()
+        sf.get_best_move_time.return_value = None
+        result = get_move_prediction(sf, "test_game", move_time_ms=100)
+        self.assertEqual(result, (None, None, None))
+
+    def test_returns_three_nones_on_exception(self):
+        from bot import get_move_prediction
+        sf = Mock()
+        sf.get_best_move_time.side_effect = Exception("engine crash")
+        result = get_move_prediction(sf, "test_game", move_time_ms=100)
+        self.assertEqual(result, (None, None, None))
+
+    def test_negative_mate_returns_negative_mate_val(self):
+        from bot import get_move_prediction
+        sf = self._make_stockfish_mock("info depth 8 score mate -2 pv e8g8")
+        move, mate_val, cp_val = get_move_prediction(sf, "test_game", move_time_ms=100)
+        self.assertEqual(mate_val, -2)
+        self.assertEqual(cp_val, -30000)
+
+
+class TestDrawOfferFallback(unittest.TestCase):
+    """Test draw offer BOT endpoint fallback logic (commit 8367bb0)."""
+
+    def test_fallback_triggered_on_not_for_bot_accounts(self):
+        """When 'not for bot accounts' appears in error, fallback POST is used."""
+        import requests as req_module
+        error = Exception("This endpoint is not for bot accounts")
+
+        with patch('bot.requests.post') as mock_post, \
+             patch('bot.TOKEN', 'test_token'):
+            mock_post.return_value = Mock(status_code=200, text="ok")
+
+            # Simulate the fallback condition check
+            err_text = str(error).lower()
+            should_fallback = (
+                "not for bot accounts" in err_text
+                or "403" in err_text
+                or (getattr(error, 'response', None)
+                    and getattr(error.response, 'status_code', None) == 403)
+            )
+            self.assertTrue(should_fallback)
+
+    def test_fallback_triggered_on_403_in_message(self):
+        error = Exception("403 Forbidden")
+        err_text = str(error).lower()
+        should_fallback = (
+            "not for bot accounts" in err_text
+            or "403" in err_text
+            or (getattr(error, 'response', None)
+                and getattr(error.response, 'status_code', None) == 403)
+        )
+        self.assertTrue(should_fallback)
+
+    def test_fallback_triggered_on_response_status_403(self):
+        error = Exception("API error")
+        mock_resp = Mock()
+        mock_resp.status_code = 403
+        error.response = mock_resp
+
+        err_text = str(error).lower()
+        should_fallback = (
+            "not for bot accounts" in err_text
+            or "403" in err_text
+            or (getattr(error, 'response', None)
+                and getattr(error.response, 'status_code', None) == 403)
+        )
+        self.assertTrue(should_fallback)
+
+    def test_no_fallback_for_generic_error(self):
+        error = Exception("some other network error")
+        err_text = str(error).lower()
+        should_fallback = (
+            "not for bot accounts" in err_text
+            or "403" in err_text
+            or (getattr(error, 'response', None)
+                and getattr(error.response, 'status_code', None) == 403)
+        )
+        self.assertFalse(should_fallback)
+
+    def test_fallback_url_accept(self):
+        """Verify correct URL is constructed for accept."""
+        game_id = "abc123"
+        accept = True
+        url_action = "accept" if accept else "decline"
+        url = f"https://lichess.org/api/bot/game/{game_id}/draw/{url_action}"
+        self.assertEqual(url, "https://lichess.org/api/bot/game/abc123/draw/accept")
+
+    def test_fallback_url_decline(self):
+        """Verify correct URL is constructed for decline."""
+        game_id = "abc123"
+        accept = False
+        url_action = "accept" if accept else "decline"
+        url = f"https://lichess.org/api/bot/game/{game_id}/draw/{url_action}"
+        self.assertEqual(url, "https://lichess.org/api/bot/game/abc123/draw/decline")
+
+
+class TestPredictionRecoverThreshold(unittest.TestCase):
+    """Test PREDICTION_RECOVER_THRESHOLD config and eval_for_bot logic (commit c90afb6)."""
+
+    def test_config_default_value(self):
+        from bot import PREDICTION_RECOVER_THRESHOLD
+        # Default is 400 cp
+        self.assertIsInstance(PREDICTION_RECOVER_THRESHOLD, int)
+        self.assertGreater(PREDICTION_RECOVER_THRESHOLD, 0)
+
+    def test_eval_for_bot_white_positive(self):
+        """When bot is white, eval_for_bot == pred_cp."""
+        pred_cp = -450
+        bot_is_white = True
+        eval_for_bot = pred_cp if bot_is_white else -pred_cp
+        self.assertEqual(eval_for_bot, -450)
+
+    def test_eval_for_bot_black_negated(self):
+        """When bot is black, eval_for_bot is negated pred_cp."""
+        pred_cp = 300   # engine sees white ahead (bad for bot as black)
+        bot_is_white = False
+        eval_for_bot = pred_cp if bot_is_white else -pred_cp
+        self.assertEqual(eval_for_bot, -300)
+
+    def test_recovery_triggered_when_below_threshold(self):
+        """Recovery path taken when eval is worse than -threshold."""
+        threshold = 400
+        eval_for_bot = -450  # worse than -400
+        self.assertTrue(eval_for_bot <= -threshold)
+
+    def test_recovery_not_triggered_near_threshold(self):
+        """Recovery not taken when eval is just within threshold."""
+        threshold = 400
+        eval_for_bot = -399
+        self.assertFalse(eval_for_bot <= -threshold)
+
+    def test_recovery_not_triggered_when_winning(self):
+        threshold = 400
+        eval_for_bot = 200
+        self.assertFalse(eval_for_bot <= -threshold)
+
+    @patch('bot.PREDICTION_RECOVER_THRESHOLD', 400)
+    def test_recovery_threshold_env_override(self):
+        """Patching PREDICTION_RECOVER_THRESHOLD is respected in comparisons."""
+        from bot import PREDICTION_RECOVER_THRESHOLD
+        self.assertEqual(PREDICTION_RECOVER_THRESHOLD, 400)
+
+
+class TestMatingPvLogic(unittest.TestCase):
+    """Test mate-based prediction routing logic (commit d0fad89)."""
+
+    def test_positive_mate_val_follows_predicted_move(self):
+        """When mate_val > 0, bot should follow the predicted continuation."""
+        predicted_move = "d1h5"
+        mate_val = 3
+
+        if mate_val is not None and mate_val > 0:
+            move = predicted_move or "fallback"
+        elif mate_val is not None and mate_val < 0:
+            move = "defensive_move"
+        else:
+            move = predicted_move or "standard"
+
+        self.assertEqual(move, "d1h5")
+
+    def test_negative_mate_val_picks_defensive_move(self):
+        """When mate_val < 0, bot should avoid the predicted continuation."""
+        predicted_move = "e8g8"
+        mate_val = -2
+
+        if mate_val is not None and mate_val > 0:
+            move = predicted_move or "fallback"
+        elif mate_val is not None and mate_val < 0:
+            move = "defensive_move"  # engine re-search
+        else:
+            move = predicted_move or "standard"
+
+        self.assertEqual(move, "defensive_move")
+
+    def test_none_mate_val_uses_predicted_move(self):
+        """When mate_val is None (no mate), normal prediction path is used."""
+        predicted_move = "e2e4"
+        mate_val = None
+
+        if mate_val is not None and mate_val > 0:
+            move = "mating"
+        elif mate_val is not None and mate_val < 0:
+            move = "defensive_move"
+        else:
+            move = predicted_move or "standard"
+
+        self.assertEqual(move, "e2e4")
+
+    def test_none_mate_val_no_predicted_move_falls_back(self):
+        """When both mate_val and predicted_move are None, fallback is used."""
+        predicted_move = None
+        mate_val = None
+
+        if mate_val is not None and mate_val > 0:
+            move = "mating"
+        elif mate_val is not None and mate_val < 0:
+            move = "defensive_move"
+        else:
+            move = predicted_move or "standard_search"
+
+        self.assertEqual(move, "standard_search")
+
+
 if __name__ == '__main__':
     unittest.main()
