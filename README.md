@@ -306,19 +306,27 @@ PREDICTION_DEPTH=10           # Number of half-moves to predict ahead
 **Behaviour detail:**
 - The bot **logs** Stockfish's predicted continuation (PV) when `ENABLE_MOVE_PREDICTION` is true.
 - The predicted move (from the first step of the PV) is always used to decide the actual played move, regardless of opponent rating.
+- The evaluation (`score cp`) returned by UCI is always from the **side-to-move** perspective. Since the prediction is run on the bot's turn, the score is already the bot's score regardless of colour — no colour flip is applied.
 
-Behavior for mating predictions:
-- If the predicted principal variation contains a mate in N for our side, the bot will prefer to follow the mating continuation (execute the mating pattern) when possible.
-- If the predicted principal variation contains a mate in N against our side, the bot will avoid using the predicted continuation as the played move and will instead choose an alternative (defensive) move from the engine search.
-- If the predicted evaluation for the bot is worse than `PREDICTION_RECOVER_THRESHOLD` centipawns (default: 400), the bot will attempt a recovery search (longer movetime or alternative engine search) to seek counterplay.
+**Special branches (fire for every opponent regardless of rating):**
 
-These three behaviours (follow-mate, avoid-mate, recovery) fire for **every opponent** regardless of their rating.
+| Situation | Engine used | Time budget |
+|---|---|---|
+| Mate in N for us (`mate_val > 0`) | **Full power** (UCI_LimitStrength off) | `move_time` |
+| Forced mate against us (`mate_val < 0`) | **Full power** (UCI_LimitStrength off) | `move_time` |
+| Eval ≤ −`PREDICTION_RECOVER_THRESHOLD` cp | **ELO boost** (+`PREDICTION_RECOVER_ELO_BOOST`) | 1.5× `move_time` |
+| Normal position | Normal UCI_LimitStrength cap | `move_time` |
 
-You can override the default threshold in your `.env`:
+Mate branches use full-power Stockfish to guarantee correct execution or the best defensive resource. Recovery keeps `UCI_LimitStrength` active but raises the ELO cap by `PREDICTION_RECOVER_ELO_BOOST` (default: 200) and thinks 1.5× longer — this gives meaningfully stronger defensive play while keeping the game winnable for the opponent. After each special search the original ELO cap is always restored.
+
+You can override the thresholds in your `.env`:
 
 ```bash
-# Trigger recovery search when predicted eval is worse than -400cp for the bot
+# Trigger recovery when predicted eval is worse than -400 cp for the bot
 PREDICTION_RECOVER_THRESHOLD=400
+
+# ELO added to UCI_LimitStrength cap during recovery (e.g. 1600 → 1800)
+PREDICTION_RECOVER_ELO_BOOST=200
 ```
 
 **Use cases:**
@@ -373,7 +381,7 @@ This means the bot automatically plays faster when the clock is tight, and uses 
 | 1500 | 1200 ms | (60000 / 35 + 3000) × 0.8 = **3771 ms** | **1200 ms** |
 | 2200 | 1860 ms | (60000 / 35 + 3000) × 0.8 = **3771 ms** | **1860 ms** |
 
-The recovery search (triggered when the bot is losing by > `PREDICTION_RECOVER_THRESHOLD` cp) also respects the clock cap — it requests up to 1.5× the base budget but never exceeds the clock-safe limit.
+The recovery search (triggered when the bot is losing by > `PREDICTION_RECOVER_THRESHOLD` cp) uses a clock-aware budget of up to 1.5× the base rating budget, but never exceeds the clock-safe limit. The elapsed time of the prediction search is subtracted from the remaining clock before computing the recovery budget, so the total thinking time stays within the original clock window.
 
 **Configuration (`.env` file):**
 ```bash
