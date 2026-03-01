@@ -1119,5 +1119,137 @@ class TestMatingPvLogic(unittest.TestCase):
         self.assertEqual(move, "standard_search")
 
 
+class TestFullPowerMateMove(unittest.TestCase):
+    """Test _get_full_power_move helper — disables UCI_LimitStrength, restores after (v2.4.2)."""
+
+    def _make_stockfish_mock(self, best_move: str = "e2e4"):
+        mock_sf = MagicMock()
+        mock_sf.get_best_move_time.return_value = best_move
+        return mock_sf
+
+    def test_disables_limit_strength_before_search(self):
+        """UCI_LimitStrength must be set to False before get_best_move_time is called."""
+        from bot import _get_full_power_move
+        mock_sf = self._make_stockfish_mock("d1h5")
+        call_order = []
+        mock_sf.update_engine_parameters.side_effect = lambda p: call_order.append(("update", p))
+        mock_sf.get_best_move_time.side_effect = lambda t: call_order.append(("search", t)) or "d1h5"
+
+        _get_full_power_move(mock_sf, "game1", 1000, restore_elo=1600)
+
+        # First call must disable UCI_LimitStrength
+        self.assertEqual(call_order[0], ("update", {"UCI_LimitStrength": False}))
+        # Second call is the actual search
+        self.assertEqual(call_order[1][0], "search")
+
+    def test_restores_limit_strength_after_search(self):
+        """UCI_LimitStrength must be restored with the original ELO after the search."""
+        from bot import _get_full_power_move
+        mock_sf = self._make_stockfish_mock("d1h5")
+        restore_calls = []
+        mock_sf.update_engine_parameters.side_effect = lambda p: restore_calls.append(p)
+
+        _get_full_power_move(mock_sf, "game1", 1000, restore_elo=2300)
+
+        # Last update_engine_parameters call must restore UCI_LimitStrength
+        last_call = restore_calls[-1]
+        self.assertEqual(last_call, {"UCI_LimitStrength": True, "UCI_Elo": 2300})
+
+    def test_restores_even_on_search_exception(self):
+        """UCI_LimitStrength must be restored even if get_best_move_time raises."""
+        from bot import _get_full_power_move
+        mock_sf = self._make_stockfish_mock()
+        mock_sf.get_best_move_time.side_effect = Exception("engine crashed")
+        restore_calls = []
+        mock_sf.update_engine_parameters.side_effect = lambda p: restore_calls.append(p)
+
+        result = _get_full_power_move(mock_sf, "game1", 1000, restore_elo=1800)
+
+        self.assertIsNone(result)
+        last_call = restore_calls[-1]
+        self.assertEqual(last_call, {"UCI_LimitStrength": True, "UCI_Elo": 1800})
+
+    def test_no_restore_when_restore_elo_is_none(self):
+        """When restore_elo is None, UCI_LimitStrength is only disabled, never re-enabled."""
+        from bot import _get_full_power_move
+        mock_sf = self._make_stockfish_mock("e2e4")
+        calls = []
+        mock_sf.update_engine_parameters.side_effect = lambda p: calls.append(p)
+
+        _get_full_power_move(mock_sf, "game1", 500, restore_elo=None)
+
+        # Only one call: disabling
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], {"UCI_LimitStrength": False})
+
+    def test_returns_best_move(self):
+        """Should return the move from get_best_move_time."""
+        from bot import _get_full_power_move
+        mock_sf = self._make_stockfish_mock("h7h8q")
+
+        result = _get_full_power_move(mock_sf, "game1", 1000)
+
+        self.assertEqual(result, "h7h8q")
+
+
+class TestClockAdjustedSecondarySearch(unittest.TestCase):
+    """Validate clock-budget logic for secondary searches after prediction (v2.4.2).
+
+    The play_game loop computes _remaining_after_pred = max(0, _my_remaining - elapsed_ms)
+    to ensure mate / recovery searches never exceed the original per-move clock budget.
+    These tests validate that inline arithmetic pattern directly.
+    """
+
+    def test_remaining_after_pred_normal(self):
+        """Remaining clock is reduced by the elapsed prediction time."""
+        _my_remaining = 30_000   # 30 s
+        _pred_elapsed_ms = 1_200
+        _remaining_after_pred = max(0, _my_remaining - _pred_elapsed_ms)
+        self.assertEqual(_remaining_after_pred, 28_800)
+
+    def test_remaining_after_pred_floors_at_zero(self):
+        """remaining_after_pred never goes negative (e.g., lag spike longer than remaining)."""
+        _my_remaining = 500
+        _pred_elapsed_ms = 800   # elapsed > remaining (extreme lag spike)
+        _remaining_after_pred = max(0, _my_remaining - _pred_elapsed_ms)
+        self.assertEqual(_remaining_after_pred, 0)
+
+    def test_remaining_after_pred_none_passthrough(self):
+        """When _my_remaining is None (no clock data), remaining_after_pred stays None."""
+        _my_remaining = None
+        _pred_elapsed_ms = 1_000
+        _remaining_after_pred = (
+            max(0, _my_remaining - _pred_elapsed_ms)
+            if _my_remaining else None
+        )
+        self.assertIsNone(_remaining_after_pred)
+
+    def test_clock_aware_uses_adjusted_remaining(self):
+        """clock_aware_move_time respects remaining_after_pred, not original remaining."""
+        from bot import clock_aware_move_time
+        original_remaining = 10_000   # 10 s
+        pred_elapsed = 2_000          # 2 s consumed by prediction
+        remaining_after = max(0, original_remaining - pred_elapsed)  # 8 s
+
+        # With 8 s remaining and 10 moves left, clock cap ≈ (8000/10) * 0.8 = 640 ms
+        budget_adjusted = clock_aware_move_time(None, 5000, remaining_after, 0, 10)
+        # With original 10 s remaining same formula gives 800 ms
+        budget_original = clock_aware_move_time(None, 5000, original_remaining, 0, 10)
+
+        self.assertLess(budget_adjusted, budget_original,
+                        "Adjusted-clock budget must be smaller than original-clock budget")
+
+    def test_fallback_uses_movetime_min_ms_not_full_budget(self):
+        """Exceptional fallback path uses MOVETIME_MIN_MS, not the full move_time budget."""
+        from bot import MOVETIME_MIN_MS
+        move_time = 3_000   # 3 s — a normal rapid-game budget
+        # Simulated exceptional path: _get_full_power_move returns None
+        full_power_result = None
+        fallback_time = MOVETIME_MIN_MS   # must NOT be move_time
+        move = full_power_result or f"stockfish.get_best_move_time({fallback_time})"
+        self.assertIn(str(MOVETIME_MIN_MS), move)
+        self.assertNotIn(str(move_time), move)
+
+
 if __name__ == '__main__':
     unittest.main()

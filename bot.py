@@ -484,6 +484,44 @@ def _extract_mate_from_info(info_line: str) -> Optional[int]:
     return None
 
 
+def _get_full_power_move(stockfish: Stockfish, game_id: str,
+                          move_time_ms: int,
+                          restore_elo: int | None = None) -> Optional[str]:
+    """Search for the best move at full engine power, bypassing UCI_LimitStrength.
+
+    Temporarily disables UCI_LimitStrength, runs a movetime search at maximum
+    engine quality, then restores the strength cap so all subsequent searches
+    remain limited.  Used for forced-mate and mate-avoidance situations where
+    correctness matters more than playing at the opponent's level.
+
+    Args:
+        stockfish:   Initialized Stockfish instance (position already set).
+        game_id:     Game ID for logging.
+        move_time_ms: Time budget in ms for the full-power search.
+        restore_elo: If provided, re-applies UCI_LimitStrength at this ELO
+                     after the search to restore the active strength cap.
+
+    Returns:
+        Best move string, or None on failure.
+    """
+    try:
+        stockfish.update_engine_parameters({"UCI_LimitStrength": False})
+        move = stockfish.get_best_move_time(move_time_ms)
+        return move
+    except Exception as e:
+        logger.debug(f"[{game_id}] Full-power move search failed: {e}")
+        return None
+    finally:
+        if restore_elo is not None:
+            try:
+                stockfish.update_engine_parameters({
+                    "UCI_LimitStrength": True,
+                    "UCI_Elo": restore_elo,
+                })
+            except Exception:
+                pass
+
+
 def get_move_prediction(stockfish: Stockfish, game_id: str,
                          move_time_ms: int | None = None,
                          wtime: int | None = None, btime: int | None = None,
@@ -1032,10 +1070,25 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 opponent_rating, STOCKFISH_TIME,
                                 _my_remaining, _my_inc, _moves_left,
                             )
+                            # ELO to restore after full-power mate searches
+                            _target_elo = (
+                                min(max(opponent_rating + STRENGTH_ADVANTAGE, 1320), 2850)
+                                if opponent_rating else None
+                            )
+
+                            # Measure wall-clock time spent in prediction so every
+                            # subsequent search gets a properly adjusted clock budget.
+                            _pred_start = time.monotonic()
                             predicted_move, mate_val, pred_cp = get_move_prediction(
                                 stockfish, game_id,
                                 move_time_ms=move_time,
                                 prediction_depth=PREDICTION_DEPTH,
+                            )
+                            _pred_elapsed_ms = int((time.monotonic() - _pred_start) * 1000)
+                            # Remaining clock after the prediction search, floored at 0.
+                            _remaining_after_pred = (
+                                max(0, _my_remaining - _pred_elapsed_ms)
+                                if _my_remaining else None
                             )
 
                             # Evaluate prediction from our side's perspective
@@ -1043,28 +1096,44 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             if pred_cp is not None:
                                 eval_for_bot = pred_cp if bot_is_white else -pred_cp
 
-                            # If predictor found a mating sequence for us, follow it.
+                            # If predictor found a mating sequence for us, follow it
+                            # using full-power Stockfish to guarantee the fastest/best mate.
                             if mate_val is not None and mate_val > 0:
-                                move = predicted_move or stockfish.get_best_move_time(move_time)
-                                logger.info(f"[{game_id}] Following mating sequence (mate in {mate_val})")
-                            # If predictor indicates we're being mated, avoid using the
-                            # predicted (losing) continuation and pick an alternative.
+                                _fp_time = clock_aware_move_time(
+                                    opponent_rating, STOCKFISH_TIME,
+                                    _remaining_after_pred, _my_inc, _moves_left,
+                                )
+                                move = (
+                                    _get_full_power_move(stockfish, game_id, _fp_time, restore_elo=_target_elo)
+                                    or predicted_move
+                                )
+                                logger.info(f"[{game_id}] Following mating sequence at full power (mate in {mate_val}, fp_time={_fp_time}ms)")
+                            # If predictor indicates we're being mated, use full-power
+                            # Stockfish to find the best defensive resource.
                             elif mate_val is not None and mate_val < 0:
-                                logger.info(f"[{game_id}] Prediction: forced mate against us (mate in {abs(mate_val)}) — choosing defensive move")
-                                move = stockfish.get_best_move_time(move_time)
+                                _fp_time = clock_aware_move_time(
+                                    opponent_rating, STOCKFISH_TIME,
+                                    _remaining_after_pred, _my_inc, _moves_left,
+                                )
+                                logger.info(f"[{game_id}] Prediction: forced mate against us (mate in {abs(mate_val)}) — choosing defensive move at full power (fp_time={_fp_time}ms)")
+                                move = (
+                                    _get_full_power_move(stockfish, game_id, _fp_time, restore_elo=_target_elo)
+                                    or stockfish.get_best_move_time(MOVETIME_MIN_MS)
+                                )
                             # If predicted eval shows we are significantly down, try to recover
                             elif eval_for_bot is not None and eval_for_bot <= -PREDICTION_RECOVER_THRESHOLD:
                                 logger.info(f"[{game_id}] Prediction shows we're down {eval_for_bot}cp — attempting recovery search")
-                                # Recovery: allow up to 1.5× budget but still respect the clock cap
+                                # Recovery: allow up to 1.5× budget but still respect the clock cap.
+                                # Use remaining_after_pred so the total time stays within the clock.
                                 try:
                                     alt_time = clock_aware_move_time(
                                         opponent_rating, int(STOCKFISH_TIME * 1.5),
-                                        _my_remaining, _my_inc, _moves_left,
+                                        _remaining_after_pred, _my_inc, _moves_left,
                                     )
                                     move = stockfish.get_best_move_time(alt_time) or predicted_move
                                     logger.info(f"[{game_id}] Recovery move chosen (movetime {alt_time}ms): {move}")
                                 except Exception:
-                                    move = predicted_move or stockfish.get_best_move_time(move_time)
+                                    move = predicted_move or stockfish.get_best_move_time(MOVETIME_MIN_MS)
                             else:
                                 move = predicted_move or stockfish.get_best_move_time(move_time)
 
