@@ -879,6 +879,25 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                                     logger.error(f"[{game_id}] BOT endpoint responded {resp.status_code}: {resp.text}")
                                                 else:
                                                     logger.info(f"[{game_id}] Responded to draw via BOT endpoint: {url_action}")
+                                                    # Verify the game ended/was updated: poll ongoing games briefly.
+                                                    try:
+                                                        still_ongoing = True
+                                                        check_deadline = time.time() + 3.0
+                                                        while time.time() < check_deadline:
+                                                            try:
+                                                                ongoing = client.games.get_ongoing(50)
+                                                            except Exception:
+                                                                time.sleep(0.2)
+                                                                continue
+                                                            found = any((g.get('gameId') == game_id or g.get('id') == game_id) for g in ongoing)
+                                                            if not found:
+                                                                still_ongoing = False
+                                                                break
+                                                            time.sleep(0.25)
+                                                        if still_ongoing:
+                                                            logger.warning(f"[{game_id}] Draw accept reported OK but game still appears ongoing after POST; possible race or server-side decline")
+                                                    except Exception as ex_verify:
+                                                        logger.debug(f"[{game_id}] Verification check failed: {ex_verify}")
                                             except Exception as http_err:
                                                 logger.error(f"[{game_id}] Failed to respond to draw offer via BOT endpoint: {http_err}")
                                         else:
