@@ -2,6 +2,15 @@
 
 All notable changes to Axiom Chess Bot are documented in this file.
 
+## [2.4.2] - 2026-03-01
+
+### Fixed
+
+- **Recovery / mate logic fires for all opponents:** The follow-mating-sequence, avoid-forced-mate and recovery-search behaviours were previously gated behind `PREDICTION_MIN_USE_ELO` (default: 2200) — for lower-rated opponents the PV was logged but the recovery and mate branches were silently skipped, causing the bot to play into losing continuations without attempting counterplay. All three behaviours now fire unconditionally regardless of opponent rating.
+- **Removed `PREDICTION_MIN_USE_ELO`:** The variable is no longer used and has been removed from `config.py`, `.env.example`, `bot.py` imports, and documentation. The only remaining prediction gate is `ENABLE_MOVE_PREDICTION` (controls PV logging) and `PREDICTION_RECOVER_THRESHOLD` (controls recovery threshold).
+- **PV logging guard:** `get_move_prediction` now checks `ENABLE_MOVE_PREDICTION` before logging the predicted line (previously it only checked the log level).
+
+
 ## [2.4.1] - 2026-02-20
 
 ### Fixed / Improved
