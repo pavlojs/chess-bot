@@ -1362,6 +1362,15 @@ def challenge_loop(client: berserk.Client, bot_username: str,
                     f"Rate limited by Lichess API (HTTP 429) — backing off for "
                     f"{rate_limit_backoff // 60}m {rate_limit_backoff % 60}s before next attempt"
                 )
+                # Drop all pooled TCP connections so the next attempt gets a fresh
+                # connection to Lichess.  Reusing the same keep-alive connection after
+                # a 429 keeps triggering the rate-limit; a new connection resets that
+                # state (identical behaviour to a manual bot restart).
+                try:
+                    client.session.close()
+                    logger.debug("Closed session connections to reset rate-limit state")
+                except Exception:
+                    pass
                 retry_event.clear()
                 retry_event.wait(timeout=rate_limit_backoff)
                 retry_event.clear()
