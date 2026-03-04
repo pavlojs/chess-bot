@@ -389,7 +389,7 @@ DYNAMIC_STRENGTH = False  # Same time and strength for all opponents
 
 ### Contributors
 
-- Core changes by @whiteravens20
+- Core changes by @pavlojs
 - Inspired by feedback from real-game analysis
 
 ---

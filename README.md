@@ -55,7 +55,7 @@ This ensures consistency between local development and Docker deployment.
 
 ## Testing
 
-[![Tests](https://github.com/whiteravens20/chess-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/whiteravens20/chess-bot/actions/workflows/tests.yml)
+[![Tests](https://github.com/pavlojs/chess-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/pavlojs/chess-bot/actions/workflows/tests.yml)
 
 Run the comprehensive test suite:
 ```bash
@@ -80,7 +80,7 @@ See [TESTING.md](TESTING.md) for detailed testing guide.
 
 ### Docker Deployment
 
-[![Build and Push Docker Image](https://github.com/whiteravens20/chess-bot/actions/workflows/build-and-push-docker.yml/badge.svg)](https://github.com/whiteravens20/chess-bot/actions/workflows/build-and-push-docker.yml)
+[![Build and Push Docker Image](https://github.com/pavlojs/chess-bot/actions/workflows/build-and-push-docker.yml/badge.svg)](https://github.com/pavlojs/chess-bot/actions/workflows/build-and-push-docker.yml)
 
 #### Option 1: Using Pre-built Image from GitHub Container Registry
 
@@ -91,7 +91,7 @@ After each successful test run, a Docker image is automatically built and pushed
 export TOKEN="your_lichess_token"
 
 # Pull and run the latest image
-docker run -e TOKEN=$TOKEN ghcr.io/whiteravens20/axiom-chess-bot:latest
+docker run -e TOKEN=$TOKEN ghcr.io/pavlojs/axiom-chess-bot:latest
 ```
 
 Or using Docker Compose:
@@ -99,7 +99,7 @@ Or using Docker Compose:
 ```yaml
 services:
   axiom-bot:
-    image: ghcr.io/whiteravens20/axiom-chess-bot:latest
+    image: ghcr.io/pavlojs/axiom-chess-bot:latest
     env_file: .env  # Load environment variables from .env file
     volumes:
       - ./config.py:/app/config.py  # Optional: mount config for time-control/challenge customisation
