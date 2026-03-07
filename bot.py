@@ -1235,6 +1235,22 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                         logger.error(f"[{game_id}] Failed to make move after {max_retries} attempts: {net_err}")
                                         logger.info(f"[{game_id}] Game interrupted due to persistent connection issues")
                                         raise  # Re-raise to trigger outer exception handler
+                                except (ApiError, ResponseError) as api_err:
+                                    # berserk wraps RemoteDisconnected/connection errors as ApiError
+                                    err_str = str(api_err).lower()
+                                    if "not your turn" in err_str or "game already over" in err_str:
+                                        raise  # Not a network error — let outer handler deal with it
+                                    if "connection" in err_str or "remote" in err_str or "aborted" in err_str:
+                                        if attempt < max_retries - 1:
+                                            logger.warning(f"[{game_id}] Network error while making move (attempt {attempt + 1}/{max_retries}): {api_err}")
+                                            time.sleep(retry_delay)
+                                            retry_delay *= 2
+                                        else:
+                                            logger.error(f"[{game_id}] Failed to make move after {max_retries} attempts: {api_err}")
+                                            logger.info(f"[{game_id}] Game interrupted due to persistent connection issues")
+                                            raise
+                                    else:
+                                        raise  # Non-network API error — let outer handler deal with it
                         else:
                             logger.warning(f"[{game_id}] Stockfish returned no move")
 
@@ -1243,27 +1259,19 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         logger.warning(f"[{game_id}] Network error while making move: {e}")
                         logger.info(f"[{game_id}] Game interrupted due to connection issues")
                         break
-                    except ApiError as e:
-                        # Handle API-specific errors
+                    except (ApiError, ResponseError) as e:
+                        # Handle API-specific errors (connection-related ones were already retried above)
                         error_str = str(e).lower()
                         if "not your turn" in error_str or "game already over" in error_str:
                             # Race condition: engine finished computing after game ended (abort/flag)
                             logger.info(f"[{game_id}] Game ended while making move (race condition)")
-                        elif "connection" in error_str or "remote" in error_str:
+                        elif "connection" in error_str or "remote" in error_str or "aborted" in error_str:
+                            # Exhausted retries from the inner loop
                             logger.warning(f"[{game_id}] Network error while making move: {e}")
                             logger.info(f"[{game_id}] Game interrupted due to connection issues")
                         else:
                             logger.error(f"[{game_id}] API error while making move: {e}")
                         break
-                    except ResponseError as e:
-                        # Handle "game already over" errors gracefully (race condition)
-                        error_msg = str(e).lower()
-                        if "not your turn" in error_msg or "game already over" in error_msg:
-                            logger.info(f"[{game_id}] Game ended while making move (race condition)")
-                            break
-                        else:
-                            logger.error(f"[{game_id}] API error: {e}")
-                            break
                     except StockfishException as e:
                         logger.error(f"Stockfish error in game {game_id}: {e}")
                         break
