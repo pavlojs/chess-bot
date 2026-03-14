@@ -87,10 +87,11 @@ Current test coverage includes:
 - ✅ Invalid move rejection
 - ✅ Game over detection (checkmate)
 
-### Stockfish Initialization Tests (3 tests)
+### Stockfish Initialization Tests (4 tests)
 - ✅ Successful initialization
 - ✅ UCI_LimitStrength for weak opponents (< 1800 ELO)
-- ✅ Full strength for strong opponents (≥ 1800 ELO)
+- ✅ UCI_LimitStrength for intermediate opponents (1800–2799 ELO)
+- ✅ Full strength for elite opponents (≥ 2800 ELO)
 
 ### Move Time Calculation Tests — Opponent Scaling (4 tests)
 - ✅ Full thinking time for strong opponents (≥ 2200 ELO)
@@ -151,19 +152,22 @@ Current test coverage includes:
 - ✅ Challenges older than 1 hour are pruned automatically
 - ✅ `filter_suitable_bots` excludes self and out-of-range bots
 
-### Draw Offer Handling Tests (5 tests)
+### Draw Offer Handling Tests (8 tests)
 - ✅ Accept draw in balanced position (±200 cp)
 - ✅ Decline draw when winning (> 200 cp)
 - ✅ Decline draw when losing (< −200 cp)
 - ✅ Decline draw when bot has mate
-- ✅ Evaluation sign correctly flipped for black
+- ✅ Evaluation correctly derived from `board.turn` when no cache (fallback path)
+- ✅ Cached `last_eval_cp` used directly (already bot's perspective — no colour flip)
+- ✅ Cached positive eval as black → accept draw correctly
+- ✅ Fallback eval when bot is side-to-move → no flip applied
 
 ### Stockfish Updater Tests (3 tests)
 - ✅ Binary name detection (platform-specific)
 - ✅ Version detection from installed binary
 - ✅ Latest release info retrieval from GitHub API
 
-**Total: 70 tests, 100% pass rate**
+**Total: 125 tests, 100% pass rate**
 
 ### Network Error Handling & Retry Logic
 The bot now includes robust error handling for network issues:
@@ -207,22 +211,33 @@ pytest && git add .
 Tests are organized in `test_bot.py` with separate test classes for different functionality:
 
 ```python
-class TestChallengeAcceptance(unittest.TestCase)        #  9 tests
-class TestBulletChallengeAcceptance(unittest.TestCase)  #  4 tests
-class TestBoardState(unittest.TestCase)                 #  5 tests
-class TestStockfishInitialization(unittest.TestCase)    #  3 tests
-class TestMoveTimeCalculation(unittest.TestCase)        #  4 tests
-class TestMoveTimeCalculationSignature(unittest.TestCase) # 2 tests
-class TestParseTimeToMilliseconds(unittest.TestCase)    # 10 tests
-class TestExtractCpFromInfo(unittest.TestCase)          #  7 tests
-class TestParsePvFromInfo(unittest.TestCase)            #  6 tests
-class TestGameEndReason(unittest.TestCase)              #  5 tests
-class TestErrorHandling(unittest.TestCase)              #  2 tests
-class TestLogging(unittest.TestCase)                    #  1 test
-class TestChallengeTracker(unittest.TestCase)           #  4 tests
-class TestDrawOfferHandling(unittest.TestCase)          #  5 tests
-class TestStockfishUpdater(unittest.TestCase)           #  3 tests
-# Total: 70 tests
+class TestChallengeAcceptance(unittest.TestCase)           #  9 tests
+class TestBulletChallengeAcceptance(unittest.TestCase)     #  4 tests
+class TestBoardState(unittest.TestCase)                    #  5 tests
+class TestStockfishInitialization(unittest.TestCase)       #  4 tests
+class TestMoveTimeCalculation(unittest.TestCase)           #  4 tests
+class TestMoveTimeCalculationSignature(unittest.TestCase)  #  2 tests
+class TestParseTimeToMilliseconds(unittest.TestCase)       # 10 tests
+class TestExtractCpFromInfo(unittest.TestCase)             #  7 tests
+class TestParsePvFromInfo(unittest.TestCase)               #  6 tests
+class TestGameEndReason(unittest.TestCase)                 #  5 tests
+class TestErrorHandling(unittest.TestCase)                 #  2 tests
+class TestLogging(unittest.TestCase)                       #  1 test
+class TestChallengeTracker(unittest.TestCase)              #  4 tests
+class TestDrawOfferHandling(unittest.TestCase)             #  8 tests
+class TestStockfishUpdater(unittest.TestCase)              #  3 tests
+class TestExtractMateFromInfo(unittest.TestCase)           #  6 tests
+class TestGetMovePredictionSignature(unittest.TestCase)    #  5 tests
+class TestDrawOfferFallback(unittest.TestCase)             #  6 tests
+class TestPredictionRecoverThreshold(unittest.TestCase)    # 11 tests
+class TestMatingPvLogic(unittest.TestCase)                 #  4 tests
+class TestFullPowerMateMove(unittest.TestCase)             #  5 tests
+class TestClockAdjustedSecondarySearch(unittest.TestCase)  #  5 tests
+class TestTimeoutHTTPAdapter(unittest.TestCase)            #  3 tests
+class TestHealthcheck(unittest.TestCase)                   #  2 tests
+class TestGracefulShutdown(unittest.TestCase)              #  2 tests
+class TestConcurrentGameLimit(unittest.TestCase)           #  2 tests
+# Total: 125 tests
 ```
 
 ## Mocking
@@ -234,19 +249,25 @@ Tests use `unittest.mock` to mock external dependencies:
 
 This allows tests to run without requiring actual API credentials or engine binaries.
 
+Also covers all new classes added in v2.5.0:
+
+### Timeout HTTP Adapter Tests (3 tests)
+- ✅ `TimeoutHTTPAdapter` stores the configured timeout tuple
+- ✅ `send()` injects the default timeout into every request
+- ✅ Explicit `timeout=` kwarg passed by caller is not overridden
+
+### Healthcheck Tests (2 tests)
+- ✅ `HEALTHCHECK_FILE` constant equals `/tmp/axiom_heartbeat`
+- ✅ Heartbeat file is writable on the target filesystem
+
+### Graceful Shutdown Tests (2 tests)
+- ✅ First signal sets `shutdown_requested = True`
+- ✅ Second signal raises `SystemExit(1)` immediately
+
+### Concurrent Game Limit Tests (2 tests)
+- ✅ Dead thread is cleaned up, freeing a slot for a new game
+- ✅ Alive game thread blocks a new game from starting
+
 ## Performance
 
-All tests complete in under 3 seconds (~2.5s on typical hardware).
-
-## Future Test Improvements
-
-Planned enhancements:
-- Integration tests with mock Lichess API
-- Async game simulation tests
-- Performance benchmarking
-- Game state recovery tests
-- Error scenario testing
-- Network failure simulation tests
-- Retry logic boundary testing
-- Stream reconnection tests
-- Concurrent game handling tests
+All tests complete in under 3 seconds (~2.2 s on typical hardware).
