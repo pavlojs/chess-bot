@@ -2,7 +2,30 @@
 
 All notable changes to Axiom Chess Bot are documented in this file.
 
-## [2.4.2] - 2026-03-01
+## [2.5.0] - 2026-03-14
+
+### Fixed
+
+- **Silent disconnect / bot going offline with no errors:** The event stream could get stuck indefinitely when a TCP connection to Lichess was silently dropped by a NAT/firewall (no RST or FIN packet). `requests` had no read timeout, so `for event in stream_incoming_events()` hung forever with no exception and no log output. Fixed by introducing `TimeoutHTTPAdapter(timeout=(10, 120))` — 10 s connect timeout, 120 s read timeout. Lichess sends keepalive newlines every ~30 s, so any silence beyond 2 minutes is treated as a dead connection and triggers reconnect.
+- **Stream end → reconnect instead of exit:** A normal (non-error) end of the event stream iterator caused a `break` that exited the `while` loop and shut down the bot silently. Changed to `continue` with a 10 s sleep so the bot always reconnects.
+- **HTTP 429 on event stream → reconnect:** `ResponseError` with status 429 previously fell through to the `else: break` branch, silently killing the bot. Now backed off for 60 s and retried. All other unrecognised `ResponseError` codes also reconnect (30 s) instead of exiting.
+- **Draw offer evaluation colour bug:** `last_eval_cp` is produced by Stockfish on the bot's turn, so UCI `score cp` is already from the bot's perspective regardless of colour. The previous code incorrectly negated it for black (`evaluation = last_eval_cp if bot_is_white else -last_eval_cp`), causing the bot to accept draws when winning as black and reject them when losing. Fixed to use `last_eval_cp` directly. The fallback path (`get_evaluation()`) is now also flipped correctly using `board.turn` instead of `bot_is_white`.
+- **`session.close()` in challenge loop killed the event stream:** After an HTTP 429, the challenge loop called `client.session.close()` to reset the connection pool. This closed shared TCP connections used by the main event stream, causing the stream to drop silently. The `session.close()` call was removed — the 5-minute backoff is sufficient.
+- **Stockfish process leak on game stream reconnect:** When the game stream reconnected, a new `Stockfish` instance was created without killing the previous process, leaking OS processes. Fixed by adding an explicit `kill()`/`wait()` before reinitialising.
+
+### Added
+
+- **Docker healthcheck:** Bot writes the current timestamp to `/tmp/axiom_heartbeat` on every received event and on every reconnect attempt. Both `docker-compose.yml` and `Dockerfile` include a `HEALTHCHECK` that verifies the file is fresher than 5 minutes. Three consecutive failures mark the container `unhealthy`; combined with `restart: unless-stopped` this auto-restarts a stuck bot. Heartbeat file is removed on graceful shutdown so Docker does not restart a deliberately stopped container.
+- **Graceful shutdown waits for game threads:** `handle_shutdown` previously called `sys.exit(0)` after a flat 2-second sleep, which killed daemon threads before their `finally:` blocks could clean up Stockfish processes. The handler now waits up to 15 seconds for all active game threads to finish (each thread's `finally:` block kills its Stockfish process), then exits. A second SIGTERM/SIGINT still triggers an immediate `sys.exit(1)`. Global `_active_games` and `_active_games_lock` references enable the shutdown handler to enumerate running threads without coupling to `main()`.
+- **Concurrent game limit (`MAX_CONCURRENT_GAMES = 1`):** Prevents more than one simultaneous game thread. If a `gameStart` event arrives while a game is already running, the new game is immediately resigned. Dead threads are pruned from `active_games` before the limit is checked to avoid false positives from stale entries.
+- **`active_games` thread-safety:** All reads and writes to the `active_games` dict (in main loop and `challenge_loop`) are now protected by `active_games_lock`. Prevents `RuntimeError: dictionary changed size during iteration` under concurrent access.
+
+### Changed
+
+- `gameFinish` always logs and signals `retry_event` regardless of whether the game ID was still in `active_games` (previously the log was inside the `if game_id in active_games` block).
+- `challenge_loop` signature gains `active_games_lock: threading.Lock` parameter.
+- `HEALTHCHECK_FILE` constant (`"/tmp/axiom_heartbeat"`) exported from `bot.py`.
+
 
 ### Fixed
 
