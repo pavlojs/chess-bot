@@ -876,6 +876,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
     winc_ms: int = 0             # White's increment per move in milliseconds
     binc_ms: int = 0             # Black's increment per move in milliseconds
     last_eval_cp: int | None = None  # Cached eval from last move search (white's perspective)
+    last_opponent_draw: bool = False  # Tracks opponent draw flag from previous event (rising-edge detection)
 
     try:
         # Retry stream connection with backoff
@@ -925,6 +926,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 pass
 
                         stockfish = init_stockfish(opponent_rating)
+                        last_opponent_draw = False  # Reset draw state on (re)connect
 
                         logger.info(
                             f"Game {game_id}: playing as "
@@ -958,8 +960,13 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 logger.info(f"[{game_id}] Opponent played {move}")
                             last_move_count = current_move_count
 
-                        # Handle draw offers
-                        if event.get("wdraw") or event.get("bdraw"):
+                        # Handle draw offers — respond only to the *opponent's* offer and only
+                        # when it first appears (rising edge), to avoid duplicate replies.
+                        opponent_draw_now = (
+                            bool(event.get("bdraw") if bot_is_white else event.get("wdraw"))
+                            if bot_is_white is not None else False
+                        )
+                        if opponent_draw_now and not last_opponent_draw:
                             logger.info(f"[{game_id}] Draw offer received")
                             
                             if stockfish:
@@ -1011,7 +1018,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                         err_text = str(api_error).lower()
                                         if "not for bot accounts" in err_text or "403" in err_text or (getattr(api_error, 'response', None) and getattr(api_error.response, 'status_code', None) == 403):
                                             try:
-                                                url_action = "accept" if accept_draw else "decline"
+                                                url_action = "yes" if accept_draw else "no"
                                                 url = f"https://lichess.org/api/bot/game/{game_id}/draw/{url_action}"
                                                 headers = {"Authorization": f"Bearer {TOKEN}"}
                                                 resp = requests.post(url, headers=headers, timeout=10)
@@ -1019,25 +1026,6 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                                     logger.error(f"[{game_id}] BOT endpoint responded {resp.status_code}: {resp.text}")
                                                 else:
                                                     logger.info(f"[{game_id}] Responded to draw via BOT endpoint: {url_action}")
-                                                    # Verify the game ended/was updated: poll ongoing games briefly.
-                                                    try:
-                                                        still_ongoing = True
-                                                        check_deadline = time.time() + 3.0
-                                                        while time.time() < check_deadline:
-                                                            try:
-                                                                ongoing = client.games.get_ongoing(50)
-                                                            except Exception:
-                                                                time.sleep(0.2)
-                                                                continue
-                                                            found = any((g.get('gameId') == game_id or g.get('id') == game_id) for g in ongoing)
-                                                            if not found:
-                                                                still_ongoing = False
-                                                                break
-                                                            time.sleep(0.25)
-                                                        if still_ongoing:
-                                                            logger.warning(f"[{game_id}] Draw accept reported OK but game still appears ongoing after POST; possible race or server-side decline")
-                                                    except Exception as ex_verify:
-                                                        logger.debug(f"[{game_id}] Verification check failed: {ex_verify}")
                                             except Exception as http_err:
                                                 logger.error(f"[{game_id}] Failed to respond to draw offer via BOT endpoint: {http_err}")
                                         else:
@@ -1050,11 +1038,13 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                         client.board.handle_draw_offer(game_id, accept=False)
                                     except Exception as api_error:
                                         try:
-                                            url = f"https://lichess.org/api/bot/game/{game_id}/draw/decline"
+                                            url = f"https://lichess.org/api/bot/game/{game_id}/draw/no"
                                             headers = {"Authorization": f"Bearer {TOKEN}"}
                                             requests.post(url, headers=headers, timeout=10)
                                         except Exception:
                                             pass
+
+                        last_opponent_draw = opponent_draw_now
 
                     # After processing event, check if game is over
                     if board.is_game_over():
