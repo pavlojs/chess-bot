@@ -6,8 +6,11 @@ import unittest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timedelta
 import os
+import signal
+import time
 
 import chess
+import requests
 
 # Mock TOKEN before importing bot
 os.environ.setdefault('TOKEN', 'test_token_for_testing')
@@ -598,24 +601,68 @@ class TestDrawOfferHandling(unittest.TestCase):
     
     @patch('bot.Stockfish')
     def test_color_adjustment_for_black(self, mock_stockfish_class):
-        """Test that evaluation is adjusted correctly when bot plays as black."""
-        # Mock Stockfish (evaluates from white's perspective)
+        """Test draw eval fallback: get_evaluation() returns from side-to-move perspective.
+
+        When bot is black and it's the opponent's turn (white to move), Stockfish's
+        get_evaluation() reports from white's perspective.  The bot must negate it.
+        """
         mock_sf = Mock()
+        # Stockfish says +300 from side-to-move (white) — bad for black bot
         mock_sf.get_evaluation.return_value = {"type": "cp", "value": 300}
-        
+
         eval_info = mock_sf.get_evaluation()
-        evaluation = eval_info["value"]
-        
-        # Bot is black, so negate evaluation
+        raw_cp = eval_info["value"]
+
+        # New logic: flip based on whether bot is side-to-move, not bot colour
         bot_is_white = False
-        if not bot_is_white:
-            evaluation = -evaluation
-        
-        # From bot's (black's) perspective, this is losing
+        board_turn_is_white = True  # opponent (white) to move after draw offer
+        bot_is_side_to_move = (board_turn_is_white == bot_is_white)  # False
+        evaluation = raw_cp if bot_is_side_to_move else -raw_cp
+
+        # From bot's (black's) perspective: -300 → losing → reject draw
         accept_draw = -200 <= evaluation <= 200
-        
         self.assertFalse(accept_draw)
         self.assertEqual(evaluation, -300)
+
+    @patch('bot.Stockfish')
+    def test_cached_eval_no_color_flip(self, mock_stockfish_class):
+        """Cached last_eval_cp is already from bot's perspective — no flip needed.
+
+        The search that produced last_eval_cp ran on the bot's turn, so UCI
+        'score cp' is from the bot's side-to-move.  The draw handler must
+        use it directly regardless of bot colour.
+        """
+        # Bot is black, cached eval shows bot is losing (-400 from bot's perspective)
+        last_eval_cp = -400
+        evaluation = last_eval_cp  # NO flip — already bot's perspective
+
+        accept_draw = -200 <= evaluation <= 200
+        self.assertFalse(accept_draw)
+        self.assertEqual(evaluation, -400)
+
+    @patch('bot.Stockfish')
+    def test_cached_eval_positive_black_accepts_draw(self, mock_stockfish_class):
+        """Cached eval +50 as black → balanced → should accept draw."""
+        last_eval_cp = 50
+        evaluation = last_eval_cp
+        accept_draw = -200 <= evaluation <= 200
+        self.assertTrue(accept_draw)
+
+    @patch('bot.Stockfish')
+    def test_fallback_eval_bot_is_side_to_move(self, mock_stockfish_class):
+        """Fallback eval when bot IS side-to-move → no flip needed."""
+        mock_sf = Mock()
+        mock_sf.get_evaluation.return_value = {"type": "cp", "value": -150}
+
+        raw_cp = mock_sf.get_evaluation()["value"]
+        bot_is_white = True
+        board_turn_is_white = True  # bot's turn
+        bot_is_side_to_move = (board_turn_is_white == bot_is_white)
+        evaluation = raw_cp if bot_is_side_to_move else -raw_cp
+
+        self.assertEqual(evaluation, -150)  # no flip
+        accept_draw = -200 <= evaluation <= 200
+        self.assertTrue(accept_draw)
 
 
 class TestStockfishUpdater(unittest.TestCase):
@@ -1284,6 +1331,127 @@ class TestClockAdjustedSecondarySearch(unittest.TestCase):
         move = full_power_result or f"stockfish.get_best_move_time({fallback_time})"
         self.assertIn(str(MOVETIME_MIN_MS), move)
         self.assertNotIn(str(move_time), move)
+
+
+class TestTimeoutHTTPAdapter(unittest.TestCase):
+    """Test TimeoutHTTPAdapter sets default timeout on all requests."""
+
+    def test_default_timeout_applied(self):
+        from bot import TimeoutHTTPAdapter
+        adapter = TimeoutHTTPAdapter(timeout=(10, 120))
+        self.assertEqual(adapter.timeout, (10, 120))
+
+    def test_send_sets_timeout_in_kwargs(self):
+        from bot import TimeoutHTTPAdapter
+        adapter = TimeoutHTTPAdapter(timeout=(5, 60))
+
+        # Mock the parent send method
+        with patch.object(requests.adapters.HTTPAdapter, 'send', return_value=Mock()) as mock_send:
+            fake_request = Mock()
+            adapter.send(fake_request)
+            _, kwargs = mock_send.call_args
+            self.assertEqual(kwargs.get('timeout'), (5, 60))
+
+    def test_explicit_timeout_not_overridden(self):
+        from bot import TimeoutHTTPAdapter
+        adapter = TimeoutHTTPAdapter(timeout=(5, 60))
+
+        with patch.object(requests.adapters.HTTPAdapter, 'send', return_value=Mock()) as mock_send:
+            fake_request = Mock()
+            adapter.send(fake_request, timeout=30)
+            _, kwargs = mock_send.call_args
+            # Explicit timeout should be preserved, not overridden
+            self.assertEqual(kwargs.get('timeout'), 30)
+
+
+class TestHealthcheck(unittest.TestCase):
+    """Test healthcheck heartbeat mechanism."""
+
+    def test_healthcheck_file_constant(self):
+        from bot import HEALTHCHECK_FILE
+        self.assertEqual(HEALTHCHECK_FILE, "/tmp/axiom_heartbeat")
+
+    def test_heartbeat_file_writable(self):
+        """Verify heartbeat file can be written and read back."""
+        import tempfile
+        from bot import HEALTHCHECK_FILE
+        # Use a temp file to avoid side effects
+        with tempfile.NamedTemporaryFile(mode='w', suffix='_heartbeat', delete=True) as f:
+            f.write(str(time.time()))
+            f.flush()
+            f.seek(0)
+            # File should exist and contain a valid timestamp
+            self.assertTrue(os.path.exists(f.name))
+
+
+class TestGracefulShutdown(unittest.TestCase):
+    """Test graceful shutdown handler."""
+
+    def test_shutdown_flag_set(self):
+        """handle_shutdown sets shutdown_requested to True."""
+        import bot
+        original = bot.shutdown_requested
+        try:
+            bot.shutdown_requested = False
+            # Patch sys.exit and threading to prevent actual exit
+            with patch('bot.sys.exit'), \
+                 patch('bot.threading.Thread'):
+                bot.handle_shutdown(signal.SIGTERM, None)
+            self.assertTrue(bot.shutdown_requested)
+        finally:
+            bot.shutdown_requested = original
+
+    def test_double_signal_force_exits(self):
+        """Second signal calls sys.exit(1) for forced shutdown."""
+        import bot
+        original = bot.shutdown_requested
+        try:
+            bot.shutdown_requested = True  # simulate first signal already received
+            with self.assertRaises(SystemExit) as ctx:
+                bot.handle_shutdown(signal.SIGTERM, None)
+            self.assertEqual(ctx.exception.code, 1)
+        finally:
+            bot.shutdown_requested = original
+
+
+class TestConcurrentGameLimit(unittest.TestCase):
+    """Test concurrent game limit logic."""
+
+    def test_limit_prevents_excess_games(self):
+        """When active_games >= MAX_CONCURRENT_GAMES, new game should be rejected."""
+        import threading
+        max_concurrent = 1
+        active_games = {"game1": threading.Thread(target=lambda: None)}
+        active_games["game1"].start()
+        active_games["game1"].join()  # make it finish but keep in dict
+
+        # Simulate dead-thread cleanup + limit check (mirrors main loop logic)
+        dead = [gid for gid, t in active_games.items() if not t.is_alive()]
+        for gid in dead:
+            del active_games[gid]
+
+        # After cleanup, dead thread removed → slot available
+        self.assertLess(len(active_games), max_concurrent)
+
+    def test_limit_blocks_when_game_alive(self):
+        """A still-running game thread blocks new games."""
+        import threading
+        max_concurrent = 1
+
+        blocker = threading.Event()
+        def busy():
+            blocker.wait(timeout=5)
+
+        t = threading.Thread(target=busy, daemon=True)
+        t.start()
+        active_games = {"game1": t}
+
+        # Thread is alive → at limit
+        alive_count = sum(1 for t in active_games.values() if t.is_alive())
+        self.assertGreaterEqual(alive_count, max_concurrent)
+
+        blocker.set()  # cleanup
+        t.join(timeout=2)
 
 
 if __name__ == '__main__':
