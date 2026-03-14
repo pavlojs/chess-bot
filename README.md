@@ -31,7 +31,7 @@ The bot automatically adjusts its strength to match your rating for competitive 
 3. Get a Lichess API token from https://lichess.org/account/oauth/token with board:play and bot:play scopes.
 4. Set environment variable: `export TOKEN="your_lichess_token"`
 5. Run the bot: `python bot.py`
-6. To stop the bot gracefully: Press `Ctrl+C` (once for clean shutdown, twice for immediate exit)
+6. To stop the bot gracefully: Press `Ctrl+C` once — the bot waits up to **15 seconds** for any active games to finish (including Stockfish subprocess cleanup) before exiting cleanly. Press `Ctrl+C` a second time for immediate exit.
 
 **Stockfish Auto-Update**: The bot automatically downloads and installs the latest Stockfish from GitHub on first run (same method as Docker build). This ensures you're always using the newest version.
 
@@ -104,7 +104,15 @@ services:
     volumes:
       - ./config.py:/app/config.py  # Optional: mount config for time-control/challenge customisation
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import os,time,sys; f='/tmp/axiom_heartbeat'; sys.exit(0 if os.path.exists(f) and time.time()-float(open(f).read())<300 else 1)\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 ```
+
+> **Docker healthcheck**: the bot writes a heartbeat timestamp to `/tmp/axiom_heartbeat` on every event-loop iteration. Docker checks the file every 60 seconds; if it is missing or older than 5 minutes (indicating a silent disconnect or frozen process), the container is automatically restarted after 3 consecutive failures.
 
 #### Option 2: Build Locally
 
