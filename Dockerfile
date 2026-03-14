@@ -50,6 +50,12 @@ RUN mkdir -p /tmp/stockfish && \
 RUN /usr/local/bin/stockfish bench 1 || true
 
 # =========================
+# Health check
+# =========================
+HEALTHCHECK --interval=60s --timeout=10s --retries=3 --start-period=30s \
+  CMD python3 -c "import os,time,sys; f='/tmp/axiom_heartbeat'; sys.exit(0 if os.path.exists(f) and time.time()-float(open(f).read())<300 else 1)"
+
+# =========================
 # Run bot
 # =========================
 CMD ["python3", "bot.py"]
