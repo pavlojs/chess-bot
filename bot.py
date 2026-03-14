@@ -2,6 +2,7 @@
 Axiom Chess Bot – stable BOT API architecture using Berserk and Stockfish
 """
 
+import os
 import signal
 import sys
 import threading
@@ -53,6 +54,11 @@ from logging_config import setup_logger
 
 logger = setup_logger(__name__)
 shutdown_requested = False
+HEALTHCHECK_FILE = "/tmp/axiom_heartbeat"
+
+# Global reference so shutdown handler can wait for game threads
+_active_games: Dict[str, threading.Thread] = {}
+_active_games_lock: Optional[threading.Lock] = None
 
 
 # ─────────────────────────────────────────────
@@ -114,16 +120,32 @@ def handle_shutdown(signum, frame):
         sys.exit(1)
     
     shutdown_requested = True
-    logger.warning("Shutdown signal received, waiting for cleanup (press Ctrl+C again to force)")
+    logger.warning("Shutdown signal received, waiting for game threads to finish...")
     
-    # Give threads a moment to finish, then exit
-    def delayed_exit():
-        time.sleep(2)
-        if shutdown_requested:
-            logger.info("Forcing shutdown after timeout")
-            sys.exit(0)
+    def graceful_exit():
+        SHUTDOWN_TIMEOUT = 15  # seconds to wait for game threads
+        deadline = time.monotonic() + SHUTDOWN_TIMEOUT
+        lock = _active_games_lock
+        if lock:
+            while time.monotonic() < deadline:
+                with lock:
+                    alive = {gid: t for gid, t in _active_games.items() if t.is_alive()}
+                if not alive:
+                    break
+                logger.info(f"Waiting for {len(alive)} game thread(s) to finish...")
+                for t in alive.values():
+                    t.join(timeout=max(0.5, deadline - time.monotonic()))
+        
+        # Remove heartbeat file so Docker detects unhealthy if process lingers
+        try:
+            os.remove(HEALTHCHECK_FILE)
+        except OSError:
+            pass
+        
+        logger.info("Graceful shutdown complete")
+        sys.exit(0)
     
-    threading.Thread(target=delayed_exit, daemon=True).start()
+    threading.Thread(target=graceful_exit, daemon=True).start()
 
 
 signal.signal(signal.SIGINT, handle_shutdown)
@@ -893,6 +915,15 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         winc_ms  = parse_time_to_milliseconds(state.get("winc", 0)) or 0
                         binc_ms  = parse_time_to_milliseconds(state.get("binc", 0)) or 0
 
+                        # Kill previous Stockfish process if reconnecting
+                        if stockfish is not None:
+                            try:
+                                if hasattr(stockfish, "_stockfish") and stockfish._stockfish:
+                                    stockfish._stockfish.kill()
+                                    stockfish._stockfish.wait()
+                            except Exception:
+                                pass
+
                         stockfish = init_stockfish(opponent_rating)
 
                         logger.info(
@@ -938,10 +969,13 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                     # Reuse the eval cached from the last move search — no extra engine
                                     # call needed. Fall back to get_evaluation() only at game start.
                                     if last_eval_cp is not None:
-                                        # last_eval_cp is from white's perspective; flip for black bot
-                                        evaluation = last_eval_cp if bot_is_white else -last_eval_cp
+                                        # last_eval_cp is from side-to-move perspective at search time,
+                                        # which was always the bot's turn → already bot's perspective.
+                                        evaluation = last_eval_cp
                                     else:
-                                        # First few moves or no cache yet — quick explicit evaluation
+                                        # First few moves or no cache yet — quick explicit evaluation.
+                                        # get_evaluation() returns from current side-to-move perspective;
+                                        # flip only if it's the opponent's turn.
                                         stockfish.set_fen_position(board.fen())
                                         eval_info = stockfish.get_evaluation()
                                         if eval_info["type"] == "cp":
@@ -949,7 +983,8 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                         else:
                                             mate = eval_info["value"]
                                             raw_cp = 30000 if mate > 0 else -30000
-                                        evaluation = raw_cp if bot_is_white else -raw_cp
+                                        bot_is_side_to_move = (board.turn == chess.WHITE) == bot_is_white
+                                        evaluation = raw_cp if bot_is_side_to_move else -raw_cp
 
                                     logger.info(f"[{game_id}] Position evaluation: {evaluation} centipawns")
 
@@ -1307,6 +1342,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 
 def challenge_loop(client: berserk.Client, bot_username: str,
                    active_games: Dict[str, threading.Thread],
+                   active_games_lock: threading.Lock,
                    challenge_tracker: ChallengeTracker,
                    retry_event: threading.Event,
                    pending_challenge: Dict):
@@ -1329,7 +1365,8 @@ def challenge_loop(client: berserk.Client, bot_username: str,
 
     while not shutdown_requested:
         try:
-            active_count = sum(1 for t in active_games.values() if t.is_alive())
+            with active_games_lock:
+                active_count = sum(1 for t in active_games.values() if t.is_alive())
 
             if not ENABLE_AUTO_CHALLENGE or active_count > 0:
                 if active_count > 0:
@@ -1370,15 +1407,6 @@ def challenge_loop(client: berserk.Client, bot_username: str,
                     f"Rate limited by Lichess API (HTTP 429) — backing off for "
                     f"{rate_limit_backoff // 60}m {rate_limit_backoff % 60}s before next attempt"
                 )
-                # Drop all pooled TCP connections so the next attempt gets a fresh
-                # connection to Lichess.  Reusing the same keep-alive connection after
-                # a 429 keeps triggering the rate-limit; a new connection resets that
-                # state (identical behaviour to a manual bot restart).
-                try:
-                    client.session.close()
-                    logger.debug("Closed session connections to reset rate-limit state")
-                except Exception:
-                    pass
                 retry_event.clear()
                 retry_event.wait(timeout=rate_limit_backoff)
                 retry_event.clear()
@@ -1409,8 +1437,24 @@ def challenge_loop(client: berserk.Client, bot_username: str,
     logger.info("Challenge loop stopped")
 
 
+class TimeoutHTTPAdapter(requests.adapters.HTTPAdapter):
+    """HTTPAdapter with a default timeout so streaming reads don't hang forever."""
+    def __init__(self, *args, timeout=None, **kwargs):
+        self.timeout = timeout
+        super().__init__(*args, **kwargs)
+
+    def send(self, *args, **kwargs):
+        kwargs.setdefault("timeout", self.timeout)
+        return super().send(*args, **kwargs)
+
+
 def main():
     session = berserk.TokenSession(TOKEN)
+    # Lichess sends keepalive newlines every ~30s on streams.
+    # A 120s read timeout ensures dead connections are detected within ~2 min.
+    adapter = TimeoutHTTPAdapter(timeout=(10, 120))  # (connect, read)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     client = berserk.Client(session)
 
     # Get account with retry logic
@@ -1428,26 +1472,43 @@ def main():
     bot_username = account.get("username")
     logger.info("Bot account verified: %s", bot_username)
 
+    global _active_games, _active_games_lock
     active_games: Dict[str, threading.Thread] = {}
+    active_games_lock = threading.Lock()
+    _active_games = active_games
+    _active_games_lock = active_games_lock
     challenge_tracker = ChallengeTracker(MAX_CHALLENGES_PER_HOUR)
     retry_event = threading.Event()   # signals challenge loop to wake up immediately
     pending_challenge: Dict = {}      # shared state: {id, opponent, sent_at}
+    MAX_CONCURRENT_GAMES = 1          # limit concurrent games to prevent resource exhaustion
 
     # Start challenge loop in background thread
     challenge_thread = threading.Thread(
         target=challenge_loop,
-        args=(client, bot_username, active_games, challenge_tracker,
-              retry_event, pending_challenge),
+        args=(client, bot_username, active_games, active_games_lock,
+              challenge_tracker, retry_event, pending_challenge),
         daemon=True
     )
     challenge_thread.start()
     logger.info("Background challenge thread started")
 
+    # Write initial heartbeat
+    def _write_heartbeat():
+        try:
+            with open(HEALTHCHECK_FILE, "w") as f:
+                f.write(str(time.time()))
+        except OSError:
+            pass
+
+    _write_heartbeat()
+
     # Main event loop with automatic reconnection
     while not shutdown_requested:
         try:
             logger.info("Connecting to event stream...")
+            _write_heartbeat()
             for event in client.bots.stream_incoming_events():
+                _write_heartbeat()
                 if shutdown_requested:
                     break
 
@@ -1517,6 +1578,20 @@ def main():
                     elif event["type"] == "gameStart":
                         game_id = event["game"]["id"]
 
+                        # Clean up dead threads before checking limits
+                        with active_games_lock:
+                            dead = [gid for gid, t in active_games.items() if not t.is_alive()]
+                            for gid in dead:
+                                del active_games[gid]
+
+                            if len(active_games) >= MAX_CONCURRENT_GAMES:
+                                logger.warning(f"Concurrent game limit ({MAX_CONCURRENT_GAMES}) reached, cannot start game {game_id}")
+                                try:
+                                    client.bots.resign_game(game_id)
+                                except Exception:
+                                    pass
+                                continue
+
                         # Start game thread and register in active_games FIRST —
                         # before clearing pending_challenge or waking the challenge loop.
                         # This ensures the loop's active_count check sees the new game
@@ -1526,7 +1601,8 @@ def main():
                             args=(client, game_id, bot_username),
                             daemon=True,
                         )
-                        active_games[game_id] = thread
+                        with active_games_lock:
+                            active_games[game_id] = thread
                         thread.start()
 
                         # Now safe to clear pending challenge and wake the loop
@@ -1542,19 +1618,21 @@ def main():
 
                     elif event["type"] == "gameFinish":
                         game_id = event["game"]["id"]
-                        if game_id in active_games:
-                            # Clean up finished game thread
-                            active_games[game_id].join(timeout=1)
-                            del active_games[game_id]
-                            logger.info(f"Game {game_id} finished — looking for next challenge...")
-                            retry_event.set()  # wake challenge loop immediately when game ends
+                        with active_games_lock:
+                            if game_id in active_games:
+                                # Clean up finished game thread
+                                active_games[game_id].join(timeout=1)
+                                del active_games[game_id]
+                        logger.info(f"Game {game_id} finished — looking for next challenge...")
+                        retry_event.set()  # wake challenge loop immediately when game ends
 
                 except Exception as e:
                     logger.error(f"Event processing error: {e}", exc_info=True)
             
-            # Stream ended normally
-            logger.info("Event stream ended")
-            break
+            # Stream ended normally — reconnect
+            logger.warning("Event stream ended unexpectedly. Reconnecting in 10s...")
+            time.sleep(10)
+            continue
             
         except (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout) as e:
             logger.warning(f"Event stream connection lost: {e}. Reconnecting in 10s...")
@@ -1565,9 +1643,14 @@ def main():
                 logger.warning(f"Lichess API error {e.response.status_code}. Reconnecting in 15s...")
                 time.sleep(15)
                 continue
+            elif hasattr(e, 'response') and e.response and e.response.status_code == 429:
+                logger.warning("Rate limited by Lichess (429). Backing off for 60s...")
+                time.sleep(60)
+                continue
             else:
-                logger.error(f"Unrecoverable API error: {e}", exc_info=True)
-                break
+                logger.error(f"API error: {e}. Reconnecting in 30s...", exc_info=True)
+                time.sleep(30)
+                continue
         except Exception as e:
             logger.error(f"Main loop error: {e}", exc_info=True)
             time.sleep(10)
