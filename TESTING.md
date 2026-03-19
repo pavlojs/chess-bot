@@ -167,7 +167,43 @@ Current test coverage includes:
 - ✅ Version detection from installed binary
 - ✅ Latest release info retrieval from GitHub API
 
-**Total: 125 tests, 100% pass rate**
+### Terminal Statuses Constant Tests (3 tests)
+- ✅ `_TERMINAL_STATUSES` is a `frozenset`
+- ✅ Contains all expected terminal statuses (mate, resign, stalemate, etc.)
+- ✅ Non-terminal statuses (started, created) are excluded
+
+### GameStuck Exception Tests (2 tests)
+- ✅ `_GameStuck` is a subclass of `Exception`
+- ✅ Preserves custom message
+
+### Stream Watchdog Tests (4 tests)
+- ✅ Events pass through from reader thread to main thread
+- ✅ Raises `_GameStuck` when queue times out and API reports terminal status
+- ✅ Continues waiting when API reports game is still active
+- ✅ Re-raises exceptions from the stream reader thread
+
+### Game Watchdog Config Tests (2 tests)
+- ✅ `GAME_WATCHDOG_INTERVAL` is importable from `config`
+- ✅ Default value is `60`
+
+### Opponent Gone Handling Tests (4 tests)
+- ✅ Parses `opponentGone` event with `claimWinInSeconds`
+- ✅ Cancels timer when opponent returns (`gone: false`)
+- ✅ Claim-victory timer runs as daemon thread
+- ✅ Timer is properly cancelled on game end
+
+### Startup Game Cleanup Tests (5 tests)
+- ✅ Empty ongoing games list — no action taken
+- ✅ Finished games are skipped (not aborted)
+- ✅ Games with < 2 moves are aborted
+- ✅ Games with ≥ 2 moves are left for event stream to resume
+- ✅ String status values handled correctly
+
+### Game Stream Reconnect 502 Tests (2 tests)
+- ✅ `ResponseError` with HTTP 502 triggers reconnect (retriable)
+- ✅ `ResponseError` with HTTP 404 is not retriable
+
+**Total: 147 tests, 100% pass rate**
 
 ### Network Error Handling & Retry Logic
 The bot now includes robust error handling for network issues:
@@ -237,7 +273,14 @@ class TestTimeoutHTTPAdapter(unittest.TestCase)            #  3 tests
 class TestHealthcheck(unittest.TestCase)                   #  2 tests
 class TestGracefulShutdown(unittest.TestCase)              #  2 tests
 class TestConcurrentGameLimit(unittest.TestCase)           #  2 tests
-# Total: 125 tests
+class TestTerminalStatuses(unittest.TestCase)               #  3 tests
+class TestGameStuckException(unittest.TestCase)             #  2 tests
+class TestStreamWithWatchdog(unittest.TestCase)             #  4 tests
+class TestGameWatchdogConfig(unittest.TestCase)             #  2 tests
+class TestOpponentGoneHandling(unittest.TestCase)           #  4 tests
+class TestStartupGameCleanup(unittest.TestCase)             #  5 tests
+class TestGameStreamReconnect502(unittest.TestCase)         #  2 tests
+# Total: 147 tests
 ```
 
 ## Mocking

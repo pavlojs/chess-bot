@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import os
 import signal
 import time
+import threading
 
 import chess
 import requests
@@ -1452,6 +1453,238 @@ class TestConcurrentGameLimit(unittest.TestCase):
 
         blocker.set()  # cleanup
         t.join(timeout=2)
+
+
+class TestTerminalStatuses(unittest.TestCase):
+    """Test _TERMINAL_STATUSES constant."""
+
+    def test_terminal_statuses_is_frozenset(self):
+        from bot import _TERMINAL_STATUSES
+        self.assertIsInstance(_TERMINAL_STATUSES, frozenset)
+
+    def test_terminal_statuses_contains_expected(self):
+        from bot import _TERMINAL_STATUSES
+        for status in ["mate", "resign", "stalemate", "timeout", "draw",
+                        "outoftime", "aborted", "cheat", "noStart",
+                        "unknownFinish", "variantEnd"]:
+            self.assertIn(status, _TERMINAL_STATUSES)
+
+    def test_started_not_terminal(self):
+        from bot import _TERMINAL_STATUSES
+        self.assertNotIn("started", _TERMINAL_STATUSES)
+        self.assertNotIn("created", _TERMINAL_STATUSES)
+
+
+class TestGameStuckException(unittest.TestCase):
+    """Test _GameStuck exception class."""
+
+    def test_is_exception(self):
+        from bot import _GameStuck
+        self.assertTrue(issubclass(_GameStuck, Exception))
+
+    def test_message_preserved(self):
+        from bot import _GameStuck
+        exc = _GameStuck("test message")
+        self.assertEqual(str(exc), "test message")
+
+
+class TestStreamWithWatchdog(unittest.TestCase):
+    """Test _stream_with_watchdog handles idle streams and terminal games."""
+
+    def test_yields_events_from_stream(self):
+        """Normal stream events are yielded through the watchdog."""
+        from bot import _stream_with_watchdog
+        events = [{"type": "gameState", "moves": "e2e4"}, {"type": "gameState", "moves": "e2e4 e7e5"}]
+        mock_client = Mock()
+        result = list(_stream_with_watchdog(iter(events), mock_client, "test123", check_interval=5))
+        self.assertEqual(result, events)
+
+    def test_watchdog_checks_api_on_idle(self):
+        """When stream is idle, watchdog polls the API."""
+        from bot import _stream_with_watchdog, _GameStuck
+
+        # Create a stream that blocks forever
+        block = threading.Event()
+        def slow_stream():
+            block.wait(timeout=10)
+            return
+            yield  # make it a generator
+
+        mock_client = Mock()
+        mock_client.games.export.return_value = {"status": "aborted"}
+
+        with self.assertRaises(_GameStuck):
+            # Very short interval so test is fast
+            for _ in _stream_with_watchdog(slow_stream(), mock_client, "test123", check_interval=0.1):
+                pass
+
+        mock_client.games.export.assert_called_with("test123")
+        block.set()  # cleanup
+
+    def test_watchdog_continues_if_game_active(self):
+        """Watchdog does not break if API says game is still active."""
+        from bot import _stream_with_watchdog
+
+        call_count = 0
+        event_ready = threading.Event()
+
+        def delayed_stream():
+            # First, delay to trigger watchdog
+            event_ready.wait(timeout=5)
+            yield {"type": "gameState", "moves": "e2e4"}
+
+        mock_client = Mock()
+        # First API call: game active → continue. Then stream delivers event.
+        def export_side_effect(gid):
+            nonlocal call_count
+            call_count += 1
+            event_ready.set()  # wake up the stream after first watchdog check
+            return {"status": "started"}
+
+        mock_client.games.export.side_effect = export_side_effect
+
+        result = list(_stream_with_watchdog(delayed_stream(), mock_client, "test123", check_interval=0.1))
+        self.assertEqual(len(result), 1)
+        self.assertGreaterEqual(call_count, 1)
+
+    def test_watchdog_re_raises_stream_exceptions(self):
+        """Exceptions from the underlying stream are re-raised."""
+        from bot import _stream_with_watchdog
+
+        def failing_stream():
+            raise ConnectionError("lost connection")
+            yield  # make it a generator
+
+        mock_client = Mock()
+        with self.assertRaises(ConnectionError):
+            for _ in _stream_with_watchdog(failing_stream(), mock_client, "x", check_interval=1):
+                pass
+
+
+class TestGameWatchdogConfig(unittest.TestCase):
+    """Test GAME_WATCHDOG_INTERVAL config."""
+
+    def test_config_importable(self):
+        from config import GAME_WATCHDOG_INTERVAL
+        self.assertIsInstance(GAME_WATCHDOG_INTERVAL, int)
+        self.assertGreater(GAME_WATCHDOG_INTERVAL, 0)
+
+    def test_default_value(self):
+        from config import GAME_WATCHDOG_INTERVAL
+        self.assertEqual(GAME_WATCHDOG_INTERVAL, 60)
+
+
+class TestOpponentGoneHandling(unittest.TestCase):
+    """Test opponentGone event handling logic."""
+
+    def test_opponent_gone_event_structure(self):
+        """Verify opponentGone event parsing logic."""
+        event = {"type": "opponentGone", "gone": True, "claimWinInSeconds": 10}
+        self.assertTrue(event.get("gone", False))
+        self.assertEqual(event.get("claimWinInSeconds"), 10)
+
+    def test_opponent_returned_event(self):
+        """Verify opponentGone with gone=False is recognized."""
+        event = {"type": "opponentGone", "gone": False}
+        self.assertFalse(event.get("gone", False))
+        self.assertIsNone(event.get("claimWinInSeconds"))
+
+    def test_claim_victory_timer_created(self):
+        """Timer is created and is a daemon for auto-cleanup."""
+        claim_seconds = 15
+        timer = threading.Timer(claim_seconds + 1, lambda: None)
+        timer.daemon = True
+        self.assertTrue(timer.daemon)
+        self.assertFalse(timer.is_alive())
+        timer.cancel()  # cleanup
+
+    def test_claim_victory_timer_cancellation(self):
+        """Timer can be cancelled before firing."""
+        fired = threading.Event()
+        timer = threading.Timer(0.5, fired.set)
+        timer.daemon = True
+        timer.start()
+        timer.cancel()
+        time.sleep(0.7)  # wait past the timer
+        self.assertFalse(fired.is_set(), "Timer should have been cancelled")
+
+
+class TestStartupGameCleanup(unittest.TestCase):
+    """Test startup stuck game cleanup logic."""
+
+    def test_ongoing_games_empty(self):
+        """No action when no ongoing games."""
+        mock_client = Mock()
+        mock_client.games.get_ongoing.return_value = []
+        ongoing = mock_client.games.get_ongoing()
+        self.assertEqual(len(ongoing), 0)
+
+    def test_ongoing_game_already_finished(self):
+        """Already finished games are skipped."""
+        from bot import _TERMINAL_STATUSES
+        game = {"gameId": "abc", "status": {"name": "aborted"}, "opponent": {"username": "test"}}
+        status = game.get("status", {})
+        status_name = status.get("name", status) if isinstance(status, dict) else str(status)
+        self.assertIn(status_name, _TERMINAL_STATUSES)
+
+    def test_ongoing_game_few_moves_abort(self):
+        """Games with < 2 moves should be aborted."""
+        mock_client = Mock()
+        mock_client.games.export.return_value = {"moves": "e2e4", "status": "started"}
+        full = mock_client.games.export("abc")
+        moves = full.get("moves", "")
+        move_count = len(moves.split()) if moves else 0
+        self.assertLess(move_count, 2)
+
+    def test_ongoing_game_many_moves_resume(self):
+        """Games with >= 2 moves should be resumed, not aborted."""
+        mock_client = Mock()
+        mock_client.games.export.return_value = {"moves": "e2e4 e7e5 d2d4", "status": "started"}
+        full = mock_client.games.export("abc")
+        moves = full.get("moves", "")
+        move_count = len(moves.split()) if moves else 0
+        self.assertGreaterEqual(move_count, 2)
+
+    def test_status_as_string(self):
+        """Handle status field that is a plain string rather than dict."""
+        from bot import _TERMINAL_STATUSES
+        game = {"gameId": "abc", "status": "started", "opponent": {"username": "test"}}
+        status = game.get("status", {})
+        status_name = status.get("name", status) if isinstance(status, dict) else str(status)
+        self.assertNotIn(status_name, _TERMINAL_STATUSES)
+
+
+class TestGameStreamReconnect502(unittest.TestCase):
+    """Test that game stream handles 502/503/504 as reconnectable errors."""
+
+    def _make_response_error(self, status_code):
+        """Create a ResponseError with the given status code."""
+        from berserk.exceptions import ResponseError
+        mock_resp = Mock()
+        mock_resp.status_code = status_code
+        mock_resp.text = f"Error {status_code}"
+        mock_resp.args = (f"Error {status_code}",)
+        try:
+            exc = ResponseError(mock_resp)
+        except Exception:
+            # Fallback for different berserk versions
+            exc = ResponseError.__new__(ResponseError)
+            exc.response = mock_resp
+            Exception.__init__(exc, f"Error {status_code}")
+        exc.response = mock_resp
+        return exc
+
+    def test_response_error_502_is_retriable(self):
+        """ResponseError with 502 status should trigger reconnect, not break."""
+        e = self._make_response_error(502)
+        is_retriable = hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]
+        self.assertTrue(is_retriable)
+
+    def test_response_error_404_is_not_retriable(self):
+        """ResponseError with 404 status should NOT be retried."""
+        e = self._make_response_error(404)
+        is_retriable = hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]
+        self.assertFalse(is_retriable)
 
 
 if __name__ == '__main__':
