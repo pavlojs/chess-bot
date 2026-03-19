@@ -139,6 +139,7 @@ Most settings can be changed via a `.env` file (copy `.env.example` to `.env`) *
 - `MOVETIME_MIN_MS`: Hard floor for any calculated movetime in ms (default: `50`). Even with seconds on the clock the bot will always think at least this long.
 - `MOVETIME_ESTIMATED_MOVES`: Baseline moves-to-go estimate used in the clock budget formula (default: `40`). Reduced dynamically as the game progresses.
 - `MOVETIME_MIN_MOVES_LEFT`: Minimum moves-to-go value in the clock budget denominator (default: `10`). Prevents over-spending in very long endgames.
+- `GAME_WATCHDOG_INTERVAL`: How often (in seconds) the game watchdog polls the Lichess API when the game stream is idle (default: `60`). Lower values detect stuck games faster; higher values reduce API usage.
 
 **Requires editing `config.py`:**
 
@@ -411,6 +412,32 @@ TIME_CONTROL = ["blitz", "rapid"]  # Accept blitz and rapid only
 TIME_CONTROL = ["bullet", "blitz"]  # Fast games only
 TIME_CONTROL = ["blitz", "rapid", "classical"]  # Accept all (default)
 ```
+
+## Connection Resilience & Game Recovery
+
+The bot includes multiple layers of protection against network issues, stuck games, and unexpected restarts:
+
+### Game Stream Watchdog
+When no events arrive on the game stream for `GAME_WATCHDOG_INTERVAL` seconds (default: 60), the watchdog polls the Lichess API (`games.export`) to check whether the game has actually ended. This handles cases where the stream silently drops or the opponent abandons the game without triggering a `gameFinish` event — without prematurely killing classical games where the opponent is thinking.
+
+### Opponent Disconnect Handling
+When Lichess reports `opponentGone`, the bot starts a timer and automatically claims victory after the allowed delay. If the opponent reconnects before the timer fires, the claim is cancelled.
+
+### Startup Stuck Game Cleanup
+On startup the bot checks for any ongoing games left over from a previous session. Games with fewer than 2 moves are aborted (no rating impact); games further along are left to be picked up naturally via the event stream.
+
+### Gateway Error Recovery (502/503/504)
+Transient Lichess gateway errors in the game stream trigger an automatic 5-second reconnect instead of killing the game thread.
+
+### Concurrent Game Limit — Abort Before Resign
+If a new `gameStart` event arrives while the concurrent limit is reached, the bot tries to abort the game first (no rating loss) and only falls back to resign if the abort fails.
+
+**Configuration (`.env` file):**
+```bash
+GAME_WATCHDOG_INTERVAL=60   # Watchdog polling interval in seconds (default: 60)
+```
+
+> **Note:** `MAX_CONCURRENT_GAMES` is a hardcoded constant (`1`) in `bot.py` and is not configurable via environment variable.
 
 ## Using Syzygy Tablebases
 
