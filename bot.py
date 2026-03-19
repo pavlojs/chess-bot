@@ -1308,6 +1308,13 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                 logger.warning(f"[{game_id}] Stream connection lost: {e}. Reconnecting in 5s...")
                 time.sleep(5)
                 continue
+            except ResponseError as e:
+                if hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]:
+                    logger.warning(f"[{game_id}] Lichess API error {e.response.status_code}. Reconnecting in 5s...")
+                    time.sleep(5)
+                    continue
+                logger.error(f"[{game_id}] API error in game stream: {e}", exc_info=True)
+                break
             except Exception as e:
                 logger.error(f"[{game_id}] Unexpected stream error: {e}", exc_info=True)
                 break
