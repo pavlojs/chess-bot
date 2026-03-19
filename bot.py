@@ -886,6 +886,8 @@ def _stream_with_watchdog(stream, client, game_id, check_interval):
     """
     q: queue.Queue = queue.Queue()
     _sentinel = object()
+    _consecutive_failures = 0
+    _MAX_CONSECUTIVE_FAILURES = 10  # after 10 failures (~10 min) force-end
 
     def _reader():
         try:
@@ -901,6 +903,7 @@ def _stream_with_watchdog(stream, client, game_id, check_interval):
     while True:
         try:
             item = q.get(timeout=check_interval)
+            _consecutive_failures = 0  # reset on any event
         except queue.Empty:
             # No stream event — ask the API whether the game is still alive
             try:
@@ -909,11 +912,25 @@ def _stream_with_watchdog(stream, client, game_id, check_interval):
                 if status in _TERMINAL_STATUSES:
                     logger.info(f"[{game_id}] Watchdog: game ended via API ({status})")
                     raise _GameStuck(f"Game {game_id} ended ({status}) but stream did not report it")
-                logger.debug(f"[{game_id}] Watchdog: game still active ({status})")
+                logger.info(f"[{game_id}] Watchdog: game still active ({status})")
+                _consecutive_failures = 0
             except _GameStuck:
                 raise
             except Exception as e:
-                logger.debug(f"[{game_id}] Watchdog API check failed: {e}")
+                _consecutive_failures += 1
+                if _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    logger.warning(
+                        f"[{game_id}] Watchdog: {_consecutive_failures} consecutive API failures, "
+                        f"assuming game is over"
+                    )
+                    raise _GameStuck(
+                        f"Game {game_id}: watchdog could not verify game status "
+                        f"after {_consecutive_failures} attempts"
+                    )
+                if _consecutive_failures >= 3:
+                    logger.warning(f"[{game_id}] Watchdog API check failed ({_consecutive_failures}x): {e}")
+                else:
+                    logger.info(f"[{game_id}] Watchdog API check failed: {e}")
             continue
         if item is _sentinel:
             return
@@ -937,6 +954,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
     last_eval_cp: int | None = None  # Cached eval from last move search (white's perspective)
     last_opponent_draw: bool = False  # Tracks opponent draw flag from previous event (rising-edge detection)
     _claim_victory_timer: threading.Timer | None = None  # Timer for claiming win after opponentGone
+    _no_first_move_timer: threading.Timer | None = None  # Abort game if opponent never plays first move
 
     try:
         # Retry stream connection with backoff
@@ -1000,11 +1018,36 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             f"{'white' if bot_is_white else 'black'} "
                             f"vs {opponent_rating}"
                         )
+
+                        # If no moves yet and it's the opponent's turn, start a safety
+                        # timer to abort the game if the opponent never plays.  Lichess
+                        # should handle this with noStart, but this is a client-side backup.
+                        if last_move_count == 0 and not (
+                            (board.turn == chess.WHITE and bot_is_white) or
+                            (board.turn == chess.BLACK and not bot_is_white)
+                        ):
+                            def _abort_no_first_move(gid=game_id):
+                                logger.warning(f"[{gid}] Opponent never made first move — aborting game")
+                                try:
+                                    client.bots.abort_game(gid)
+                                except Exception as err:
+                                    logger.debug(f"[{gid}] Abort after no first move failed: {err}")
+
+                            _no_first_move_timer = threading.Timer(120.0, _abort_no_first_move)
+                            _no_first_move_timer.daemon = True
+                            _no_first_move_timer.start()
+                            logger.info(f"[{game_id}] Waiting for opponent's first move (abort in 120s if no move)")
+
                         # Don't continue here - we need to check if it's our turn
 
                     if event["type"] == "gameState":
                         moves = event["moves"].split() if event.get("moves") else []
                         current_move_count = len(moves)
+
+                        # Cancel no-first-move timer once any move arrives
+                        if _no_first_move_timer is not None and current_move_count > 0:
+                            _no_first_move_timer.cancel()
+                            _no_first_move_timer = None
                         
                         # Refresh both clocks on every state update
                         if bot_is_white is not None:
@@ -1424,6 +1467,8 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
     finally:
         if _claim_victory_timer is not None:
             _claim_victory_timer.cancel()
+        if _no_first_move_timer is not None:
+            _no_first_move_timer.cancel()
         if stockfish:
             try:
                 if hasattr(stockfish, "_stockfish") and stockfish._stockfish:
