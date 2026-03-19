@@ -418,7 +418,10 @@ TIME_CONTROL = ["blitz", "rapid", "classical"]  # Accept all (default)
 The bot includes multiple layers of protection against network issues, stuck games, and unexpected restarts:
 
 ### Game Stream Watchdog
-When no events arrive on the game stream for `GAME_WATCHDOG_INTERVAL` seconds (default: 60), the watchdog polls the Lichess API (`games.export`) to check whether the game has actually ended. This handles cases where the stream silently drops or the opponent abandons the game without triggering a `gameFinish` event — without prematurely killing classical games where the opponent is thinking.
+When no events arrive on the game stream for `GAME_WATCHDOG_INTERVAL` seconds (default: 60), the watchdog polls the Lichess API (`games.export`) to check whether the game has actually ended. This handles cases where the stream silently drops or the opponent abandons the game without triggering a `gameFinish` event — without prematurely killing classical games where the opponent is thinking. If the API check itself fails repeatedly (10 consecutive failures, ~10 minutes), the watchdog force-ends the game thread to prevent indefinite blocking.
+
+### No-First-Move Abort
+When the bot plays as black and the opponent never makes their first move, a 120-second safety timer automatically aborts the game. This is a client-side backup — Lichess normally handles this with `noStart`, but if the stream event is missed, this timer ensures the bot doesn't get stuck forever.
 
 ### Opponent Disconnect Handling
 When Lichess reports `opponentGone`, the bot starts a timer and automatically claims victory after the allowed delay. If the opponent reconnects before the timer fires, the claim is cancelled.
