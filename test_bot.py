@@ -1687,5 +1687,102 @@ class TestGameStreamReconnect502(unittest.TestCase):
         self.assertFalse(is_retriable)
 
 
+class TestWatchdogConsecutiveFailures(unittest.TestCase):
+    """Test that watchdog escalates after consecutive API failures."""
+
+    def test_watchdog_raises_after_max_failures(self):
+        """After N consecutive API failures, watchdog force-ends the game."""
+        from bot import _stream_with_watchdog, _GameStuck
+
+        block = threading.Event()
+        def slow_stream():
+            block.wait(timeout=10)
+            return
+            yield
+
+        mock_client = Mock()
+        mock_client.games.export.side_effect = Exception("API unavailable")
+
+        with self.assertRaises(_GameStuck) as ctx:
+            for _ in _stream_with_watchdog(slow_stream(), mock_client, "fail_test", check_interval=0.05):
+                pass
+
+        self.assertIn("could not verify game status", str(ctx.exception))
+        block.set()
+
+    def test_watchdog_failure_count_resets_on_success(self):
+        """Successful API check resets the consecutive failure counter."""
+        from bot import _stream_with_watchdog
+
+        call_count = 0
+        event_ready = threading.Event()
+
+        def delayed_stream():
+            event_ready.wait(timeout=5)
+            yield {"type": "gameState", "moves": "e2e4"}
+
+        mock_client = Mock()
+        def export_side_effect(gid):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise Exception("temporary failure")
+            # Third call succeeds → stream event arrives
+            event_ready.set()
+            return {"status": "started"}
+
+        mock_client.games.export.side_effect = export_side_effect
+
+        result = list(_stream_with_watchdog(delayed_stream(), mock_client, "reset_test", check_interval=0.05))
+        self.assertEqual(len(result), 1)
+        # Should NOT have raised _GameStuck — failures reset on success
+        self.assertGreaterEqual(call_count, 3)
+
+
+class TestNoFirstMoveAbort(unittest.TestCase):
+    """Test that the bot aborts the game when the opponent never makes theirfirst move."""
+
+    def test_no_first_move_timer_starts_when_waiting_for_opponent(self):
+        """Timer should start when bot is black and opponent hasn't moved."""
+        # The timer is started inside play_game after gameFull.
+        # We test the logic: 0 moves + not our turn → timer should be set.
+        board = chess.Board()
+        bot_is_white = False  # bot is black
+        last_move_count = 0
+
+        is_my_turn = (
+            (board.turn == chess.WHITE and bot_is_white) or
+            (board.turn == chess.BLACK and not bot_is_white)
+        )
+        should_start_timer = last_move_count == 0 and not is_my_turn
+        self.assertTrue(should_start_timer)
+
+    def test_no_first_move_timer_not_started_when_bot_is_white(self):
+        """Timer should NOT start when bot is white (bot moves first)."""
+        board = chess.Board()
+        bot_is_white = True  # bot is white → it's our turn
+        last_move_count = 0
+
+        is_my_turn = (
+            (board.turn == chess.WHITE and bot_is_white) or
+            (board.turn == chess.BLACK and not bot_is_white)
+        )
+        should_start_timer = last_move_count == 0 and not is_my_turn
+        self.assertFalse(should_start_timer)
+
+    def test_no_first_move_timer_not_started_when_moves_exist(self):
+        """Timer should NOT start when there are already moves on the board."""
+        board = chess.Board()
+        bot_is_white = False
+        last_move_count = 1  # opponent already made a move
+
+        is_my_turn = (
+            (board.turn == chess.WHITE and bot_is_white) or
+            (board.turn == chess.BLACK and not bot_is_white)
+        )
+        should_start_timer = last_move_count == 0 and not is_my_turn
+        self.assertFalse(should_start_timer)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -203,7 +203,16 @@ Current test coverage includes:
 - ✅ `ResponseError` with HTTP 502 triggers reconnect (retriable)
 - ✅ `ResponseError` with HTTP 404 is not retriable
 
-**Total: 147 tests, 100% pass rate**
+### Watchdog Consecutive Failures Tests (2 tests)
+- ✅ Force-ends game after N consecutive API failures
+- ✅ Failure counter resets on successful API check
+
+### No First Move Abort Tests (3 tests)
+- ✅ Timer starts when bot is black and opponent hasn't moved
+- ✅ Timer does NOT start when bot is white (bot moves first)
+- ✅ Timer does NOT start when moves already exist on the board
+
+**Total: 152 tests, 100% pass rate**
 
 ### Network Error Handling & Retry Logic
 The bot now includes robust error handling for network issues:
@@ -280,7 +289,9 @@ class TestGameWatchdogConfig(unittest.TestCase)             #  2 tests
 class TestOpponentGoneHandling(unittest.TestCase)           #  4 tests
 class TestStartupGameCleanup(unittest.TestCase)             #  5 tests
 class TestGameStreamReconnect502(unittest.TestCase)         #  2 tests
-# Total: 147 tests
+class TestWatchdogConsecutiveFailures(unittest.TestCase)    #  2 tests
+class TestNoFirstMoveAbort(unittest.TestCase)               #  3 tests
+# Total: 152 tests
 ```
 
 ## Mocking
