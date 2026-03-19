@@ -1721,9 +1721,12 @@ def main():
                             if len(active_games) >= MAX_CONCURRENT_GAMES:
                                 logger.warning(f"Concurrent game limit ({MAX_CONCURRENT_GAMES}) reached, cannot start game {game_id}")
                                 try:
-                                    client.bots.resign_game(game_id)
+                                    client.bots.abort_game(game_id)
                                 except Exception:
-                                    pass
+                                    try:
+                                        client.bots.resign_game(game_id)
+                                    except Exception:
+                                        pass
                                 continue
 
                         # Start game thread and register in active_games FIRST —
