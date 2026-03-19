@@ -2,6 +2,23 @@
 
 All notable changes to Axiom Chess Bot are documented in this file.
 
+## [2.6.0] - 2026-03-19
+
+### Fixed
+
+- **502/503/504 errors killing game threads:** `berserk.exceptions.ResponseError` with HTTP 502, 503, or 504 in the game stream was caught by the generic `except Exception` handler which broke out of the stream loop, silently killing the game thread. Added a dedicated `except ResponseError` handler that detects retriable gateway errors and reconnects with a 5-second delay instead of abandoning the game.
+- **Idle game blocking concurrent slot:** When an opponent left or bugged out mid-game, the game stream hung indefinitely with no events. Since `MAX_CONCURRENT_GAMES = 1`, this blocked **all** new games. Fixed by introducing the game watchdog (see below).
+- **Hard stream timeout breaking classical games:** The initial fix used a 5-minute hard timeout on the game stream, which could prematurely kill legitimate classical games where the opponent thinks for extended periods. Replaced with an API-polling watchdog that only terminates the stream when the Lichess API confirms the game has actually ended.
+- **Unnecessary rating loss on concurrent game limit:** When a `gameStart` event arrived while a game was already running, the bot immediately resigned the new game (causing rating loss). Changed to attempt `abort_game` first (no rating loss for games with < 2 moves), falling back to `resign_game` only if the abort fails.
+
+### Added
+
+- **Game stream watchdog (`_stream_with_watchdog`):** Replaces the naive hard-timeout approach. A daemon reader thread forwards game events via a `queue.Queue`. When no event arrives within `GAME_WATCHDOG_INTERVAL` seconds (default: 60), the main thread polls `client.games.export(game_id)` to check the game's actual status via the Lichess API. If the game has ended (status in `_TERMINAL_STATUSES`), a `_GameStuck` exception breaks the stream loop cleanly. If the game is still active, the watchdog continues waiting — safe for long classical thinks.
+- **`opponentGone` event handling:** Detects when Lichess reports the opponent has disconnected (`opponentGone: true`). Starts a `threading.Timer` that automatically claims victory via `POST /api/bot/game/{id}/claim-victory` after the Lichess-specified `claimWinInSeconds` delay. If the opponent reconnects (`gone: false`), the timer is cancelled.
+- **Startup stuck game cleanup:** On bot startup, `main()` now calls `client.games.get_ongoing()` to detect any games left running from a previous session. Games with fewer than 2 moves are aborted (no rating impact); games with more moves are left to be resumed naturally via the event stream.
+- **`_TERMINAL_STATUSES` constant:** Centralised `frozenset` of terminal game statuses (`mate`, `resign`, `stalemate`, `timeout`, `draw`, `outoftime`, `aborted`, `noStart`, `unknownFinish`) — replaces three duplicated inline lists.
+- **`GAME_WATCHDOG_INTERVAL` config:** New environment variable (default: `60` seconds) controlling how often the watchdog polls the Lichess API when the game stream is idle.
+
 ## [2.5.0] - 2026-03-14
 
 ### Fixed
