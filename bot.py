@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 import threading
+import queue
 import logging
 import chess
 import berserk
@@ -48,6 +49,7 @@ from config import (
     MOVETIME_MIN_MS,
     MOVETIME_ESTIMATED_MOVES,
     MOVETIME_MIN_MOVES_LEFT,
+    GAME_WATCHDOG_INTERVAL,
 )
 
 from logging_config import setup_logger
@@ -55,6 +57,12 @@ from logging_config import setup_logger
 logger = setup_logger(__name__)
 shutdown_requested = False
 HEALTHCHECK_FILE = "/tmp/axiom_heartbeat"
+
+_TERMINAL_STATUSES = frozenset({
+    "mate", "resign", "stalemate", "timeout", "draw",
+    "outoftime", "aborted", "cheat", "noStart",
+    "unknownFinish", "variantEnd",
+})
 
 # Global reference so shutdown handler can wait for game threads
 _active_games: Dict[str, threading.Thread] = {}
@@ -863,6 +871,57 @@ def try_challenge_random_bot(client: berserk.Client, bot_username: str,
 # GAME THREAD
 # ─────────────────────────────────────────────
 
+class _GameStuck(Exception):
+    """Raised by the watchdog when the game is over but the stream didn't report it."""
+
+
+def _stream_with_watchdog(stream, client, game_id, check_interval):
+    """Wrap a blocking game-stream iterator with an API watchdog.
+
+    A daemon reader thread pulls events from *stream* into a queue.
+    The main thread reads the queue with *check_interval* timeouts;
+    on each timeout it polls the Lichess API to verify the game is
+    still in progress.  This is safe for classical games (long thinks)
+    because the watchdog only breaks when the API confirms the game ended.
+    """
+    q: queue.Queue = queue.Queue()
+    _sentinel = object()
+
+    def _reader():
+        try:
+            for event in stream:
+                q.put(event)
+            q.put(_sentinel)
+        except Exception as exc:
+            q.put(exc)
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+
+    while True:
+        try:
+            item = q.get(timeout=check_interval)
+        except queue.Empty:
+            # No stream event — ask the API whether the game is still alive
+            try:
+                game = client.games.export(game_id)
+                status = game.get("status")
+                if status in _TERMINAL_STATUSES:
+                    logger.info(f"[{game_id}] Watchdog: game ended via API ({status})")
+                    raise _GameStuck(f"Game {game_id} ended ({status}) but stream did not report it")
+                logger.debug(f"[{game_id}] Watchdog: game still active ({status})")
+            except _GameStuck:
+                raise
+            except Exception as e:
+                logger.debug(f"[{game_id}] Watchdog API check failed: {e}")
+            continue
+        if item is _sentinel:
+            return
+        if isinstance(item, BaseException):
+            raise item
+        yield item
+
+
 def play_game(client: berserk.Client, game_id: str, bot_username: str):
     logger.info(f"Starting game thread {game_id}")
 
@@ -877,12 +936,14 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
     binc_ms: int = 0             # Black's increment per move in milliseconds
     last_eval_cp: int | None = None  # Cached eval from last move search (white's perspective)
     last_opponent_draw: bool = False  # Tracks opponent draw flag from previous event (rising-edge detection)
+    _claim_victory_timer: threading.Timer | None = None  # Timer for claiming win after opponentGone
 
     try:
         # Retry stream connection with backoff
         while not shutdown_requested:
             try:
-                stream = client.bots.stream_game_state(game_id)
+                raw_stream = client.bots.stream_game_state(game_id)
+                stream = _stream_with_watchdog(raw_stream, client, game_id, GAME_WATCHDOG_INTERVAL)
                 
                 for event in stream:
                     if shutdown_requested:
@@ -890,6 +951,12 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 
                     if event["type"] == "gameFull":
                         board.reset()
+
+                        # Check if game is already over (e.g. reconnecting to a finished game)
+                        initial_status = event.get("state", {}).get("status")
+                        if initial_status in _TERMINAL_STATUSES:
+                            logger.info(f"[{game_id}] Game already ended ({initial_status}), exiting")
+                            break
 
                         moves = event["state"]["moves"].split() if event["state"]["moves"] else []
                         for move in moves:
@@ -946,9 +1013,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         
                         # Check if game ended (resignation, timeout, abort, etc.)
                         status = event.get("status")
-                        if status in ["mate", "resign", "stalemate", "timeout", "draw",
-                                      "outoftime", "aborted", "cheat", "noStart",
-                                      "unknownFinish", "variantEnd"]:
+                        if status in _TERMINAL_STATUSES:
                             logger.info(f"[{game_id}] Game ended: {status}")
                             break
                         
@@ -1045,6 +1110,37 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                             pass
 
                         last_opponent_draw = opponent_draw_now
+
+                    if event["type"] == "opponentGone":
+                        gone = event.get("gone", False)
+                        claim_seconds = event.get("claimWinInSeconds")
+                        if gone:
+                            logger.warning(f"[{game_id}] Opponent has disconnected"
+                                           f"{f' (can claim win in {claim_seconds}s)' if claim_seconds else ''}")
+                            # Cancel any previous timer before starting a new one
+                            if _claim_victory_timer is not None:
+                                _claim_victory_timer.cancel()
+                                _claim_victory_timer = None
+                            if claim_seconds is not None:
+                                def _claim_win(_gid=game_id):
+                                    try:
+                                        url = f"https://lichess.org/api/bot/game/{_gid}/claim-victory"
+                                        headers = {"Authorization": f"Bearer {TOKEN}"}
+                                        resp = requests.post(url, headers=headers, timeout=10)
+                                        if resp.status_code < 400:
+                                            logger.info(f"[{_gid}] Claimed victory (opponent gone)")
+                                        else:
+                                            logger.warning(f"[{_gid}] Claim victory returned {resp.status_code}: {resp.text}")
+                                    except Exception as e:
+                                        logger.error(f"[{_gid}] Failed to claim victory: {e}")
+                                _claim_victory_timer = threading.Timer(claim_seconds + 1, _claim_win)
+                                _claim_victory_timer.daemon = True
+                                _claim_victory_timer.start()
+                        else:
+                            logger.info(f"[{game_id}] Opponent has reconnected")
+                            if _claim_victory_timer is not None:
+                                _claim_victory_timer.cancel()
+                                _claim_victory_timer = None
 
                     # After processing event, check if game is over
                     if board.is_game_over():
@@ -1315,6 +1411,9 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                     continue
                 logger.error(f"[{game_id}] API error in game stream: {e}", exc_info=True)
                 break
+            except _GameStuck:
+                # Watchdog confirmed the game is over — just exit the thread
+                break
             except Exception as e:
                 logger.error(f"[{game_id}] Unexpected stream error: {e}", exc_info=True)
                 break
@@ -1323,6 +1422,8 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
         logger.error(f"Game {game_id} crashed: {e}", exc_info=True)
 
     finally:
+        if _claim_victory_timer is not None:
+            _claim_victory_timer.cancel()
         if stockfish:
             try:
                 if hasattr(stockfish, "_stockfish") and stockfish._stockfish:
@@ -1468,6 +1569,42 @@ def main():
 
     bot_username = account.get("username")
     logger.info("Bot account verified: %s", bot_username)
+
+    # ── Clean up stuck games from previous session ──
+    try:
+        ongoing = client.games.get_ongoing()
+        if ongoing:
+            logger.info(f"Found {len(ongoing)} ongoing game(s) from previous session")
+            for game in ongoing:
+                gid = game.get("gameId") or game.get("id", "")
+                status = game.get("status", {})
+                status_name = status.get("name", status) if isinstance(status, dict) else str(status)
+                opponent = game.get("opponent", {})
+                opp_name = opponent.get("username", "?")
+
+                if status_name in _TERMINAL_STATUSES:
+                    logger.info(f"  [{gid}] Already finished ({status_name}), skipping")
+                    continue
+
+                # Check if it's a game vs an offline/gone opponent that has been
+                # idle for a long time — try to abort (< 2 moves) or resign.
+                try:
+                    full = client.games.export(gid)
+                    moves = full.get("moves", "")
+                    move_count = len(moves.split()) if moves else 0
+
+                    if move_count < 2:
+                        try:
+                            client.bots.abort_game(gid)
+                            logger.info(f"  [{gid}] Aborted stuck game vs {opp_name} ({move_count} moves)")
+                        except Exception as abort_err:
+                            logger.debug(f"  [{gid}] Abort failed ({abort_err}), will resume normally")
+                    else:
+                        logger.info(f"  [{gid}] In-progress game vs {opp_name} ({move_count} moves), will resume via event stream")
+                except Exception as e:
+                    logger.debug(f"  [{gid}] Could not check game details: {e}")
+    except Exception as e:
+        logger.warning(f"Could not check ongoing games: {e}")
 
     global _active_games, _active_games_lock
     active_games: Dict[str, threading.Thread] = {}

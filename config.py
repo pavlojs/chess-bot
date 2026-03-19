@@ -154,3 +154,8 @@ CHALLENGE_TIME_CONTROLS = [
 
 # Challenge check interval (seconds) - how often to check if we should challenge
 CHALLENGE_CHECK_INTERVAL = int(os.getenv("CHALLENGE_CHECK_INTERVAL", "60"))  # 1 minute
+
+# Game watchdog interval (seconds) — how often to poll the Lichess API
+# to verify a game is still active.  Unlike a hard stream timeout this
+# approach is safe for classical games where opponents think for a long time.
+GAME_WATCHDOG_INTERVAL = int(os.getenv("GAME_WATCHDOG_INTERVAL", "60"))  # 1 minute
