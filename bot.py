@@ -471,6 +471,13 @@ def _parse_pv_from_info(info_line: str, depth: int) -> tuple[str, str]:
     return eval_str, pv_display
 
 
+# Sentinel used by _get_best_move_with_clocks to store raw output in
+# stockfish._raw_stockfish_output so that _get_last_info_line() can
+# retrieve the info line later.
+def _clocks_search_sentinel():
+    pass
+
+
 def _get_best_move_with_clocks(stockfish: Stockfish, wtime: int, btime: int,
                                 winc: int = 0, binc: int = 0) -> Optional[str]:
     """Send go wtime/btime/winc/binc so Stockfish manages time natively.
@@ -480,7 +487,34 @@ def _get_best_move_with_clocks(stockfish: Stockfish, wtime: int, btime: int,
     that all library search methods use internally.
     """
     stockfish._put(f"go wtime {wtime} btime {btime} winc {winc} binc {binc}")
-    return stockfish._get_best_move_from_sf_popen_process()
+    return stockfish._get_best_move_from_sf_popen_process(_clocks_search_sentinel)
+
+
+def _get_last_info_line(stockfish: Stockfish, func_ref) -> str:
+    """Return the last info line from the most recent search.
+
+    Uses ``raw_stockfish_output`` (stockfish >= 5.0) to retrieve the
+    penultimate line (the last ``info`` line before ``bestmove``).
+    Returns an empty string if the output is unavailable.
+    """
+    try:
+        lines = stockfish.raw_stockfish_output(func_ref)
+        if lines and len(lines) >= 2:
+            return lines[-2]
+    except Exception:
+        pass
+    return ""
+
+
+def _get_last_eval_cp(stockfish: Stockfish) -> Optional[int]:
+    """Return cached cp eval from the most recent search, trying all known function keys."""
+    for func_ref in (stockfish.get_best_move_time, _clocks_search_sentinel, stockfish.get_best_move):
+        info = _get_last_info_line(stockfish, func_ref)
+        if info:
+            cp = _extract_cp_from_info(info)
+            if cp is not None:
+                return cp
+    return None
 
 
 def _extract_cp_from_info(info_line: str) -> Optional[int]:
@@ -601,8 +635,12 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
         if not move:
             return None, None, None
 
-        # Capture engine info once and reuse
-        info_line = stockfish.info()
+        # Capture engine info once and reuse.
+        # In stockfish >= 5.0 `.info()` was removed; use raw_stockfish_output instead.
+        if move_time_ms is not None:
+            info_line = _get_last_info_line(stockfish, stockfish.get_best_move_time)
+        else:
+            info_line = _get_last_info_line(stockfish, _clocks_search_sentinel)
 
         # Parse PV, mate and cp info for logging and decision-making
         if ENABLE_MOVE_PREDICTION and logger.isEnabledFor(logging.INFO):
@@ -1409,7 +1447,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             logger.debug(f"[{game_id}] No clock data, movetime fallback: {move_time}ms")
 
                         # Cache eval for draw offer decisions — free from the search info line above
-                        last_eval_cp = _extract_cp_from_info(stockfish.info())
+                        last_eval_cp = _get_last_eval_cp(stockfish)
 
                         if move:
                             # Double-check game isn't over before making move
@@ -1550,9 +1588,9 @@ def challenge_loop(client: berserk.Client, bot_username: str,
             with active_games_lock:
                 active_count = sum(1 for t in active_games.values() if t.is_alive())
 
-            if not ENABLE_AUTO_CHALLENGE or active_count > 0:
-                if active_count > 0:
-                    logger.debug(f"Skipping challenge: {active_count} active game(s)")
+            if not ENABLE_AUTO_CHALLENGE or active_count >= MAX_CONCURRENT_GAMES:
+                if active_count >= MAX_CONCURRENT_GAMES:
+                    logger.debug(f"Skipping challenge: {active_count}/{MAX_CONCURRENT_GAMES} active game(s)")
                 retry_event.clear()
                 retry_event.wait(timeout=CHALLENGE_CHECK_INTERVAL)
                 retry_event.clear()
