@@ -159,3 +159,11 @@ CHALLENGE_CHECK_INTERVAL = int(os.getenv("CHALLENGE_CHECK_INTERVAL", "60"))  # 1
 # to verify a game is still active.  Unlike a hard stream timeout this
 # approach is safe for classical games where opponents think for a long time.
 GAME_WATCHDOG_INTERVAL = int(os.getenv("GAME_WATCHDOG_INTERVAL", "60"))  # 1 minute
+
+# Maximum seconds a game can stay in "started" status (no moves made) before
+# the watchdog forcefully aborts it.  Prevents the bot from being stuck
+# indefinitely when an opponent goes offline before making any move.
+GAME_WATCHDOG_ABORT_TIMEOUT = int(os.getenv("GAME_WATCHDOG_ABORT_TIMEOUT", "600"))  # 10 minutes
+
+# Maximum number of concurrent games the bot will play simultaneously.
+MAX_CONCURRENT_GAMES = int(os.getenv("MAX_CONCURRENT_GAMES", "2"))
