@@ -328,6 +328,13 @@ def should_accept_challenge(challenge: Dict[str, Any]) -> bool:
     if not ACCEPT_CHALLENGES:
         return False
 
+    # Only accept standard chess — reject all variants (chess960, antichess, atomic, etc.)
+    variant = challenge.get("variant", {})
+    variant_key = variant.get("key", "standard") if isinstance(variant, dict) else str(variant)
+    if variant_key != "standard":
+        logger.info(f"Rejecting challenge: unsupported variant '{variant_key}'")
+        return False
+
     challenger = challenge.get("challenger", {})
     rating = challenger.get("rating", 1500)
     
@@ -1403,9 +1410,24 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             logger.debug(f"[{game_id}] Movetime mode: {move_time}ms (UCI_LimitStrength active)")
 
                         elif wtime_ms and btime_ms:
+                            # Cap the clock values sent to Stockfish on the very first
+                            # move.  Lichess aborts the game if no move is made within
+                            # ~30 seconds, but with large remaining time (e.g. 20 min)
+                            # Stockfish may allocate several minutes for move 1.
+                            _FIRST_MOVE_CAP_MS = 15_000
+                            _effective_wtime = wtime_ms
+                            _effective_btime = btime_ms
+                            if board.fullmove_number <= 1 and len(board.move_stack) == 0:
+                                if bot_is_white and wtime_ms > _FIRST_MOVE_CAP_MS:
+                                    _effective_wtime = _FIRST_MOVE_CAP_MS
+                                    logger.info(f"[{game_id}] First move as white — capping wtime {wtime_ms}→{_FIRST_MOVE_CAP_MS}ms to avoid abort")
+                                elif not bot_is_white and btime_ms > _FIRST_MOVE_CAP_MS:
+                                    _effective_btime = _FIRST_MOVE_CAP_MS
+                                    logger.info(f"[{game_id}] First move as black — capping btime {btime_ms}→{_FIRST_MOVE_CAP_MS}ms to avoid abort")
+
                             predicted_move, mate_val, pred_cp = get_move_prediction(
                                 stockfish, game_id,
-                                wtime=wtime_ms, btime=btime_ms,
+                                wtime=_effective_wtime, btime=_effective_btime,
                                 winc=winc_ms, binc=binc_ms,
                                 prediction_depth=PREDICTION_DEPTH,
                             )
@@ -1416,23 +1438,23 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 
                             if mate_val is not None and mate_val > 0:
                                 move = predicted_move or _get_best_move_with_clocks(
-                                    stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
+                                    stockfish, _effective_wtime, _effective_btime, winc_ms, binc_ms
                                 )
                                 logger.info(f"[{game_id}] Following mating sequence (mate in {mate_val})")
                             elif mate_val is not None and mate_val < 0:
                                 logger.info(f"[{game_id}] Prediction: forced mate against us (mate in {abs(mate_val)}) — choosing defensive move")
                                 move = _get_best_move_with_clocks(
-                                    stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
+                                    stockfish, _effective_wtime, _effective_btime, winc_ms, binc_ms
                                 )
                             elif eval_for_bot is not None and eval_for_bot <= -PREDICTION_RECOVER_THRESHOLD:
                                 logger.info(f"[{game_id}] Prediction shows we're down {eval_for_bot}cp — attempting recovery search (native clocks)")
                                 move = _get_best_move_with_clocks(
-                                    stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
+                                    stockfish, _effective_wtime, _effective_btime, winc_ms, binc_ms
                                 )
                                 logger.info(f"[{game_id}] Recovery move chosen: {move}")
                             else:
                                 move = predicted_move or _get_best_move_with_clocks(
-                                    stockfish, wtime_ms, btime_ms, winc_ms, binc_ms
+                                    stockfish, _effective_wtime, _effective_btime, winc_ms, binc_ms
                                 )
 
                             logger.debug(
