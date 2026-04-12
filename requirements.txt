@@ -1,6 +1,6 @@
 berserk
 python-chess
-stockfish
+stockfish>=5.0.0
 python-dotenv
 pytest
 pytest-asyncio
