@@ -50,6 +50,8 @@ from config import (
     MOVETIME_ESTIMATED_MOVES,
     MOVETIME_MIN_MOVES_LEFT,
     GAME_WATCHDOG_INTERVAL,
+    GAME_WATCHDOG_ABORT_TIMEOUT,
+    MAX_CONCURRENT_GAMES,
 )
 
 from logging_config import setup_logger
@@ -883,11 +885,17 @@ def _stream_with_watchdog(stream, client, game_id, check_interval):
     on each timeout it polls the Lichess API to verify the game is
     still in progress.  This is safe for classical games (long thinks)
     because the watchdog only breaks when the API confirms the game ended.
+
+    Additionally, if the game stays in "started" status (no moves) for
+    longer than GAME_WATCHDOG_ABORT_TIMEOUT seconds, the watchdog will
+    attempt to abort/resign and terminate the stream to prevent the bot
+    from being stuck indefinitely by an offline opponent.
     """
     q: queue.Queue = queue.Queue()
     _sentinel = object()
     _consecutive_failures = 0
     _MAX_CONSECUTIVE_FAILURES = 10  # after 10 failures (~10 min) force-end
+    _started_since: float | None = None  # monotonic time when we first saw "started" status
 
     def _reader():
         try:
@@ -904,6 +912,7 @@ def _stream_with_watchdog(stream, client, game_id, check_interval):
         try:
             item = q.get(timeout=check_interval)
             _consecutive_failures = 0  # reset on any event
+            _started_since = None  # stream event received → game is progressing
         except queue.Empty:
             # No stream event — ask the API whether the game is still alive
             try:
@@ -912,7 +921,37 @@ def _stream_with_watchdog(stream, client, game_id, check_interval):
                 if status in _TERMINAL_STATUSES:
                     logger.info(f"[{game_id}] Watchdog: game ended via API ({status})")
                     raise _GameStuck(f"Game {game_id} ended ({status}) but stream did not report it")
-                logger.info(f"[{game_id}] Watchdog: game still active ({status})")
+
+                # Track how long the game has been in "started" status (no moves)
+                if status == "started":
+                    if _started_since is None:
+                        _started_since = time.monotonic()
+                    elapsed_stuck = time.monotonic() - _started_since
+                    if elapsed_stuck >= GAME_WATCHDOG_ABORT_TIMEOUT:
+                        logger.warning(
+                            f"[{game_id}] Watchdog: game stuck in '{status}' for "
+                            f"{elapsed_stuck:.0f}s — aborting"
+                        )
+                        try:
+                            client.bots.abort_game(game_id)
+                            logger.info(f"[{game_id}] Watchdog: abort sent")
+                        except Exception:
+                            try:
+                                client.bots.resign_game(game_id)
+                                logger.info(f"[{game_id}] Watchdog: resign sent (abort failed)")
+                            except Exception as resign_err:
+                                logger.warning(f"[{game_id}] Watchdog: resign also failed: {resign_err}")
+                        raise _GameStuck(
+                            f"Game {game_id} stuck in '{status}' for {elapsed_stuck:.0f}s, forced abort"
+                        )
+                    logger.info(
+                        f"[{game_id}] Watchdog: game still active ({status}) "
+                        f"— stuck for {elapsed_stuck:.0f}s/{GAME_WATCHDOG_ABORT_TIMEOUT}s"
+                    )
+                else:
+                    _started_since = None  # game progressed past "started"
+                    logger.info(f"[{game_id}] Watchdog: game still active ({status})")
+
                 _consecutive_failures = 0
             except _GameStuck:
                 raise
@@ -1659,7 +1698,6 @@ def main():
     challenge_tracker = ChallengeTracker(MAX_CHALLENGES_PER_HOUR)
     retry_event = threading.Event()   # signals challenge loop to wake up immediately
     pending_challenge: Dict = {}      # shared state: {id, opponent, sent_at}
-    MAX_CONCURRENT_GAMES = 1          # limit concurrent games to prevent resource exhaustion
 
     # Start challenge loop in background thread
     challenge_thread = threading.Thread(
