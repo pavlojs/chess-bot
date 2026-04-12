@@ -2,6 +2,22 @@
 
 All notable changes to Axiom Chess Bot are documented in this file.
 
+## [2.7.0] - 2026-04-12
+
+### Fixed
+
+- **Game stuck in "started" blocking all other games indefinitely:** When an opponent never made a move (e.g. game IrnHNCsK stuck for 14+ hours), the watchdog kept logging "game still active (started)" but never took action. The bot was permanently blocked because `MAX_CONCURRENT_GAMES` was exhausted. The watchdog now tracks how long a game stays in "started" status and forcefully aborts it after `GAME_WATCHDOG_ABORT_TIMEOUT` seconds (default: 600). Falls back to resign if abort fails.
+- **Challenge loop never challenged with any game active:** `challenge_loop` used `active_count > 0` to skip challenging, which meant with `MAX_CONCURRENT_GAMES=2` the bot would never send challenges while any game was running. Fixed to `active_count >= MAX_CONCURRENT_GAMES` so the bot challenges when slots are available.
+- **Stockfish Python package 5.0.0 crash (`stockfish.info()` removed):** The `stockfish` PyPI wrapper v5.0.0 removed the `.info()` method, replaced by `raw_stockfish_output(func)`. The bot crashed on every game start. Created `_get_last_info_line()` and `_get_last_eval_cp()` helpers that use the new API. Pinned `stockfish>=5.0.0` in `requirements.txt`.
+
+### Changed
+
+- **`MAX_CONCURRENT_GAMES` now configurable via `.env`:** Was hardcoded to `1` in `bot.py`. Now loaded from environment variable `MAX_CONCURRENT_GAMES` (default: `2`). Moved to `config.py`.
+
+### Added
+
+- **`GAME_WATCHDOG_ABORT_TIMEOUT` config:** New environment variable (default: `600` seconds / 10 minutes) controlling how long a game can stay in "started" status before the watchdog forces an abort.
+
 ## [2.6.0] - 2026-03-19
 
 ### Fixed
