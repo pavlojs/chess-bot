@@ -213,6 +213,14 @@ Current test coverage includes:
 - ✅ Stuck game in "started" status for ≥ `GAME_WATCHDOG_ABORT_TIMEOUT` raises `_GameStuck`
 - ✅ `_GameStuck` exception class is importable and preserves message
 
+### Variant Rejection Tests (6 tests)
+- ✅ Standard variant (dict format) accepted
+- ✅ Missing variant field defaults to standard (accepted)
+- ✅ Chess960 variant rejected
+- ✅ Antichess variant rejected
+- ✅ Atomic variant rejected
+- ✅ King of the Hill variant rejected
+
 ### Opponent Gone Handling Tests (4 tests)
 - ✅ Parses `opponentGone` event with `claimWinInSeconds`
 - ✅ Cancels timer when opponent returns (`gone: false`)
@@ -239,7 +247,7 @@ Current test coverage includes:
 - ✅ Timer does NOT start when bot is white (bot moves first)
 - ✅ Timer does NOT start when moves already exist on the board
 
-**Total: 169 tests, 100% pass rate**
+**Total: 175 tests, 100% pass rate**
 
 ### Network Error Handling & Retry Logic
 The bot now includes robust error handling for network issues:
@@ -323,7 +331,8 @@ class TestGetLastEvalCp(unittest.TestCase)                  #  4 tests
 class TestWatchdogAbortTimeout(unittest.TestCase)           #  3 tests
 class TestMaxConcurrentGamesConfig(unittest.TestCase)       #  4 tests
 class TestStreamWithWatchdogAbort(unittest.TestCase)        #  2 tests
-# Total: 169 tests
+class TestVariantRejection(unittest.TestCase)                #  6 tests
+# Total: 175 tests
 ```
 
 ## Mocking
