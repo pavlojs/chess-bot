@@ -186,6 +186,33 @@ Current test coverage includes:
 - ✅ `GAME_WATCHDOG_INTERVAL` is importable from `config`
 - ✅ Default value is `60`
 
+### Get Last Info Line Tests (4 tests)
+- ✅ Returns penultimate line from `raw_stockfish_output` (last non-empty info line)
+- ✅ Returns `None` when no output is cached (exception swallowed)
+- ✅ Returns `None` when output has fewer than 2 lines
+- ✅ Returns `None` when output is empty
+
+### Get Last Eval CP Tests (4 tests)
+- ✅ Returns centipawn value from cached info line
+- ✅ Converts mate score to ±30000 sentinel
+- ✅ Returns `None` when no function key produces output
+- ✅ Returns `None` when info line cannot be parsed
+
+### Watchdog Abort Timeout Config Tests (3 tests)
+- ✅ `GAME_WATCHDOG_ABORT_TIMEOUT` is importable from `config`
+- ✅ Default value is `600` seconds (10 minutes)
+- ✅ Terminal statuses (mate, aborted, etc.) are never treated as stuck
+
+### Max Concurrent Games Config Tests (4 tests)
+- ✅ `MAX_CONCURRENT_GAMES` is importable from `config`
+- ✅ Default value is `2`
+- ✅ `bot` module imports `MAX_CONCURRENT_GAMES` from config (not hardcoded)
+- ✅ Value is an integer
+
+### Stream Watchdog Abort Tests (2 tests)
+- ✅ Stuck game in "started" status for ≥ `GAME_WATCHDOG_ABORT_TIMEOUT` raises `_GameStuck`
+- ✅ `_GameStuck` exception class is importable and preserves message
+
 ### Opponent Gone Handling Tests (4 tests)
 - ✅ Parses `opponentGone` event with `claimWinInSeconds`
 - ✅ Cancels timer when opponent returns (`gone: false`)
@@ -212,7 +239,7 @@ Current test coverage includes:
 - ✅ Timer does NOT start when bot is white (bot moves first)
 - ✅ Timer does NOT start when moves already exist on the board
 
-**Total: 152 tests, 100% pass rate**
+**Total: 169 tests, 100% pass rate**
 
 ### Network Error Handling & Retry Logic
 The bot now includes robust error handling for network issues:
@@ -291,7 +318,12 @@ class TestStartupGameCleanup(unittest.TestCase)             #  5 tests
 class TestGameStreamReconnect502(unittest.TestCase)         #  2 tests
 class TestWatchdogConsecutiveFailures(unittest.TestCase)    #  2 tests
 class TestNoFirstMoveAbort(unittest.TestCase)               #  3 tests
-# Total: 152 tests
+class TestGetLastInfoLine(unittest.TestCase)                #  4 tests
+class TestGetLastEvalCp(unittest.TestCase)                  #  4 tests
+class TestWatchdogAbortTimeout(unittest.TestCase)           #  3 tests
+class TestMaxConcurrentGamesConfig(unittest.TestCase)       #  4 tests
+class TestStreamWithWatchdogAbort(unittest.TestCase)        #  2 tests
+# Total: 169 tests
 ```
 
 ## Mocking
