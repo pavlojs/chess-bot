@@ -140,6 +140,8 @@ Most settings can be changed via a `.env` file (copy `.env.example` to `.env`) *
 - `MOVETIME_ESTIMATED_MOVES`: Baseline moves-to-go estimate used in the clock budget formula (default: `40`). Reduced dynamically as the game progresses.
 - `MOVETIME_MIN_MOVES_LEFT`: Minimum moves-to-go value in the clock budget denominator (default: `10`). Prevents over-spending in very long endgames.
 - `GAME_WATCHDOG_INTERVAL`: How often (in seconds) the game watchdog polls the Lichess API when the game stream is idle (default: `60`). Lower values detect stuck games faster; higher values reduce API usage.
+- `GAME_WATCHDOG_ABORT_TIMEOUT`: Maximum seconds a game can stay in `started` status (no moves made) before the watchdog forcefully aborts it (default: `600` = 10 min). Prevents the bot from being stuck indefinitely when an opponent goes offline before making any move.
+- `MAX_CONCURRENT_GAMES`: Maximum number of games the bot plays simultaneously (default: `2`).
 
 **Requires editing `config.py`:**
 
@@ -419,6 +421,8 @@ The bot includes multiple layers of protection against network issues, stuck gam
 
 ### Game Stream Watchdog
 When no events arrive on the game stream for `GAME_WATCHDOG_INTERVAL` seconds (default: 60), the watchdog polls the Lichess API (`games.export`) to check whether the game has actually ended. This handles cases where the stream silently drops or the opponent abandons the game without triggering a `gameFinish` event — without prematurely killing classical games where the opponent is thinking. If the API check itself fails repeatedly (10 consecutive failures, ~10 minutes), the watchdog force-ends the game thread to prevent indefinite blocking.
+
+**Stuck-game abort**: if the game stays in `started` status (no moves played by either side) for longer than `GAME_WATCHDOG_ABORT_TIMEOUT` seconds (default: 600 = 10 min), the watchdog sends an abort request and terminates the game thread. This prevents the bot from being permanently blocked by an opponent who goes offline immediately after the game is created, before making any move.
 
 ### No-First-Move Abort
 When the bot plays as black and the opponent never makes their first move, a 120-second safety timer automatically aborts the game. This is a client-side backup — Lichess normally handles this with `noStart`, but if the stream event is missed, this timer ensures the bot doesn't get stuck forever.
