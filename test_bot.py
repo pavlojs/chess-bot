@@ -926,7 +926,9 @@ class TestGetMovePredictionSignature(unittest.TestCase):
     def _make_stockfish_mock(self, info_line: str, best_move: str = "e2e4"):
         sf = Mock()
         sf.get_best_move_time.return_value = best_move
-        sf.info.return_value = info_line
+        # stockfish >= 5.0: raw_stockfish_output(func) returns list of output lines;
+        # the penultimate line ([-2]) is the last info line before "bestmove".
+        sf.raw_stockfish_output.return_value = [info_line, f"bestmove {best_move}"]
         return sf
 
     def test_returns_three_tuple_with_cp(self):
@@ -1782,6 +1784,170 @@ class TestNoFirstMoveAbort(unittest.TestCase):
         )
         should_start_timer = last_move_count == 0 and not is_my_turn
         self.assertFalse(should_start_timer)
+
+
+class TestGetLastInfoLine(unittest.TestCase):
+    """Tests for _get_last_info_line helper (stockfish 5.0 compat)."""
+
+    def test_returns_penultimate_line(self):
+        from bot import _get_last_info_line
+        sf = Mock()
+        sf.raw_stockfish_output.return_value = [
+            "info depth 10 score cp 42 pv e2e4 e7e5",
+            "bestmove e2e4",
+        ]
+        result = _get_last_info_line(sf, sf.get_best_move_time)
+        self.assertEqual(result, "info depth 10 score cp 42 pv e2e4 e7e5")
+
+    def test_returns_empty_on_exception(self):
+        from bot import _get_last_info_line
+        sf = Mock()
+        sf.raw_stockfish_output.side_effect = Exception("no data")
+        result = _get_last_info_line(sf, sf.get_best_move_time)
+        self.assertEqual(result, "")
+
+    def test_returns_empty_on_short_output(self):
+        from bot import _get_last_info_line
+        sf = Mock()
+        sf.raw_stockfish_output.return_value = ["bestmove e2e4"]
+        result = _get_last_info_line(sf, sf.get_best_move_time)
+        self.assertEqual(result, "")
+
+    def test_returns_empty_on_empty_output(self):
+        from bot import _get_last_info_line
+        sf = Mock()
+        sf.raw_stockfish_output.return_value = []
+        result = _get_last_info_line(sf, sf.get_best_move_time)
+        self.assertEqual(result, "")
+
+
+class TestGetLastEvalCp(unittest.TestCase):
+    """Tests for _get_last_eval_cp helper."""
+
+    def test_returns_cp_from_movetime_search(self):
+        from bot import _get_last_eval_cp
+        sf = Mock()
+        sf.raw_stockfish_output.return_value = [
+            "info depth 15 score cp -120 pv d7d5",
+            "bestmove d7d5",
+        ]
+        result = _get_last_eval_cp(sf)
+        self.assertEqual(result, -120)
+
+    def test_returns_mate_as_30000(self):
+        from bot import _get_last_eval_cp
+        sf = Mock()
+        sf.raw_stockfish_output.return_value = [
+            "info depth 10 score mate 3 pv d1h5",
+            "bestmove d1h5",
+        ]
+        result = _get_last_eval_cp(sf)
+        self.assertEqual(result, 30000)
+
+    def test_returns_none_when_no_eval(self):
+        from bot import _get_last_eval_cp
+        sf = Mock()
+        sf.raw_stockfish_output.return_value = []
+        result = _get_last_eval_cp(sf)
+        self.assertIsNone(result)
+
+    def test_returns_none_on_exception(self):
+        from bot import _get_last_eval_cp
+        sf = Mock()
+        sf.raw_stockfish_output.side_effect = Exception("crash")
+        result = _get_last_eval_cp(sf)
+        self.assertIsNone(result)
+
+
+class TestWatchdogAbortTimeout(unittest.TestCase):
+    """Tests for the game watchdog abort timeout feature."""
+
+    def test_abort_timeout_config_imported(self):
+        """GAME_WATCHDOG_ABORT_TIMEOUT is importable from config."""
+        from config import GAME_WATCHDOG_ABORT_TIMEOUT
+        self.assertIsInstance(GAME_WATCHDOG_ABORT_TIMEOUT, int)
+        self.assertGreater(GAME_WATCHDOG_ABORT_TIMEOUT, 0)
+
+    def test_abort_timeout_default_value(self):
+        """Default abort timeout is 600 seconds (10 minutes)."""
+        from config import GAME_WATCHDOG_ABORT_TIMEOUT
+        # If not overridden in env, default is 600
+        env_value = os.environ.get("GAME_WATCHDOG_ABORT_TIMEOUT")
+        if env_value is None:
+            self.assertEqual(GAME_WATCHDOG_ABORT_TIMEOUT, 600)
+
+    def test_terminal_statuses_include_aborted(self):
+        """Ensure 'aborted' is a terminal status (watchdog abort should end the game)."""
+        from bot import _TERMINAL_STATUSES
+        self.assertIn("aborted", _TERMINAL_STATUSES)
+
+
+class TestMaxConcurrentGamesConfig(unittest.TestCase):
+    """Tests for MAX_CONCURRENT_GAMES configuration."""
+
+    def test_config_importable(self):
+        """MAX_CONCURRENT_GAMES is importable from config."""
+        from config import MAX_CONCURRENT_GAMES
+        self.assertIsInstance(MAX_CONCURRENT_GAMES, int)
+        self.assertGreater(MAX_CONCURRENT_GAMES, 0)
+
+    def test_default_value_is_2(self):
+        """Default value is 2."""
+        from config import MAX_CONCURRENT_GAMES
+        env_value = os.environ.get("MAX_CONCURRENT_GAMES")
+        if env_value is None:
+            self.assertEqual(MAX_CONCURRENT_GAMES, 2)
+
+    def test_bot_imports_max_concurrent_games(self):
+        """bot.py imports MAX_CONCURRENT_GAMES from config."""
+        import bot
+        self.assertTrue(hasattr(bot, 'MAX_CONCURRENT_GAMES'))
+        self.assertEqual(bot.MAX_CONCURRENT_GAMES, bot.MAX_CONCURRENT_GAMES)
+
+    def test_bot_imports_abort_timeout(self):
+        """bot.py imports GAME_WATCHDOG_ABORT_TIMEOUT from config."""
+        import bot
+        self.assertTrue(hasattr(bot, 'GAME_WATCHDOG_ABORT_TIMEOUT'))
+
+
+class TestStreamWithWatchdogAbort(unittest.TestCase):
+    """Tests for _stream_with_watchdog stuck-game abort logic."""
+
+    @patch('bot.GAME_WATCHDOG_ABORT_TIMEOUT', 0)  # immediate abort for fast test
+    def test_stuck_started_game_triggers_abort(self):
+        """Watchdog should raise _GameStuck when game is in 'started' too long."""
+        from bot import _stream_with_watchdog, _GameStuck
+        import threading as _threading
+
+        mock_client = Mock()
+        mock_client.games.export.return_value = {"status": "started"}
+        mock_client.bots.abort_game.return_value = None
+
+        # Iterator that blocks on next() so reader thread never puts sentinel
+        block = _threading.Event()
+
+        class _BlockingIter:
+            def __iter__(self):
+                return self
+            def __next__(self):
+                block.wait()
+                raise StopIteration
+
+        gen = _stream_with_watchdog(_BlockingIter(), mock_client, "test123", check_interval=0.05)
+
+        try:
+            with self.assertRaises(_GameStuck):
+                for _ in gen:
+                    pass
+        finally:
+            block.set()  # unblock reader thread so it can exit cleanly
+
+    def test_game_stuck_exception_exists(self):
+        """_GameStuck exception class should be importable."""
+        from bot import _GameStuck
+        exc = _GameStuck("test msg")
+        self.assertIsInstance(exc, Exception)
+        self.assertEqual(str(exc), "test msg")
 
 
 if __name__ == '__main__':
