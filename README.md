@@ -15,6 +15,7 @@ The bot accepts challenges in **Bullet**, **Blitz**, **Rapid**, and **Classical*
 **Note:** The bot automatically rejects:
 - ❌ Correspondence games (days per move)
 - ❌ Unlimited time games (no clock)
+- ❌ Chess variants (Chess960, Antichess, Atomic, King of the Hill, etc.)
 - ✅ Accepts challenges from both human players and other bots
 
 The bot automatically adjusts its strength to match your rating for competitive games!
