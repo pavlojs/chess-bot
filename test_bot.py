@@ -1950,5 +1950,81 @@ class TestStreamWithWatchdogAbort(unittest.TestCase):
         self.assertEqual(str(exc), "test msg")
 
 
+class TestVariantRejection(unittest.TestCase):
+    """Tests for rejecting non-standard chess variants."""
+
+    def _base_challenge(self, variant=None):
+        c = {
+            'challenger': {'rating': 1500},
+            'timeControl': {'limit': 180, 'increment': 0},
+            'id': 'test_variant',
+        }
+        if variant is not None:
+            c['variant'] = variant
+        return c
+
+    def _patches(self):
+        return [
+            patch('bot.ACCEPT_CHALLENGES', True),
+            patch('bot.MIN_RATING', 1000),
+            patch('bot.MAX_RATING', 2400),
+            patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']),
+        ]
+
+    def test_accept_standard_variant_dict(self):
+        """Standard variant (dict format) should be accepted."""
+        c = self._base_challenge(variant={'key': 'standard', 'name': 'Standard'})
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
+            self.assertTrue(should_accept_challenge(c))
+
+    def test_accept_no_variant_field(self):
+        """Missing variant field should default to standard and be accepted."""
+        c = self._base_challenge()
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
+            self.assertTrue(should_accept_challenge(c))
+
+    def test_reject_chess960(self):
+        """Chess960 variant should be rejected."""
+        c = self._base_challenge(variant={'key': 'chess960', 'name': 'Chess960'})
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
+            self.assertFalse(should_accept_challenge(c))
+
+    def test_reject_antichess(self):
+        """Antichess variant should be rejected."""
+        c = self._base_challenge(variant={'key': 'antichess', 'name': 'Antichess'})
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
+            self.assertFalse(should_accept_challenge(c))
+
+    def test_reject_atomic(self):
+        """Atomic variant should be rejected."""
+        c = self._base_challenge(variant={'key': 'atomic', 'name': 'Atomic'})
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
+            self.assertFalse(should_accept_challenge(c))
+
+    def test_reject_kingOfTheHill(self):
+        """King of the Hill variant should be rejected."""
+        c = self._base_challenge(variant={'key': 'kingOfTheHill', 'name': 'King of the Hill'})
+        with patch('bot.ACCEPT_CHALLENGES', True), \
+             patch('bot.MIN_RATING', 1000), \
+             patch('bot.MAX_RATING', 2400), \
+             patch('bot.TIME_CONTROL', ['blitz', 'rapid', 'classical']):
+            self.assertFalse(should_accept_challenge(c))
+
+
 if __name__ == '__main__':
     unittest.main()
