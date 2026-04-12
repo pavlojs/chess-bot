@@ -444,8 +444,6 @@ If a new `gameStart` event arrives while the concurrent limit is reached, the bo
 GAME_WATCHDOG_INTERVAL=60   # Watchdog polling interval in seconds (default: 60)
 ```
 
-> **Note:** `MAX_CONCURRENT_GAMES` is a hardcoded constant (`1`) in `bot.py` and is not configurable via environment variable.
-
 ## Using Syzygy Tablebases
 
 Syzygy tablebases provide perfect play in endgames with up to 7 pieces. To use them:
