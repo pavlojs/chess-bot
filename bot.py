@@ -1417,7 +1417,14 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             _FIRST_MOVE_CAP_MS = 15_000
                             _effective_wtime = wtime_ms
                             _effective_btime = btime_ms
-                            if board.fullmove_number <= 1 and len(board.move_stack) == 0:
+                            # Bot's first move: white (empty stack) or black (stack has 1 = opponent's move).
+                            # Lichess aborts after ~30s with no move, but Stockfish may
+                            # allocate minutes on move 1 with large remaining time.
+                            _bot_first_move = (
+                                (bot_is_white and len(board.move_stack) == 0) or
+                                (not bot_is_white and len(board.move_stack) == 1)
+                            )
+                            if _bot_first_move:
                                 if bot_is_white and wtime_ms > _FIRST_MOVE_CAP_MS:
                                     _effective_wtime = _FIRST_MOVE_CAP_MS
                                     logger.info(f"[{game_id}] First move as white — capping wtime {wtime_ms}→{_FIRST_MOVE_CAP_MS}ms to avoid abort")
