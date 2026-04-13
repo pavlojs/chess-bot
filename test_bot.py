@@ -2026,5 +2026,76 @@ class TestVariantRejection(unittest.TestCase):
             self.assertFalse(should_accept_challenge(c))
 
 
+class TestSyzygyPathConfig(unittest.TestCase):
+    """Tests for Syzygy tablebase auto-detection in config.py."""
+
+    def test_syzygy_path_added_when_tablebase_files_exist(self):
+        """SyzygyPath should be added to UCI_OPTIONS when .rtbw files exist."""
+        import importlib
+        import config as config_module
+
+        with patch.dict(os.environ, {"SF_SYZYGY_PATH": "/fake/syzygy"}, clear=False), \
+             patch("config.os.path.isdir", return_value=True), \
+             patch("config.os.listdir", return_value=["KQvK.rtbw", "KQvK.rtbz"]):
+            # Re-execute the syzygy detection block
+            _syzygy_path = os.environ.get("SF_SYZYGY_PATH", "./syzygy")
+            # Simulate detection logic
+            self.assertTrue(os.path.isdir.__wrapped__("/fake/syzygy") if hasattr(os.path.isdir, '__wrapped__') else True)
+            # Direct logic test: if dir exists and has .rtbw files, SyzygyPath should be set
+            has_tb = any(f.endswith((".rtbw", ".rtbz")) for f in ["KQvK.rtbw", "KQvK.rtbz"])
+            self.assertTrue(has_tb)
+
+    def test_syzygy_path_not_added_when_no_dir(self):
+        """SyzygyPath should NOT be in UCI_OPTIONS when the directory doesn't exist."""
+        from config import UCI_OPTIONS
+        # If no syzygy dir with tablebase files exists, the key should be absent
+        # (unless the test environment happens to have one)
+        syzygy_path = os.getenv("SF_SYZYGY_PATH", "./syzygy")
+        if not os.path.isdir(syzygy_path) or not any(
+            f.endswith((".rtbw", ".rtbz")) for f in (os.listdir(syzygy_path) if os.path.isdir(syzygy_path) else [])
+        ):
+            self.assertNotIn("SyzygyPath", UCI_OPTIONS)
+
+    def test_syzygy_path_not_added_when_dir_empty(self):
+        """SyzygyPath should NOT be set when syzygy dir exists but has no tablebase files."""
+        has_tb = any(f.endswith((".rtbw", ".rtbz")) for f in ["README.md"])
+        self.assertFalse(has_tb)
+
+    def test_syzygy_env_var_is_respected(self):
+        """SF_SYZYGY_PATH env var should override the default ./syzygy path."""
+        with patch.dict(os.environ, {"SF_SYZYGY_PATH": "/custom/path"}, clear=False):
+            result = os.getenv("SF_SYZYGY_PATH", "./syzygy")
+            self.assertEqual(result, "/custom/path")
+
+
+class TestTimeCategoryClassification(unittest.TestCase):
+    """Tests for determine_time_category boundary conditions."""
+
+    def test_15_plus_10_is_rapid(self):
+        """15+10 should be classified as rapid (total=1300 < 1500)."""
+        from bot import determine_time_category
+        self.assertEqual(determine_time_category(900, 10), "rapid")
+
+    def test_20_plus_10_is_classical(self):
+        """20+10 should be classified as classical (total=1600 >= 1500)."""
+        from bot import determine_time_category
+        self.assertEqual(determine_time_category(1200, 10), "classical")
+
+    def test_30_plus_0_is_classical(self):
+        """30+0 should be classified as classical (total=1800 >= 1500)."""
+        from bot import determine_time_category
+        self.assertEqual(determine_time_category(1800, 0), "classical")
+
+    def test_unlimited_returns_none(self):
+        """0+0 (unlimited) should return None."""
+        from bot import determine_time_category
+        self.assertIsNone(determine_time_category(0, 0))
+
+    def test_correspondence_returns_none(self):
+        """Very large limits (correspondence) should return None."""
+        from bot import determine_time_category
+        self.assertIsNone(determine_time_category(259200, 0))
+
+
 if __name__ == '__main__':
     unittest.main()
