@@ -2,6 +2,23 @@
 
 All notable changes to Axiom Chess Bot are documented in this file.
 
+## [2.8.0] - 2026-04-13
+
+### Fixed
+
+- **SyzygyPath not configured despite docs claiming it was:** Both `README.md` and `syzygy/README.md` stated that `SyzygyPath` was "already configured" in `config.py`'s `UCI_OPTIONS`, but it was never actually set. Added auto-detection: if `./syzygy/` (or `SF_SYZYGY_PATH` env var) contains `.rtbw`/`.rtbz` tablebase files, `SyzygyPath` is automatically added to Stockfish's UCI options. Updated both docs to reflect the new auto-detection behavior.
+- **Time control comment wrong for 15+10:** Config comment labeled `{"limit": 900, "increment": 10}` as "classical", but `determine_time_category()` classifies it as "rapid" (total = 900 + 10×40 = 1300 < 1500).
+- **Misleading "No active games" log in challenge loop:** Log message said "No active games — looking for a bot to challenge..." even when games were active (just below the concurrent limit).
+- **Misleading "Opponent played" log on reconnect:** `gameState` events include ALL moves from the start of the game. On reconnect, the bot's own moves were logged as "Opponent played". Changed to neutral "Move received".
+
+### Changed
+
+- **`requirements.txt` modernized:** Replaced `python-chess` shim with `chess` (the actual library). Added `requests` (was used but not listed). Added minimum version pins for all dependencies.
+
+### Added
+
+- **9 new tests (184 total):** `TestSyzygyPathConfig` (4 tests — auto-detection, no-dir, empty-dir, env var), `TestTimeCategoryClassification` (5 tests — rapid/classical boundary, unlimited, correspondence).
+
 ## [2.7.0] - 2026-04-13
 
 ### Fixed
