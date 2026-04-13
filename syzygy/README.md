@@ -54,8 +54,8 @@ The bot is configured to use Syzygy tablebases if available. Follow these steps 
    ```
 
 ### Step 3: Verify Configuration
-- The bot's `config.py` already has `"SyzygyPath": "./syzygy"` set in `UCI_OPTIONS`.
-- If you change the path, update `config.py` accordingly.
+- The bot **auto-detects** Syzygy tablebases: if `./syzygy/` contains `.rtbw`/`.rtbz` files, `SyzygyPath` is added to Stockfish's UCI options automatically.
+- To use a custom path, set the `SF_SYZYGY_PATH` environment variable (e.g. `SF_SYZYGY_PATH=/data/syzygy`).
 - Restart the bot after adding files for Stockfish to load them.
 
 ### Step 4: Test the Setup
@@ -71,7 +71,7 @@ The bot is configured to use Syzygy tablebases if available. Follow these steps 
 
 ### Advanced Usage
 - **Partial Downloads**: You can download only certain piece counts (e.g., just 5 pieces) to save space.
-- **Custom Paths**: Change `SyzygyPath` to another directory if needed.
+- **Custom Paths**: Set the `SF_SYZYGY_PATH` environment variable to point to another directory.
 - **Performance**: Use SSD storage for faster probes.
 
 For more information, visit the Syzygy Tables website or Stockfish documentation.
