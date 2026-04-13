@@ -85,6 +85,17 @@ UCI_OPTIONS: Dict[str, Any] = {
     "Ponder": False,
 }
 
+# Syzygy tablebases: auto-configure if the directory exists and contains tablebase files.
+# Override with SF_SYZYGY_PATH env var to point to a custom location.
+_syzygy_path = os.getenv("SF_SYZYGY_PATH", "./syzygy")
+if os.path.isdir(_syzygy_path) and any(
+    f.endswith((".rtbw", ".rtbz")) for f in os.listdir(_syzygy_path)
+):
+    UCI_OPTIONS["SyzygyPath"] = _syzygy_path
+    logger.info(f"Syzygy tablebases enabled: {_syzygy_path}")
+else:
+    logger.debug(f"Syzygy tablebases not found at {_syzygy_path} (no .rtbw/.rtbz files)")
+
 # Move Prediction Configuration
 # Enable to see Stockfish's analysis of best continuation (principal variation)
 ENABLE_MOVE_PREDICTION = os.getenv("ENABLE_MOVE_PREDICTION", "true").lower() in ("true", "1", "yes")
@@ -147,7 +158,7 @@ CHALLENGE_TIME_CONTROLS = [
     {"limit": 300, "increment": 3},   # 5+3 blitz
     {"limit": 600, "increment": 0},   # 10+0 rapid
     {"limit": 600, "increment": 5},   # 10+5 rapid
-    {"limit": 900, "increment": 10},  # 15+10 classical
+    {"limit": 900, "increment": 10},  # 15+10 rapid
     {"limit": 1200, "increment": 10}, # 20+10 classical
     {"limit": 1800, "increment": 0},  # 30+0 classical
 ]
