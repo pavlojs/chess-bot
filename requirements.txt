@@ -1,7 +1,8 @@
-berserk
-python-chess
+berserk>=0.14.0
+chess>=1.11.0
 stockfish>=5.0.0
-python-dotenv
-pytest
-pytest-asyncio
-pytest-cov
+python-dotenv>=1.0.0
+requests>=2.31.0
+pytest>=9.0.0
+pytest-asyncio>=1.0.0
+pytest-cov>=7.0.0
