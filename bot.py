@@ -1149,7 +1149,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             new_moves = moves[last_move_count:]
                             for move in new_moves:
                                 board.push_uci(move)
-                                logger.info(f"[{game_id}] Opponent played {move}")
+                                logger.info(f"[{game_id}] Move received: {move}")
                             last_move_count = current_move_count
 
                         # Handle draw offers — respond only to the *opponent's* offer and only
@@ -1641,7 +1641,7 @@ def challenge_loop(client: berserk.Client, bot_username: str,
                     retry_event.clear()
 
             # ── Send a new challenge ─────────────────────────────────────────
-            logger.info("No active games — looking for a bot to challenge...")
+            logger.info("Looking for a bot to challenge...")
             try:
                 challenge_id = try_challenge_random_bot(client, bot_username, challenge_tracker)
             except RateLimitError:
