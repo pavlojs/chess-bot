@@ -451,7 +451,7 @@ Syzygy tablebases provide perfect play in endgames with up to 7 pieces. To use t
 
 1. Download tablebases from https://syzygy-tables.info/downloads/
 2. Extract files to `./syzygy/` directory in the project root
-3. Ensure `SyzygyPath` is set in `config.py` (already configured as `"./syzygy"`)
+3. The bot **auto-detects** tablebases — if `./syzygy/` contains `.rtbw`/`.rtbz` files, `SyzygyPath` is configured automatically. Use `SF_SYZYGY_PATH` env var for a custom path.
 4. Restart the bot to apply changes
 
 Note: Tablebases are large; start with 3-5 piece files (~10 GB).
