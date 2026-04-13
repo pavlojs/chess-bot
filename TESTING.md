@@ -247,7 +247,27 @@ Current test coverage includes:
 - ✅ Timer does NOT start when bot is white (bot moves first)
 - ✅ Timer does NOT start when moves already exist on the board
 
-**Total: 175 tests, 100% pass rate**
+### Syzygy Path Config Tests (4 tests)
+- ✅ SyzygyPath added to UCI_OPTIONS when tablebase files (.rtbw/.rtbz) exist
+- ✅ SyzygyPath NOT set when syzygy directory doesn't exist
+- ✅ SyzygyPath NOT set when directory exists but contains no tablebase files
+- ✅ SF_SYZYGY_PATH environment variable overrides default ./syzygy path
+
+### Time Category Classification Tests (5 tests)
+- ✅ 15+10 correctly classified as rapid (total=1300 < 1500)
+- ✅ 20+10 correctly classified as classical (total=1600 ≥ 1500)
+- ✅ 30+0 correctly classified as classical (total=1800 ≥ 1500)
+- ✅ Unlimited (0+0) returns None
+- ✅ Correspondence (very large limits) returns None
+
+### First Move Clock Cap Tests (5 tests)
+- ✅ Black's first move detected (move_stack has 1 entry after opponent plays)
+- ✅ White's first move detected (empty move_stack)
+- ✅ White's second move NOT capped (move_stack has 2 entries)
+- ✅ Black's second move NOT capped (move_stack has 3 entries)
+- ✅ btime correctly capped to 15s when bot is black on first move
+
+**Total: 189 tests, 100% pass rate**
 
 ### Network Error Handling & Retry Logic
 The bot now includes robust error handling for network issues:
@@ -332,7 +352,10 @@ class TestWatchdogAbortTimeout(unittest.TestCase)           #  3 tests
 class TestMaxConcurrentGamesConfig(unittest.TestCase)       #  4 tests
 class TestStreamWithWatchdogAbort(unittest.TestCase)        #  2 tests
 class TestVariantRejection(unittest.TestCase)                #  6 tests
-# Total: 175 tests
+class TestSyzygyPathConfig(unittest.TestCase)                #  4 tests
+class TestTimeCategoryClassification(unittest.TestCase)      #  5 tests
+class TestFirstMoveClockCap(unittest.TestCase)               #  5 tests
+# Total: 189 tests
 ```
 
 ## Mocking
@@ -365,4 +388,4 @@ Also covers all new classes added in v2.5.0:
 
 ## Performance
 
-All tests complete in under 3 seconds (~2.2 s on typical hardware).
+All tests complete in under 5 seconds (~4.2 s on typical hardware).
