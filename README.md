@@ -270,7 +270,7 @@ CHALLENGE_TIME_CONTROLS = [
     {"limit": 180, "increment": 0},   # 3+0 blitz
     {"limit": 300, "increment": 3},   # 5+3 blitz
     {"limit": 600, "increment": 5},   # 10+5 rapid
-    {"limit": 900, "increment": 10},  # 15+10 classical
+    {"limit": 900, "increment": 10},  # 15+10 rapid
     {"limit": 1800, "increment": 0},  # 30+0 classical
 ]
 ```
