@@ -64,7 +64,7 @@ The bot is configured to use Syzygy tablebases if available. Follow these steps 
 3. Play a game and reach an endgame with few pieces; the bot should play perfectly.
 
 ### Troubleshooting
-- **Files Not Found**: Ensure the path in `config.py` is correct and files are in the right directory. The bot runs safely without tablebases.
+- **Files Not Found**: Ensure the tablebase files are in `./syzygy/` or set `SF_SYZYGY_PATH` to the correct directory. The bot runs safely without tablebases.
 - **Slow Loading**: Tablebases load at startup; large sets may take time.
 - **Incomplete Coverage**: If a position isn't in the tables, Stockfish uses normal evaluation.
 - **Errors**: Check Stockfish logs for issues; ensure files are not corrupted.
