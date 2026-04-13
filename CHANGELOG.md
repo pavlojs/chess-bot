@@ -6,6 +6,7 @@ All notable changes to Axiom Chess Bot are documented in this file.
 
 ### Fixed
 
+- **First-move clock cap not applied for black (game EGoLgicZ):** The condition `board.fullmove_number <= 1 and len(board.move_stack) == 0` was only true for white on an empty board. When playing as black, `len(board.move_stack) == 1` after the opponent's first move, so the 15-second cap never applied. Stockfish allocated 48 seconds for move 1, Lichess aborted after ~31 seconds. Fixed by checking `len(board.move_stack) == 1` for black's first move.
 - **SyzygyPath not configured despite docs claiming it was:** Both `README.md` and `syzygy/README.md` stated that `SyzygyPath` was "already configured" in `config.py`'s `UCI_OPTIONS`, but it was never actually set. Added auto-detection: if `./syzygy/` (or `SF_SYZYGY_PATH` env var) contains `.rtbw`/`.rtbz` tablebase files, `SyzygyPath` is automatically added to Stockfish's UCI options. Updated both docs to reflect the new auto-detection behavior.
 - **Time control comment wrong for 15+10:** Config comment labeled `{"limit": 900, "increment": 10}` as "classical", but `determine_time_category()` classifies it as "rapid" (total = 900 + 10×40 = 1300 < 1500).
 - **Misleading "No active games" log in challenge loop:** Log message said "No active games — looking for a bot to challenge..." even when games were active (just below the concurrent limit).
@@ -17,7 +18,7 @@ All notable changes to Axiom Chess Bot are documented in this file.
 
 ### Added
 
-- **9 new tests (184 total):** `TestSyzygyPathConfig` (4 tests — auto-detection, no-dir, empty-dir, env var), `TestTimeCategoryClassification` (5 tests — rapid/classical boundary, unlimited, correspondence).
+- **14 new tests (189 total):** `TestFirstMoveClockCap` (5 tests — black first move, white first move, second move not capped, btime cap applied), `TestSyzygyPathConfig` (4 tests), `TestTimeCategoryClassification` (5 tests).
 
 ## [2.7.0] - 2026-04-13
 
