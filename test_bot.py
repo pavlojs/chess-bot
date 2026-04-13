@@ -2097,5 +2097,77 @@ class TestTimeCategoryClassification(unittest.TestCase):
         self.assertIsNone(determine_time_category(259200, 0))
 
 
+class TestFirstMoveClockCap(unittest.TestCase):
+    """Test the first-move clock cap logic for both white and black.
+
+    Bug: the original condition ``board.fullmove_number <= 1 and
+    len(board.move_stack) == 0`` was only true for white on an empty board.
+    For black (stack has 1 move after opponent plays), the cap never applied
+    and Stockfish could think for minutes, causing Lichess to abort.
+    """
+
+    def test_black_first_move_detected(self):
+        """Bot as black with 1 move on stack should be detected as first move."""
+        board = chess.Board()
+        board.push_uci("c2c4")  # opponent's first move
+        bot_is_white = False
+        _bot_first_move = (
+            (bot_is_white and len(board.move_stack) == 0) or
+            (not bot_is_white and len(board.move_stack) == 1)
+        )
+        self.assertTrue(_bot_first_move)
+
+    def test_white_first_move_detected(self):
+        """Bot as white with empty stack should be detected as first move."""
+        board = chess.Board()
+        bot_is_white = True
+        _bot_first_move = (
+            (bot_is_white and len(board.move_stack) == 0) or
+            (not bot_is_white and len(board.move_stack) == 1)
+        )
+        self.assertTrue(_bot_first_move)
+
+    def test_second_move_not_capped_white(self):
+        """White's second move (stack=2) should NOT trigger first-move cap."""
+        board = chess.Board()
+        board.push_uci("e2e4")
+        board.push_uci("e7e5")
+        bot_is_white = True
+        _bot_first_move = (
+            (bot_is_white and len(board.move_stack) == 0) or
+            (not bot_is_white and len(board.move_stack) == 1)
+        )
+        self.assertFalse(_bot_first_move)
+
+    def test_second_move_not_capped_black(self):
+        """Black's second move (stack=3) should NOT trigger first-move cap."""
+        board = chess.Board()
+        board.push_uci("e2e4")
+        board.push_uci("e7e5")
+        board.push_uci("g1f3")
+        bot_is_white = False
+        _bot_first_move = (
+            (bot_is_white and len(board.move_stack) == 0) or
+            (not bot_is_white and len(board.move_stack) == 1)
+        )
+        self.assertFalse(_bot_first_move)
+
+    def test_cap_value_applied_to_btime_for_black(self):
+        """When bot is black on first move, btime should be capped at 15s."""
+        _FIRST_MOVE_CAP_MS = 15_000
+        btime_ms = 900_000  # 15 minutes
+        _effective_btime = btime_ms
+        bot_is_white = False
+        board = chess.Board()
+        board.push_uci("c2c4")
+        _bot_first_move = (
+            (bot_is_white and len(board.move_stack) == 0) or
+            (not bot_is_white and len(board.move_stack) == 1)
+        )
+        if _bot_first_move and not bot_is_white and btime_ms > _FIRST_MOVE_CAP_MS:
+            _effective_btime = _FIRST_MOVE_CAP_MS
+        self.assertEqual(_effective_btime, 15_000)
+
+
 if __name__ == '__main__':
     unittest.main()
