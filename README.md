@@ -502,6 +502,16 @@ If you prefer to update manually:
 
 Note: Ensure the binary is executable and compatible with your system.
 
+## Development
+
+`dev` is the default branch and where work lands; `main` is the released line
+and only moves through the **Promote dev to main** workflow, which refuses to
+run unless `dev`'s CI is green. Container images are built from `main` only,
+so `ghcr.io/pavlojs/axiom-chess-bot:latest` never points at unpromoted code.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full branch model, commit style
+and local setup, and [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
+
 ## Credits
 
 This bot is powered by [Stockfish](https://stockfishchess.org/), the strongest open-source chess engine in the world.
