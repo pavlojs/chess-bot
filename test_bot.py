@@ -469,7 +469,7 @@ class TestLogging(unittest.TestCase):
         
         # Verify logger exists and has handlers
         self.assertIsNotNone(logger)
-        self.assertTrue(len(logger.handlers) > 0)
+        self.assertGreater(len(logger.handlers), 0)
 
 
 class TestChallengeTracker(unittest.TestCase):
@@ -1203,24 +1203,24 @@ class TestPredictionRecoverThreshold(unittest.TestCase):
         eval_for_bot = pred_cp   # direct, no negation
         self.assertEqual(eval_for_bot, -915)
         # must trigger recovery
-        self.assertTrue(eval_for_bot <= -400)
+        self.assertLessEqual(eval_for_bot, -400)
 
     def test_recovery_triggered_when_below_threshold(self):
         """Recovery path taken when eval is worse than -threshold."""
         threshold = 400
         eval_for_bot = -450  # worse than -400
-        self.assertTrue(eval_for_bot <= -threshold)
+        self.assertLessEqual(eval_for_bot, -threshold)
 
     def test_recovery_not_triggered_near_threshold(self):
         """Recovery not taken when eval is just within threshold."""
         threshold = 400
         eval_for_bot = -399
-        self.assertFalse(eval_for_bot <= -threshold)
+        self.assertGreater(eval_for_bot, -threshold)
 
     def test_recovery_not_triggered_when_winning(self):
         threshold = 400
         eval_for_bot = 200
-        self.assertFalse(eval_for_bot <= -threshold)
+        self.assertGreater(eval_for_bot, -threshold)
 
     def test_recovery_uses_full_power_not_limited_engine(self):
         """Recovery uses ELO boost when below FULL_STRENGTH_THRESHOLD (v2.4.2).
