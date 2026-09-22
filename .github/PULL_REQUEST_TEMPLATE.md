@@ -1,3 +1,8 @@
+<!--
+PRs are for issue-driven work and outside contributions. The maintainer's
+routine work is pushed straight to `dev` — see CONTRIBUTING.md.
+-->
+
 ## What this changes
 
 ## Related issue
@@ -16,4 +21,3 @@ Closes #
 - [ ] One topic per commit, Conventional Commits subject lines
 - [ ] No token, `.env` or other secret in the diff
 - [ ] Docs updated if behaviour or configuration changed
-- [ ] `breaking` label applied if this breaks existing configuration
