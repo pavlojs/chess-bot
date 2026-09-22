@@ -72,7 +72,9 @@ fi
 
 echo "Found binary: $EXTRACTED_BINARY"
 echo "Installing to $INSTALL_PATH"
-sudo install -m 755 "$EXTRACTED_BINARY" "$INSTALL_PATH"
+# Root-owned and 755: every user can run the engine, only root can replace
+# it. The tarball carries the uploader's uid, so ownership is set here.
+sudo install -o root -g root -m 755 "$EXTRACTED_BINARY" "$INSTALL_PATH"
 
 echo ""
 echo "✓ Stockfish installed successfully!"

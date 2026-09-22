@@ -46,8 +46,7 @@ RUN set -eux; \
     tar -xzf /tmp/stockfish/stockfish.tar.gz -C /tmp/stockfish; \
     bin="$(find /tmp/stockfish -type f -name 'stockfish-linux-x86-64-universal' | head -1)"; \
     test -n "$bin"; \
-    mv "$bin" /usr/local/bin/stockfish; \
-    chmod 755 /usr/local/bin/stockfish; \
+    install -o root -g root -m 755 "$bin" /usr/local/bin/stockfish; \
     rm -rf /tmp/stockfish
 
 # Fail the build if the engine cannot run, and record which code path it picked.
