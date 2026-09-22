@@ -1,11 +1,11 @@
 name: Tests
 
 on:
-  push:
-    branches: [main, dev]
   pull_request:
     branches: [main, dev]
   workflow_dispatch:
+  # Called by ci.yml on every push, so a push runs the suite exactly once.
+  workflow_call:
 
 # A newer push to the same branch supersedes an in-flight run.
 concurrency:
