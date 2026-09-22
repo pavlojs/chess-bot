@@ -2162,8 +2162,6 @@ class TestSyzygyPathConfig(unittest.TestCase):
         with patch.dict(os.environ, {"SF_SYZYGY_PATH": "/fake/syzygy"}, clear=False), \
              patch("config.os.path.isdir", return_value=True), \
              patch("config.os.listdir", return_value=["KQvK.rtbw", "KQvK.rtbz"]):
-            # Re-execute the syzygy detection block
-            _syzygy_path = os.environ.get("SF_SYZYGY_PATH", "./syzygy")
             # Simulate detection logic
             self.assertTrue(os.path.isdir.__wrapped__("/fake/syzygy") if hasattr(os.path.isdir, '__wrapped__') else True)
             # Direct logic test: if dir exists and has .rtbw files, SyzygyPath should be set

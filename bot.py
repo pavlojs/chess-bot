@@ -592,8 +592,8 @@ def _get_full_power_move(stockfish: Stockfish, game_id: str,
                     "UCI_LimitStrength": True,
                     "UCI_Elo": restore_elo,
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not restore UCI_Elo to {restore_elo}: {e}")
 
 
 def get_move_prediction(stockfish: Stockfish, game_id: str,
@@ -1803,10 +1803,8 @@ def main():
                         
                         # Check if this is an incoming challenge (destUser is us)
                         dest_user = challenge.get("destUser", {})
-                        challenger = challenge.get("challenger", {})
-                        
+
                         dest_username = dest_user.get("name", dest_user.get("id", "")).lower()
-                        challenger_username = challenger.get("name", challenger.get("id", "")).lower()
                         
                         # Only process incoming challenges (where we are the destination)
                         if dest_username == bot_username.lower():
