@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Scan repository
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -74,7 +74,7 @@ jobs:
         run: docker build -t chess-bot:ci .
 
       - name: Scan image
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: chess-bot:ci
