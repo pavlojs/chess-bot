@@ -1,0 +1,67 @@
+name: Promote dev to main
+
+# The repo has no pull requests: work is pushed straight to dev. This workflow
+# is therefore the only way main moves, and it is what enforces "green on dev
+# before it reaches main" — it refuses to run if dev's latest CI is not passing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional release tag to cut on main (e.g. v2.9.0). Leave empty to promote without tagging.'
+        required: false
+        type: string
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify dev CI is green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DEV_SHA=$(git rev-parse origin/dev)
+          echo "dev is at $DEV_SHA"
+
+          CONCLUSION=$(gh run list --workflow=ci.yml --branch=dev \
+            --json headSha,conclusion,status \
+            --jq "[.[] | select(.headSha == \"$DEV_SHA\")] | first | .conclusion // \"missing\"")
+
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::CI for dev@$DEV_SHA is '$CONCLUSION', not 'success'. Refusing to promote."
+            exit 1
+          fi
+          echo "CI is green for dev@$DEV_SHA."
+
+      - name: Merge dev into main
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git checkout main
+          # A merge commit keeps dev's SHAs intact on main. Squash or rebase
+          # would rewrite them and permanently diverge the two branches.
+          git merge --no-ff origin/dev -m "release: sync dev into main ($(date -u +%Y-%m-%d))"
+          git push origin main
+
+      - name: Tag release
+        if: inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git tag -a "${{ inputs.tag }}" -m "${{ inputs.tag }}"
+          git push origin "${{ inputs.tag }}"
+          gh release create "${{ inputs.tag }}" --target main --generate-notes --title "${{ inputs.tag }}"
