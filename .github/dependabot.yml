@@ -1,0 +1,66 @@
+# Dependabot keeps Python packages, GitHub Actions and the container base image
+# current. Everything targets `dev`; nothing ever opens against `main`, which
+# only moves through the promote workflow.
+#
+# `cooldown: default-days: 7` is the enforcement point for the 7-day release-age
+# policy: a version that has not been public for a week is never proposed, so it
+# cannot be merged early. Security updates are exempt and open immediately.
+#
+# No auto-merge workflow is configured. Auto-merge is only safe where the target
+# branch has required status checks, and `dev` deliberately has none so that
+# work can be pushed to it directly.
+
+version: 2
+
+updates:
+  - package-ecosystem: pip
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: UTC
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    groups:
+      python-non-breaking:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: UTC
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: docker
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: UTC
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "build"
+    cooldown:
+      default-days: 7
