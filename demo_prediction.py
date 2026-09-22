@@ -7,7 +7,6 @@ import os
 os.environ.setdefault('TOKEN', 'test_token')
 
 from bot import get_move_prediction, init_stockfish
-import chess
 
 def test_prediction():
     """Test move prediction on a known position."""

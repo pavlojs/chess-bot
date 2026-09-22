@@ -11,7 +11,6 @@ import tempfile
 import shutil
 import logging
 import json
-from pathlib import Path
 from urllib.request import urlopen, Request
 from urllib.parse import urlparse
 from typing import Optional
@@ -269,7 +268,7 @@ if __name__ == "__main__":
         print(f"Stockfish ready at: {path}")
         
         # Quick test
-        result = subprocess.run(
+        subprocess.run(
             [path, "bench", "1"],
             capture_output=True,
             text=True,

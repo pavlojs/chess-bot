@@ -502,7 +502,6 @@ class TestChallengeTracker(unittest.TestCase):
     def test_hourly_reset(self):
         """Test that challenges older than 1 hour are removed."""
         from bot import ChallengeTracker
-        from datetime import datetime, timedelta
         
         tracker = ChallengeTracker(max_per_hour=3)
         
