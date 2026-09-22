@@ -6,33 +6,29 @@ FROM ubuntu:24.04
 # =========================
 # System dependencies
 # =========================
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
-    python3-pip \
+    python3-venv \
+    ca-certificates \
     curl \
     wget \
     tar \
-    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# =========================
-# Workdir (UWAGA: noexec OK)
-# =========================
 WORKDIR /app
 
 # =========================
-# Python deps
+# Python deps (in a venv, so the system interpreter stays untouched)
 # =========================
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+RUN python3 -m venv "$VIRTUAL_ENV"
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # =========================
-# App code
-# =========================
-COPY . .
-
-# =========================
-# Stockfish install
+# Stockfish install (root-owned, read-only to the bot at runtime)
 # =========================
 RUN mkdir -p /tmp/stockfish && \
     curl -s https://api.github.com/repos/official-stockfish/Stockfish/releases/latest \
@@ -44,10 +40,27 @@ RUN mkdir -p /tmp/stockfish && \
     chmod 755 /usr/local/bin/stockfish && \
     rm -rf /tmp/stockfish
 
-# =========================
-# Sanity check
-# =========================
 RUN /usr/local/bin/stockfish bench 1 || true
+
+# =========================
+# App code
+# =========================
+COPY . .
+
+# =========================
+# Unprivileged runtime user
+# =========================
+# The engine is already installed and /usr/local/bin is not writable here, so
+# the bot points straight at the binary and skips the self-updater. That keeps
+# the container from fetching and executing a new binary at runtime.
+ENV STOCKFISH_PATH=/usr/local/bin/stockfish
+ENV AUTO_UPDATE_STOCKFISH=false
+
+RUN useradd --system --create-home --uid 10001 axiom && \
+    mkdir -p /app/logs && \
+    chown -R axiom:axiom /app
+
+USER axiom
 
 # =========================
 # Health check
