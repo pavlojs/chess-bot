@@ -3,12 +3,17 @@ name: Dependabot auto-merge
 # `dev` deliberately has no required status checks — they would block the
 # direct pushes this repo relies on. That also means GitHub's native auto-merge
 # would merge a Dependabot PR the moment it was opened, without reading CI.
-# So the gate lives here: this runs after the test suite finishes, re-reads
-# every check on the PR head, and merges only if all of them passed.
+# So the gate lives here: this re-reads every check on the PR head and merges
+# only when all of them have finished and passed.
+#
+# It listens to every workflow that runs on a PR, because whichever one
+# finishes last is the one that can see a complete set of results. The earlier
+# ones find work still running and stop without merging — which is a normal
+# outcome, not a failure, so those runs end green.
 
 on:
   workflow_run:
-    workflows: [Tests]
+    workflows: [Tests, Security, CodeQL]
     types: [completed]
 
 permissions:
@@ -18,80 +23,76 @@ permissions:
 jobs:
   auto-merge:
     if: >
-      github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.actor.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
       - name: Resolve the pull request
         id: pr
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           NUM=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
             --jq '[.[] | select(.state=="open" and .base.ref=="dev")] | first | .number // empty')
           if [ -z "$NUM" ]; then
-            echo "No open PR against dev for $HEAD_SHA; nothing to merge."
+            echo "No open PR against dev for $HEAD_SHA."
             exit 0
           fi
           AUTHOR=$(gh pr view "$NUM" --repo "$REPO" --json author --jq .author.login)
           if [ "$AUTHOR" != "app/dependabot" ] && [ "$AUTHOR" != "dependabot" ]; then
-            echo "PR #$NUM is authored by $AUTHOR, not Dependabot. Skipping."
+            echo "PR #$NUM is authored by $AUTHOR, not Dependabot."
             exit 0
           fi
           echo "number=$NUM" >> "$GITHUB_OUTPUT"
 
-      - name: Refuse major version bumps
+      - name: Classify the bump
+        id: bump
         if: steps.pr.outputs.number
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           TITLE=$(gh pr view "${{ steps.pr.outputs.number }}" --repo "$REPO" --json title --jq .title)
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
           # Grouped PRs are configured for minor+patch only, so they carry no
           # "from X to Y" and are safe by construction.
-          if [[ "$TITLE" =~ from\ ([0-9]+)[^\ ]*\ to\ ([0-9]+) ]]; then
-            FROM="${BASH_REMATCH[1]}"; TO="${BASH_REMATCH[2]}"
-            if [ "$FROM" != "$TO" ]; then
-              echo "::notice::$TITLE is a major bump ($FROM -> $TO). Leaving it for review."
-              exit 1
-            fi
+          if [[ "$TITLE" =~ from\ ([0-9]+)[^\ ]*\ to\ ([0-9]+) ]] \
+             && [ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ]; then
+            echo "major=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TITLE is a major bump. Leaving it for review."
+          else
+            echo "major=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Require every check on the head to have passed
-        if: steps.pr.outputs.number
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      - name: Read every check on the head commit
+        id: checks
+        if: steps.pr.outputs.number && steps.bump.outputs.major == 'false'
         run: |
           set -euo pipefail
-          # Anything still running means this is not the last workflow to finish;
-          # the run that finishes last will do the merge.
-          PENDING=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
-            --jq '[.check_runs[] | select(.name != "auto-merge" and .status != "completed")] | length')
+          RUNS=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
+            --jq '[.check_runs[] | select(.name != "auto-merge")]')
+
+          PENDING=$(jq -r '[.[] | select(.status != "completed")] | length' <<<"$RUNS")
           if [ "$PENDING" -gt 0 ]; then
-            echo "$PENDING check(s) still running; a later run will merge."
-            exit 1
-          fi
-          BAD=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
-            --jq '[.check_runs[] | select(.name != "auto-merge" and .conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral") | .name] | join(", ")')
-          if [ -n "$BAD" ]; then
-            echo "::error::Not merging — these checks did not pass: $BAD"
-            exit 1
+            echo "$PENDING check(s) still running; the workflow that finishes last will merge."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
+          BAD=$(jq -r '[.[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral") | .name] | join(", ")' <<<"$RUNS")
+          if [ -n "$BAD" ]; then
+            echo "::warning::Not merging — these checks did not pass: $BAD"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
       - name: Merge
-        if: steps.pr.outputs.number
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
+        if: steps.checks.outputs.ready == 'true'
         run: |
           set -euo pipefail
           N="${{ steps.pr.outputs.number }}"
-          TITLE=$(gh pr view "$N" --repo "$REPO" --json title --jq .title)
-          gh pr merge "$N" --repo "$REPO" --squash --subject "$TITLE (#$N)" --body "" --delete-branch
+          gh pr merge "$N" --repo "$REPO" --squash \
+            --subject "${{ steps.bump.outputs.title }} (#$N)" --body "" --delete-branch
