@@ -49,6 +49,13 @@ if [ -z "$DOWNLOAD_URL" ]; then
     exit 1
 fi
 
+# The URL comes from an API response and ends up executable, so confirm the
+# host before fetching it.
+case "$DOWNLOAD_URL" in
+    https://github.com/official-stockfish/Stockfish/*) ;;
+    *) echo "Refusing to download from unexpected URL: $DOWNLOAD_URL" >&2; exit 1 ;;
+esac
+
 echo "Downloading from: $DOWNLOAD_URL"
 
 cd "$TMP_DIR"

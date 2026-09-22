@@ -13,12 +13,18 @@ import logging
 import json
 from pathlib import Path
 from urllib.request import urlopen, Request
+from urllib.parse import urlparse
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 INSTALL_PATH = "/usr/local/bin/stockfish"
 GITHUB_API = "https://api.github.com/repos/official-stockfish/Stockfish/releases/latest"
+
+# Releases are only ever fetched from the project's own GitHub download hosts.
+# The URL comes out of an API response, so it is checked before anything is
+# downloaded and made executable.
+ALLOWED_DOWNLOAD_HOSTS = ("github.com", "objects.githubusercontent.com")
 
 # Archive extension used by the release assets.
 ARCHIVE_SUFFIX = ".tar.gz"
@@ -106,6 +112,14 @@ def get_latest_release_info() -> dict:
         raise
 
 
+def _check_download_url(url: str) -> str:
+    """Reject a download URL that does not point at a GitHub release host."""
+    host = urlparse(url).hostname or ""
+    if host not in ALLOWED_DOWNLOAD_HOSTS:
+        raise RuntimeError(f"Refusing to download Stockfish from unexpected host: {host}")
+    return url
+
+
 def get_download_url(binary_name: str) -> str:
     """Get download URL for the specified binary from latest release."""
     release_info = get_latest_release_info()
@@ -113,7 +127,7 @@ def get_download_url(binary_name: str) -> str:
 
     for asset in release_info.get("assets", []):
         if asset["name"] == archive_name:
-            return asset["browser_download_url"]
+            return _check_download_url(asset["browser_download_url"])
 
     raise RuntimeError(
         f"Binary {archive_name} not found in latest release. "
@@ -125,6 +139,8 @@ def download_and_install(url: str, binary_name: str) -> None:
     """Download and install Stockfish."""
     logger.info(f"Downloading Stockfish from {url}")
     
+    _check_download_url(url)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tar_path = os.path.join(tmpdir, "stockfish" + ARCHIVE_SUFFIX)
 
