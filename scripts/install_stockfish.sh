@@ -78,3 +78,6 @@ echo ""
 echo "✓ Stockfish installed successfully!"
 echo "Location: $INSTALL_PATH"
 "$INSTALL_PATH" --version 2>&1 | head -1
+# Shows which code path this CPU gets. A VM with a generic CPU model hides
+# AVX2, so a slow build is visible here rather than only in search speed.
+"$INSTALL_PATH" compiler 2>&1 | grep -i "Compilation settings" || true

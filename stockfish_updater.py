@@ -58,6 +58,27 @@ def get_binary_name() -> str:
         raise RuntimeError(f"Unsupported OS: {system}")
 
 
+def log_build_info(path: str = INSTALL_PATH) -> Optional[str]:
+    """Log which code path the installed binary compiled for.
+
+    A universal binary only uses what the CPU exposes, and a VM with a generic
+    CPU model hides AVX2. Recording the line makes a slow build obvious in the
+    logs instead of silently costing search speed.
+    """
+    try:
+        result = subprocess.run(
+            [path, "compiler"], capture_output=True, text=True, timeout=10
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("Compilation settings"):
+                settings = line.split(":", 1)[1].strip()
+                logger.info(f"Stockfish build: {settings}")
+                return settings
+    except Exception as e:
+        logger.debug(f"Could not read Stockfish build info: {e}")
+    return None
+
+
 def get_installed_version() -> Optional[str]:
     """Get currently installed Stockfish version."""
     if not os.path.isfile(INSTALL_PATH):
@@ -235,6 +256,8 @@ def ensure_stockfish_installed(auto_update: bool = True) -> str:
     # Verify installation
     if not os.path.isfile(INSTALL_PATH):
         raise RuntimeError("Stockfish installation failed")
+
+    log_build_info(INSTALL_PATH)
 
     return INSTALL_PATH
 
