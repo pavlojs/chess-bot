@@ -71,8 +71,8 @@ See [TESTING.md](TESTING.md) for detailed testing guide.
 
 ### Running Automatically on System Startup (Linux)
 
-1. Run `./setup_venv.sh` to set up the virtual environment.
-2. Copy `axiom-bot.service` to `/etc/systemd/system/` (adjust paths in the file for your user and directory).
+1. Run `./scripts/setup_venv.sh` to set up the virtual environment.
+2. Copy `scripts/axiom-bot.service` to `/etc/systemd/system/` (adjust `User`, `Group`, `WorkingDirectory` and `ReadWritePaths` for your user and directory).
 3. Reload systemd: `sudo systemctl daemon-reload`
 4. Enable the service: `sudo systemctl enable axiom-bot`
 5. Start the service: `sudo systemctl start axiom-bot`

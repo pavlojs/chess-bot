@@ -1,0 +1,54 @@
+# Axiom Chess Bot — systemd unit
+#
+# Install:
+#   sudo cp scripts/axiom-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now axiom-bot
+#
+# Adjust User, Group and WorkingDirectory to match your setup.
+
+[Unit]
+Description=Axiom Chess Bot
+Documentation=https://github.com/pavlojs/chess-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pavlojs
+Group=pavlojs
+WorkingDirectory=/home/pavlojs/git/chess-bot
+ExecStart=/home/pavlojs/git/chess-bot/scripts/run_bot.sh
+
+# The token lives here, not in the unit file — systemd reads it without
+# exposing it in `systemctl show` or the process environment of other users.
+EnvironmentFile=/home/pavlojs/git/chess-bot/.env
+
+Restart=on-failure
+RestartSec=10s
+# Stop sending SIGTERM-then-wait; the bot drains active games on SIGINT.
+KillSignal=SIGINT
+TimeoutStopSec=30s
+
+# ── Hardening ────────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# ProtectSystem=strict makes everything read-only; the bot only needs its own
+# log directory to be writable.
+ReadWritePaths=/home/pavlojs/git/chess-bot/logs
+
+[Install]
+WantedBy=multi-user.target
