@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+
+contact_links:
+  - name: "\U0001F6E1️ Security vulnerability"
+    url: https://github.com/pavlojs/chess-bot/security/advisories/new
+    about: >
+      Report a security problem privately. Do NOT open a public issue for
+      security bugs — the bot holds a Lichess API token.

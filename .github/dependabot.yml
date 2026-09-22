@@ -1,0 +1,75 @@
+# Dependabot keeps Python packages, GitHub Actions and the container base image
+# current. Everything targets `dev`; nothing ever opens against `main`, which
+# only moves through the promote workflow.
+#
+# `cooldown: default-days: 7` is the enforcement point for the 7-day release-age
+# policy: a version that has not been public for a week is never proposed, so it
+# cannot be merged early. Security updates are exempt and open immediately.
+#
+# Auto-merge is handled by dependabot-auto-merge.yml, not by GitHub's native
+# auto-merge. `dev` deliberately has no required status checks — they would
+# block direct pushes — so native auto-merge would merge without reading CI.
+# The workflow re-reads every check on the PR head instead, and leaves major
+# version bumps for review.
+
+version: 2
+
+updates:
+  - package-ecosystem: pip
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: UTC
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    groups:
+      python-non-breaking:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: UTC
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
+
+  # The base image tracks `ubuntu:latest`, which follows the latest LTS, so
+  # there is normally no version for Dependabot to bump. Kept configured so a
+  # future pinned tag or a second Dockerfile is still covered. Interim Ubuntu
+  # releases are ignored — they carry a 9-month support window.
+  - package-ecosystem: docker
+    directory: /
+    target-branch: dev
+    ignore:
+      - dependency-name: ubuntu
+        versions: ["25.*", "27.*", "29.*"]
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: UTC
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "build"
+    cooldown:
+      default-days: 7

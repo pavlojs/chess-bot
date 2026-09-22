@@ -1,0 +1,62 @@
+name: Promote dev to main
+
+# The repo has no pull requests: work is pushed straight to dev. This workflow
+# is therefore the only way main moves, and it is what enforces "green on dev
+# before it reaches main" — it refuses to run if dev's latest CI is not passing.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify dev CI is green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DEV_SHA=$(git rev-parse origin/dev)
+          echo "dev is at $DEV_SHA"
+
+          CONCLUSION=$(gh run list --workflow=ci.yml --branch=dev \
+            --json headSha,conclusion,status \
+            --jq "[.[] | select(.headSha == \"$DEV_SHA\")] | first | .conclusion // \"missing\"")
+
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::CI for dev@$DEV_SHA is '$CONCLUSION', not 'success'. Refusing to promote."
+            exit 1
+          fi
+          echo "CI is green for dev@$DEV_SHA."
+
+      - name: Merge dev into main
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git checkout main
+          # A merge commit keeps dev's SHAs intact on main. Squash or rebase
+          # would rewrite them and permanently diverge the two branches.
+          git merge --no-ff origin/dev -m "chore: sync dev into main ($(date -u +%Y-%m-%d))"
+          git push origin main
+
+      - name: Trigger image build on main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # A push made with GITHUB_TOKEN does not trigger other workflows, so CI
+        # on main has to be dispatched by hand. It reruns the suite against the
+        # merge commit and only then builds and publishes the image.
+        run: gh workflow run ci.yml --ref main
+
+

@@ -508,8 +508,8 @@ def _get_last_info_line(stockfish: Stockfish, func_ref) -> str:
         lines = stockfish.raw_stockfish_output(func_ref)
         if lines and len(lines) >= 2:
             return lines[-2]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Could not read raw Stockfish output: {e}")
     return ""
 
 
@@ -592,8 +592,8 @@ def _get_full_power_move(stockfish: Stockfish, game_id: str,
                     "UCI_LimitStrength": True,
                     "UCI_Elo": restore_elo,
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not restore UCI_Elo to {restore_elo}: {e}")
 
 
 def get_move_prediction(stockfish: Stockfish, game_id: str,
@@ -1091,8 +1091,8 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                 if hasattr(stockfish, "_stockfish") and stockfish._stockfish:
                                     stockfish._stockfish.kill()
                                     stockfish._stockfish.wait()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug(f"Could not kill Stockfish subprocess: {e}")
 
                         stockfish = init_stockfish(opponent_rating)
                         last_opponent_draw = False  # Reset draw state on (re)connect
@@ -1233,8 +1233,8 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                             url = f"https://lichess.org/api/bot/game/{game_id}/draw/no"
                                             headers = {"Authorization": f"Bearer {TOKEN}"}
                                             requests.post(url, headers=headers, timeout=10)
-                                        except Exception:
-                                            pass
+                                        except Exception as e:
+                                            logger.debug(f"Draw decline failed for {game_id}: {e}")
 
                         last_opponent_draw = opponent_draw_now
 
@@ -1402,8 +1402,8 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                                         if _target_elo:
                                             try:
                                                 stockfish.update_engine_parameters({"UCI_LimitStrength": True, "UCI_Elo": _target_elo})
-                                            except Exception:
-                                                pass
+                                            except Exception as e:
+                                                logger.debug(f"Could not restore UCI_Elo to {_target_elo}: {e}")
                             else:
                                 move = predicted_move or stockfish.get_best_move_time(move_time)
 
@@ -1803,10 +1803,8 @@ def main():
                         
                         # Check if this is an incoming challenge (destUser is us)
                         dest_user = challenge.get("destUser", {})
-                        challenger = challenge.get("challenger", {})
-                        
+
                         dest_username = dest_user.get("name", dest_user.get("id", "")).lower()
-                        challenger_username = challenger.get("name", challenger.get("id", "")).lower()
                         
                         # Only process incoming challenges (where we are the destination)
                         if dest_username == bot_username.lower():
@@ -1875,8 +1873,8 @@ def main():
                                 except Exception:
                                     try:
                                         client.bots.resign_game(game_id)
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        logger.debug(f"Could not abort or resign {game_id}: {e}")
                                 continue
 
                         # Start game thread and register in active_games FIRST —

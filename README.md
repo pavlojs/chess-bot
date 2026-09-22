@@ -71,8 +71,8 @@ See [TESTING.md](TESTING.md) for detailed testing guide.
 
 ### Running Automatically on System Startup (Linux)
 
-1. Run `./setup_venv.sh` to set up the virtual environment.
-2. Copy `axiom-bot.service` to `/etc/systemd/system/` (adjust paths in the file for your user and directory).
+1. Run `./scripts/setup_venv.sh` to set up the virtual environment.
+2. Copy `scripts/axiom-bot.service` to `/etc/systemd/system/` (adjust `User`, `Group`, `WorkingDirectory` and `ReadWritePaths` for your user and directory).
 3. Reload systemd: `sudo systemctl daemon-reload`
 4. Enable the service: `sudo systemctl enable axiom-bot`
 5. Start the service: `sudo systemctl start axiom-bot`
@@ -501,6 +501,16 @@ If you prefer to update manually:
 4. Alternatively, update the `stockfish` Python package: `pip install --upgrade stockfish` (this may download a newer version automatically).
 
 Note: Ensure the binary is executable and compatible with your system.
+
+## Development
+
+`dev` is the default branch and where work lands; `main` is the released line
+and only moves through the **Promote dev to main** workflow, which refuses to
+run unless `dev`'s CI is green. Container images are built from `main` only,
+so `ghcr.io/pavlojs/axiom-chess-bot:latest` never points at unpromoted code.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full branch model, commit style
+and local setup, and [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
 ## Credits
 

@@ -469,7 +469,7 @@ class TestLogging(unittest.TestCase):
         
         # Verify logger exists and has handlers
         self.assertIsNotNone(logger)
-        self.assertTrue(len(logger.handlers) > 0)
+        self.assertGreater(len(logger.handlers), 0)
 
 
 class TestChallengeTracker(unittest.TestCase):
@@ -502,7 +502,6 @@ class TestChallengeTracker(unittest.TestCase):
     def test_hourly_reset(self):
         """Test that challenges older than 1 hour are removed."""
         from bot import ChallengeTracker
-        from datetime import datetime, timedelta
         
         tracker = ChallengeTracker(max_per_hour=3)
         
@@ -703,6 +702,132 @@ class TestStockfishUpdater(unittest.TestCase):
         except Exception as e:
             # Network errors are acceptable in tests
             self.skipTest(f"Network request failed: {e}")
+
+    def test_binary_name_is_a_universal_build(self):
+        """Stockfish 19+ only ships universal builds; the old per-microarch
+        assets (stockfish-ubuntu-x86-64) are the generic SSE2 build and no
+        longer exist in the release."""
+        from stockfish_updater import get_binary_name
+
+        binary_name = get_binary_name()
+
+        self.assertTrue(
+            binary_name.endswith("-universal"),
+            f"{binary_name} is not a universal build",
+        )
+        self.assertNotIn("ubuntu", binary_name)
+
+    def test_binary_name_per_platform(self):
+        """Each supported platform maps to its published universal asset."""
+        import stockfish_updater
+
+        cases = [
+            ("Linux", "x86_64", "stockfish-linux-x86-64-universal"),
+            ("Linux", "AMD64", "stockfish-linux-x86-64-universal"),
+            ("Linux", "aarch64", "stockfish-linux-arm64-universal"),
+            ("Linux", "riscv64", "stockfish-linux-riscv64-universal"),
+            ("Darwin", "x86_64", "stockfish-macos-universal"),
+            ("Darwin", "arm64", "stockfish-macos-universal"),
+        ]
+        for system, machine, expected in cases:
+            with self.subTest(system=system, machine=machine):
+                with patch("platform.system", return_value=system), \
+                     patch("platform.machine", return_value=machine):
+                    self.assertEqual(stockfish_updater.get_binary_name(), expected)
+
+    def test_binary_name_rejects_unknown_platform(self):
+        """An unsupported OS or architecture fails loudly."""
+        import stockfish_updater
+
+        with patch("platform.system", return_value="Linux"), \
+             patch("platform.machine", return_value="mips"):
+            with self.assertRaises(RuntimeError):
+                stockfish_updater.get_binary_name()
+
+        with patch("platform.system", return_value="Plan9"), \
+             patch("platform.machine", return_value="x86_64"):
+            with self.assertRaises(RuntimeError):
+                stockfish_updater.get_binary_name()
+
+    def test_download_url_matches_gzipped_asset(self):
+        """The asset lookup uses the .tar.gz name the release actually
+        publishes, not the old uncompressed .tar."""
+        import stockfish_updater
+
+        release = {
+            "tag_name": "sf_19",
+            "assets": [
+                {"name": "stockfish-linux-arm64-universal.tar.gz",
+                 "browser_download_url": "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/arm.tar.gz"},
+                {"name": "stockfish-linux-x86-64-universal.tar.gz",
+                 "browser_download_url": "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/x86.tar.gz"},
+            ],
+        }
+        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
+            url = stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+
+        self.assertTrue(url.endswith("x86.tar.gz"))
+
+    def test_download_url_reports_available_assets_when_missing(self):
+        """A missing asset names what the release does contain, so the failure
+        is diagnosable rather than a bare lookup error."""
+        import stockfish_updater
+
+        release = {"tag_name": "sf_19", "assets": [{"name": "stockfish-macos-universal.tar.gz",
+                                                    "browser_download_url": "https://github.com/x"}]}
+        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
+            with self.assertRaises(RuntimeError) as ctx:
+                stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+
+        self.assertIn("stockfish-macos-universal.tar.gz", str(ctx.exception))
+
+    def test_download_url_rejects_unexpected_host(self):
+        """The download URL comes out of an API response and is made
+        executable, so a non-GitHub host is refused."""
+        import stockfish_updater
+
+        release = {
+            "tag_name": "sf_19",
+            "assets": [{"name": "stockfish-linux-x86-64-universal.tar.gz",
+                        "browser_download_url": "https://evil.example.com/payload.tar.gz"}],
+        }
+        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
+            with self.assertRaises(RuntimeError) as ctx:
+                stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+
+        self.assertIn("unexpected host", str(ctx.exception))
+
+    def test_download_url_accepts_github_hosts(self):
+        """Both hosts GitHub serves release assets from are allowed."""
+        import stockfish_updater
+
+        for host in ("github.com", "objects.githubusercontent.com"):
+            with self.subTest(host=host):
+                url = f"https://{host}/official-stockfish/x.tar.gz"
+                self.assertEqual(stockfish_updater._check_download_url(url), url)
+
+    def test_log_build_info_reports_compilation_settings(self):
+        """The installed build's code path is logged, so a generic build on a
+        CPU that supports AVX2 is visible instead of silently costing speed."""
+        import stockfish_updater
+
+        completed = MagicMock()
+        completed.stdout = (
+            "Stockfish 19 by the Stockfish developers\n"
+            "Compilation settings       : 64bit AVX2 SSE41 SSSE3 SSE2 POPCNT\n"
+            "Compiler __VERSION__ macro : 15.2.0\n"
+        )
+        with patch("subprocess.run", return_value=completed):
+            settings = stockfish_updater.log_build_info("/usr/local/bin/stockfish")
+
+        self.assertIn("AVX2", settings)
+
+    def test_log_build_info_survives_a_missing_binary(self):
+        """Build logging is diagnostic only and never breaks startup."""
+        import stockfish_updater
+
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertIsNone(stockfish_updater.log_build_info("/nonexistent/stockfish"))
 
 
 class TestParseTimeToMilliseconds(unittest.TestCase):
@@ -1078,24 +1203,24 @@ class TestPredictionRecoverThreshold(unittest.TestCase):
         eval_for_bot = pred_cp   # direct, no negation
         self.assertEqual(eval_for_bot, -915)
         # must trigger recovery
-        self.assertTrue(eval_for_bot <= -400)
+        self.assertLessEqual(eval_for_bot, -400)
 
     def test_recovery_triggered_when_below_threshold(self):
         """Recovery path taken when eval is worse than -threshold."""
         threshold = 400
         eval_for_bot = -450  # worse than -400
-        self.assertTrue(eval_for_bot <= -threshold)
+        self.assertLessEqual(eval_for_bot, -threshold)
 
     def test_recovery_not_triggered_near_threshold(self):
         """Recovery not taken when eval is just within threshold."""
         threshold = 400
         eval_for_bot = -399
-        self.assertFalse(eval_for_bot <= -threshold)
+        self.assertGreater(eval_for_bot, -threshold)
 
     def test_recovery_not_triggered_when_winning(self):
         threshold = 400
         eval_for_bot = 200
-        self.assertFalse(eval_for_bot <= -threshold)
+        self.assertGreater(eval_for_bot, -threshold)
 
     def test_recovery_uses_full_power_not_limited_engine(self):
         """Recovery uses ELO boost when below FULL_STRENGTH_THRESHOLD (v2.4.2).
@@ -2037,8 +2162,6 @@ class TestSyzygyPathConfig(unittest.TestCase):
         with patch.dict(os.environ, {"SF_SYZYGY_PATH": "/fake/syzygy"}, clear=False), \
              patch("config.os.path.isdir", return_value=True), \
              patch("config.os.listdir", return_value=["KQvK.rtbw", "KQvK.rtbz"]):
-            # Re-execute the syzygy detection block
-            _syzygy_path = os.environ.get("SF_SYZYGY_PATH", "./syzygy")
             # Simulate detection logic
             self.assertTrue(os.path.isdir.__wrapped__("/fake/syzygy") if hasattr(os.path.isdir, '__wrapped__') else True)
             # Direct logic test: if dir exists and has .rtbw files, SyzygyPath should be set

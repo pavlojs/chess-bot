@@ -1,38 +1,64 @@
 name: Tests
 
 on:
-  push:
-    branches: [ main, develop ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, dev]
+  workflow_dispatch:
+  # Called by ci.yml on every push, so a push runs the suite exactly once.
+  workflow_call:
+
+# A newer push to the same branch supersedes an in-flight run.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
+    name: test (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ['3.10', '3.11']
+        # 3.14 is what the container's Ubuntu LTS ships, so it is the version
+        # the bot actually runs on. The older ones cover local installs.
+        python-version: ['3.11', '3.12', '3.13', '3.14']
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Run tests with pytest
-      run: |
-        pytest --cov=bot --cov=logging_config --cov-report=xml --cov-report=html
+      # Importing bot.py pulls in config.py, which resolves a Stockfish binary.
+      # Left to itself it downloads one from GitHub on every run, which makes
+      # the suite slow and dependent on the network. Use the packaged engine.
+      - name: Install Stockfish
+        run: sudo apt-get update && sudo apt-get install -y stockfish
 
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage.xml
-        fail_ci_if_error: false
-        verbose: true
+      - name: Run tests
+        env:
+          TOKEN: test_token_for_testing
+          STOCKFISH_PATH: /usr/games/stockfish
+          AUTO_UPDATE_STOCKFISH: 'false'
+        run: pytest --cov=bot --cov=logging_config --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        # Only one matrix leg needs to report coverage; use the version the
+        # container runs.
+        if: matrix.python-version == '3.14'
+        uses: codecov/codecov-action@v6
+        with:
+          files: ./coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
