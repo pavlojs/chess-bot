@@ -57,7 +57,7 @@ jobs:
         # Only one matrix leg needs to report coverage; use the version the
         # container runs.
         if: matrix.python-version == '3.14'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: ./coverage.xml
           token: ${{ secrets.CODECOV_TOKEN }}
