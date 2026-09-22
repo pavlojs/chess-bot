@@ -1,7 +1,7 @@
 # =========================
 # Base image
 # =========================
-FROM ubuntu:24.04
+FROM ubuntu:latest
 
 # =========================
 # System dependencies
