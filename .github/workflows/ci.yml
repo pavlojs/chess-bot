@@ -18,8 +18,10 @@ jobs:
 
   image:
     name: Build and push image
-    # The image is only ever built from a commit whose tests passed.
+    # Images are cut from main only, and only from a commit whose tests passed.
+    # dev pushes run the suite and stop there — nothing is published from dev.
     needs: test
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -46,14 +48,13 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # `latest` tracks main only. dev pushes publish the `dev` tag, so the
-          # tag people pull by default never points at unpromoted code.
+          # This job only ever runs on main, so every tag it produces is a
+          # promoted, test-passing commit.
           tags: |
-            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=main-
+            type=raw,value=latest
 
       - name: Build and push
         uses: docker/build-push-action@v6
