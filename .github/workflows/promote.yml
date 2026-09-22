@@ -13,6 +13,8 @@ concurrency:
 
 permissions:
   contents: write
+  # Needed to dispatch ci.yml on main after the merge.
+  actions: write
 
 jobs:
   promote:
