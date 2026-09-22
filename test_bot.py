@@ -704,6 +704,132 @@ class TestStockfishUpdater(unittest.TestCase):
             # Network errors are acceptable in tests
             self.skipTest(f"Network request failed: {e}")
 
+    def test_binary_name_is_a_universal_build(self):
+        """Stockfish 19+ only ships universal builds; the old per-microarch
+        assets (stockfish-ubuntu-x86-64) are the generic SSE2 build and no
+        longer exist in the release."""
+        from stockfish_updater import get_binary_name
+
+        binary_name = get_binary_name()
+
+        self.assertTrue(
+            binary_name.endswith("-universal"),
+            f"{binary_name} is not a universal build",
+        )
+        self.assertNotIn("ubuntu", binary_name)
+
+    def test_binary_name_per_platform(self):
+        """Each supported platform maps to its published universal asset."""
+        import stockfish_updater
+
+        cases = [
+            ("Linux", "x86_64", "stockfish-linux-x86-64-universal"),
+            ("Linux", "AMD64", "stockfish-linux-x86-64-universal"),
+            ("Linux", "aarch64", "stockfish-linux-arm64-universal"),
+            ("Linux", "riscv64", "stockfish-linux-riscv64-universal"),
+            ("Darwin", "x86_64", "stockfish-macos-universal"),
+            ("Darwin", "arm64", "stockfish-macos-universal"),
+        ]
+        for system, machine, expected in cases:
+            with self.subTest(system=system, machine=machine):
+                with patch("platform.system", return_value=system), \
+                     patch("platform.machine", return_value=machine):
+                    self.assertEqual(stockfish_updater.get_binary_name(), expected)
+
+    def test_binary_name_rejects_unknown_platform(self):
+        """An unsupported OS or architecture fails loudly."""
+        import stockfish_updater
+
+        with patch("platform.system", return_value="Linux"), \
+             patch("platform.machine", return_value="mips"):
+            with self.assertRaises(RuntimeError):
+                stockfish_updater.get_binary_name()
+
+        with patch("platform.system", return_value="Plan9"), \
+             patch("platform.machine", return_value="x86_64"):
+            with self.assertRaises(RuntimeError):
+                stockfish_updater.get_binary_name()
+
+    def test_download_url_matches_gzipped_asset(self):
+        """The asset lookup uses the .tar.gz name the release actually
+        publishes, not the old uncompressed .tar."""
+        import stockfish_updater
+
+        release = {
+            "tag_name": "sf_19",
+            "assets": [
+                {"name": "stockfish-linux-arm64-universal.tar.gz",
+                 "browser_download_url": "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/arm.tar.gz"},
+                {"name": "stockfish-linux-x86-64-universal.tar.gz",
+                 "browser_download_url": "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/x86.tar.gz"},
+            ],
+        }
+        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
+            url = stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+
+        self.assertTrue(url.endswith("x86.tar.gz"))
+
+    def test_download_url_reports_available_assets_when_missing(self):
+        """A missing asset names what the release does contain, so the failure
+        is diagnosable rather than a bare lookup error."""
+        import stockfish_updater
+
+        release = {"tag_name": "sf_19", "assets": [{"name": "stockfish-macos-universal.tar.gz",
+                                                    "browser_download_url": "https://github.com/x"}]}
+        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
+            with self.assertRaises(RuntimeError) as ctx:
+                stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+
+        self.assertIn("stockfish-macos-universal.tar.gz", str(ctx.exception))
+
+    def test_download_url_rejects_unexpected_host(self):
+        """The download URL comes out of an API response and is made
+        executable, so a non-GitHub host is refused."""
+        import stockfish_updater
+
+        release = {
+            "tag_name": "sf_19",
+            "assets": [{"name": "stockfish-linux-x86-64-universal.tar.gz",
+                        "browser_download_url": "https://evil.example.com/payload.tar.gz"}],
+        }
+        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
+            with self.assertRaises(RuntimeError) as ctx:
+                stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+
+        self.assertIn("unexpected host", str(ctx.exception))
+
+    def test_download_url_accepts_github_hosts(self):
+        """Both hosts GitHub serves release assets from are allowed."""
+        import stockfish_updater
+
+        for host in ("github.com", "objects.githubusercontent.com"):
+            with self.subTest(host=host):
+                url = f"https://{host}/official-stockfish/x.tar.gz"
+                self.assertEqual(stockfish_updater._check_download_url(url), url)
+
+    def test_log_build_info_reports_compilation_settings(self):
+        """The installed build's code path is logged, so a generic build on a
+        CPU that supports AVX2 is visible instead of silently costing speed."""
+        import stockfish_updater
+
+        completed = MagicMock()
+        completed.stdout = (
+            "Stockfish 19 by the Stockfish developers\n"
+            "Compilation settings       : 64bit AVX2 SSE41 SSSE3 SSE2 POPCNT\n"
+            "Compiler __VERSION__ macro : 15.2.0\n"
+        )
+        with patch("subprocess.run", return_value=completed):
+            settings = stockfish_updater.log_build_info("/usr/local/bin/stockfish")
+
+        self.assertIn("AVX2", settings)
+
+    def test_log_build_info_survives_a_missing_binary(self):
+        """Build logging is diagnostic only and never breaks startup."""
+        import stockfish_updater
+
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertIsNone(stockfish_updater.log_build_info("/nonexistent/stockfish"))
+
 
 class TestParseTimeToMilliseconds(unittest.TestCase):
     """Test parse_time_to_milliseconds utility for all Lichess API time formats."""
