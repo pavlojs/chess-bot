@@ -1,12 +1,18 @@
 #!/bin/bash
+# Run the Axiom bot from the repository's virtual environment.
 
-# Script to run the Axiom bot in virtual environment
+set -euo pipefail
 
-# Get the directory of this script
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+# The repo root is one level up from scripts/.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Activate virtual environment
-source "$DIR/venv/bin/activate"
+if [ ! -f "$ROOT/venv/bin/activate" ]; then
+    echo "No virtual environment at $ROOT/venv — run ./scripts/setup_venv.sh first." >&2
+    exit 1
+fi
 
-# Run the bot
-python "$DIR/bot.py"
+# shellcheck source=/dev/null
+source "$ROOT/venv/bin/activate"
+
+cd "$ROOT"
+exec python bot.py
