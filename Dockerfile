@@ -30,17 +30,28 @@ RUN pip install --no-cache-dir -r requirements.txt
 # =========================
 # Stockfish install (root-owned, read-only to the bot at runtime)
 # =========================
-RUN mkdir -p /tmp/stockfish && \
-    curl -s https://api.github.com/repos/official-stockfish/Stockfish/releases/latest \
-      | grep -o '"browser_download_url": ".*stockfish-ubuntu-x86-64.tar"' \
-      | cut -d'"' -f4 \
-      | xargs wget -O /tmp/stockfish/stockfish.tar && \
-    tar -xf /tmp/stockfish/stockfish.tar -C /tmp/stockfish && \
-    mv /tmp/stockfish/stockfish/stockfish-ubuntu-x86-64 /usr/local/bin/stockfish && \
-    chmod 755 /usr/local/bin/stockfish && \
+# Stockfish 19 dropped the per-microarch `stockfish-ubuntu-x86-64.tar` assets and
+# ships one gzipped universal build per platform instead. The universal binary
+# picks its code path (AVX2, AVX-512, ...) from the CPU at runtime. The binary is
+# located by search rather than by a hardcoded path so a future layout change
+# fails loudly at `find` instead of silently installing the wrong file.
+RUN set -eux; \
+    mkdir -p /tmp/stockfish; \
+    url="$(curl -fsS https://api.github.com/repos/official-stockfish/Stockfish/releases/latest \
+      | grep -o '"browser_download_url": "[^"]*stockfish-linux-x86-64-universal\.tar\.gz"' \
+      | cut -d'"' -f4)"; \
+    test -n "$url"; \
+    case "$url" in https://github.com/official-stockfish/Stockfish/*) ;; *) echo "unexpected host: $url" >&2; exit 1 ;; esac; \
+    wget -q -O /tmp/stockfish/stockfish.tar.gz "$url"; \
+    tar -xzf /tmp/stockfish/stockfish.tar.gz -C /tmp/stockfish; \
+    bin="$(find /tmp/stockfish -type f -name 'stockfish-linux-x86-64-universal' | head -1)"; \
+    test -n "$bin"; \
+    mv "$bin" /usr/local/bin/stockfish; \
+    chmod 755 /usr/local/bin/stockfish; \
     rm -rf /tmp/stockfish
 
-RUN /usr/local/bin/stockfish bench 1 || true
+# Fail the build if the engine cannot run, and record which code path it picked.
+RUN /usr/local/bin/stockfish compiler | head -20 && /usr/local/bin/stockfish bench 1 > /dev/null
 
 # =========================
 # App code
