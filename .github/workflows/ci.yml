@@ -49,10 +49,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           # This job only ever runs on main, so every tag it produces is a
-          # promoted, test-passing commit.
+          # promoted, test-passing commit. The repo cuts no versioned releases,
+          # so `latest` plus the commit sha is the whole tag set.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=main-
             type=raw,value=latest
 
