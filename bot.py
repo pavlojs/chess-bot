@@ -1940,13 +1940,14 @@ def push_health(monitor: StreamMonitor, url: str, interval: float = KUMA_PUSH_IN
     """Report to an Uptime Kuma push monitor, once every ``interval`` seconds.
 
     "up" while Lichess has been heard from within the health check's limit,
-    "down" with the length of the silence otherwise. A bot that has stopped or
-    hangs reports nothing at all, and Kuma raises the alarm when the reports
-    stop.
+    "down" with the length of the silence otherwise, which is also what a bot
+    with a stuck event loop comes to report. A bot that has stopped reports
+    nothing at all, and Kuma raises the alarm when the reports stop.
 
-    The first report goes out as soon as Lichess is heard from, a second or
-    two after the start, which keeps the gap a restart leaves in the reports
-    short. A bot that cannot reach Lichess says so after one interval.
+    The first report goes out as soon as Lichess is heard from, which takes
+    up to the 7 seconds between two of its keep-alives. That keeps the gap a
+    restart leaves in the reports short. A bot that cannot reach Lichess says
+    so after one interval.
 
     The address holds the monitor's token: it is sent nowhere else and never
     logged, and the request carries no Lichess credentials.
