@@ -51,10 +51,9 @@ updates:
     cooldown:
       default-days: 7
 
-  # The base image tracks `ubuntu:latest`, which follows the latest LTS, so
-  # there is normally no version for Dependabot to bump. Kept configured so a
-  # future pinned tag or a second Dockerfile is still covered. If the tag is
-  # ever pinned, pin it to an LTS — interim releases carry a 9-month window.
+  # Both base images in the Dockerfile are pinned by digest. The build stage
+  # also names its Debian point release, so it moves like any version; the
+  # distroless runtime base has no version tags and moves by digest alone.
   - package-ecosystem: docker
     directory: /
     target-branch: dev

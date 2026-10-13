@@ -1,15 +1,41 @@
+# Runs the published image. To run a build of this checkout instead, use
+# docker-compose.dev.yml.
 services:
   axiom-bot:
-    build: .
+    image: ghcr.io/pavlojs/axiom-chess-bot:latest
     container_name: axiom-bot
     env_file: .env  # Load environment variables from .env file
-    volumes:
-      - ./config.py:/app/config.py  # Mount config for easy editing
     restart: unless-stopped
-    healthcheck:
-      # Heartbeat file must be updated within last 5 min (bot writes it on every event)
-      test: ["CMD-SHELL", "python3 -c \"import os,time,sys; f='/tmp/axiom_heartbeat'; sys.exit(0 if os.path.exists(f) and time.time()-float(open(f).read())<300 else 1)\""]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    # Longer than the 15 seconds the bot gives its game threads on shutdown.
+    stop_grace_period: 30s
+
+    # The bot writes its log and a heartbeat stamp. Everything else is read-only,
+    # and it has no capability to gain one with.
+    read_only: true
+    tmpfs:
+      - /tmp:size=1m,noexec,nosuid,nodev
+    volumes:
+      - logs:/app/logs
+      # To change time controls or the challenge list, mount an edited copy:
+      # - ./config.py:/app/config.py:ro
+      # Syzygy tablebases, if you have them:
+      # - ./syzygy:/app/syzygy:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+
+    # What the bot prints is kept by Docker, which sets no limit of its own.
+    # The fuller log file on the volume is rotated by the bot (see .env.example).
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+    # The health check comes with the image: healthy while Lichess has been
+    # heard from in the last minute.
+
+volumes:
+  logs:

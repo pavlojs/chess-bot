@@ -2,6 +2,7 @@
 Axiom Chess Bot – stable BOT API architecture using Berserk and Stockfish
 """
 
+import json
 import os
 import signal
 import sys
@@ -14,9 +15,10 @@ from berserk.exceptions import ResponseError, ApiError
 import time
 import random
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from stockfish import Stockfish, StockfishException
+from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 import requests
 from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout, RequestException
@@ -31,12 +33,14 @@ from config import (
     MIN_RATING,
     MAX_RATING,
     TIME_CONTROL,
+    SPEEDS,
     DYNAMIC_STRENGTH,
     STRENGTH_ADVANTAGE,
     LIMIT_STRENGTH_THRESHOLD,
     FULL_STRENGTH_THRESHOLD,
     ENABLE_AUTO_CHALLENGE,
     MAX_CHALLENGES_PER_HOUR,
+    MAX_CHALLENGES_PER_DAY,
     CHALLENGE_MIN_RATING,
     CHALLENGE_MAX_RATING,
     CHALLENGE_TIME_CONTROLS,
@@ -52,13 +56,19 @@ from config import (
     GAME_WATCHDOG_INTERVAL,
     GAME_WATCHDOG_ABORT_TIMEOUT,
     MAX_CONCURRENT_GAMES,
+    KUMA_PUSH_URL,
+    KUMA_PUSH_INTERVAL,
 )
 
+import healthcheck
 from logging_config import setup_logger
 
 logger = setup_logger(__name__)
 shutdown_requested = False
-HEALTHCHECK_FILE = "/tmp/axiom_heartbeat"
+# Set together with shutdown_requested, so that waits end at once on shutdown.
+_shutdown_event = threading.Event()
+
+LICHESS_URL = "https://lichess.org"
 
 _TERMINAL_STATUSES = frozenset({
     "mate", "resign", "stalemate", "timeout", "draw",
@@ -66,9 +76,11 @@ _TERMINAL_STATUSES = frozenset({
     "unknownFinish", "variantEnd",
 })
 
-# Global reference so shutdown handler can wait for game threads
-_active_games: Dict[str, threading.Thread] = {}
-_active_games_lock: Optional[threading.Lock] = None
+# The state of the running bot, so the shutdown handler can wait for its game threads
+_running_state: Optional["BotState"] = None
+
+# Seconds a shutdown waits for game threads before the process ends anyway
+SHUTDOWN_TIMEOUT = 15
 
 
 # ─────────────────────────────────────────────
@@ -76,37 +88,268 @@ _active_games_lock: Optional[threading.Lock] = None
 # ─────────────────────────────────────────────
 
 class ChallengeTracker:
-    """Track challenges sent to enforce rate limits."""
-    
-    def __init__(self, max_per_hour: int = MAX_CHALLENGES_PER_HOUR):
+    """Counts the challenges the bot creates, against an hourly and a daily limit.
+
+    Lichess counts every request to create a challenge, including the ones it
+    then refuses, so every attempt is recorded here and not only the ones that
+    produced a challenge.
+    """
+
+    HOUR = 3600
+    DAY = 86400
+
+    def __init__(self, max_per_hour: int = MAX_CHALLENGES_PER_HOUR,
+                 max_per_day: int = MAX_CHALLENGES_PER_DAY, clock=time.monotonic, wall_clock=time.time):
         self.max_per_hour = max_per_hour
-        self.challenge_times: deque = deque()
+        self.max_per_day = max_per_day
+        self._clock = clock
+        # The limits are measured on the clock that never jumps. Only what is
+        # written down for the next run is in time of day, this far from it.
+        self._wall_offset = wall_clock() - clock()
+        self._attempts: deque = deque()  # times of the attempts of the last day, oldest first
         self.lock = threading.Lock()
-    
-    def can_challenge(self) -> bool:
-        """Check if we can send another challenge within the hourly limit."""
+
+    def export(self) -> List[float]:
+        """The attempts of the last day as times of day, to be written down for the next run."""
         with self.lock:
-            now = datetime.now()
-            # Remove challenges older than 1 hour
-            while self.challenge_times and self.challenge_times[0] < now - timedelta(hours=1):
-                self.challenge_times.popleft()
-            
-            return len(self.challenge_times) < self.max_per_hour
-    
+            self._recent(self._clock())
+            return [round(t + self._wall_offset, 3) for t in self._attempts]
+
+    def restore(self, times: Any):
+        """Take over the attempts an earlier run wrote down.
+
+        Lichess goes on counting across a restart of the bot, so the bot has to
+        as well, or a restart late in the day hands it a full allowance that
+        Lichess does not share.
+        """
+        if not isinstance(times, list):
+            return
+        with self.lock:
+            now = self._clock()
+            # A time ahead of the clock was written before the clock was set
+            # back: it counts as just made, never as not made.
+            ages = sorted(
+                (max(now + self._wall_offset - t, 0) for t in times
+                 if isinstance(t, (int, float)) and not isinstance(t, bool)),
+                reverse=True,
+            )
+            self._attempts = deque(now - age for age in ages if age < self.DAY)
+
+    def _recent(self, now: float) -> List[float]:
+        """Forget attempts older than a day and return those of the last hour."""
+        while self._attempts and self._attempts[0] <= now - self.DAY:
+            self._attempts.popleft()
+        return [t for t in self._attempts if t > now - self.HOUR]
+
     def record_challenge(self):
-        """Record a new challenge."""
+        """Record an attempt to create a challenge, whatever came of it."""
         with self.lock:
-            self.challenge_times.append(datetime.now())
-    
+            self._attempts.append(self._clock())
+
+    def can_challenge(self) -> bool:
+        return self.get_remaining_challenges() > 0
+
     def get_remaining_challenges(self) -> int:
-        """Get number of challenges remaining in current hour."""
+        """Challenges that may still be created right now, under both limits."""
         with self.lock:
-            now = datetime.now()
-            # Remove old challenges
-            while self.challenge_times and self.challenge_times[0] < now - timedelta(hours=1):
-                self.challenge_times.popleft()
-            
-            return max(0, self.max_per_hour - len(self.challenge_times))
+            last_hour = self._recent(self._clock())
+            return max(0, min(self.max_per_hour - len(last_hour), self.max_per_day - len(self._attempts)))
+
+    def counts(self) -> tuple[int, int]:
+        """Attempts in the last hour and in the last 24 hours."""
+        with self.lock:
+            last_hour = self._recent(self._clock())
+            return len(last_hour), len(self._attempts)
+
+    def seconds_until_free(self) -> float:
+        """Seconds until another challenge may be created; 0 when one may be created now."""
+        with self.lock:
+            now = self._clock()
+            last_hour = self._recent(now)
+            wait = 0.0
+            if self.max_per_hour <= 0 or self.max_per_day <= 0:
+                return float(self.DAY)
+            if len(last_hour) >= self.max_per_hour:
+                # The attempt whose expiry brings the hour back under the limit.
+                wait = max(wait, last_hour[len(last_hour) - self.max_per_hour] + self.HOUR - now)
+            if len(self._attempts) >= self.max_per_day:
+                wait = max(wait, self._attempts[len(self._attempts) - self.max_per_day] + self.DAY - now)
+            return wait
+
+
+def _span(seconds: float) -> str:
+    """A duration the way one would say it: 15 minutes, 6 hours, 7 days."""
+    for unit, size in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        if seconds >= size:
+            count = round(seconds / size)
+            return f"{count} {unit}{'s' if count != 1 else ''}"
+    return f"{round(seconds)} seconds"
+
+
+class OpponentRests:
+    """Bots the bot leaves alone for a while, because challenging them now leads nowhere.
+
+    Lichess allows an account 200 challenges a day. Each one sent to a bot
+    that never accepts, or that is away, is one fewer for a bot that would
+    have played. How long a bot is left alone depends on what it did:
+
+    - it answered "later": 15 minutes;
+    - it did not answer, or declined without a reason: an hour, and twice as
+      long each further time, up to a day, until it plays;
+    - it does not want this speed: a day, for that speed only;
+    - it does not take rated standard challenges from bots at all: a week;
+    - Lichess would not create the challenge: as long as Lichess says, or
+      6 hours.
+
+    A bot that starts a game with this one is cleared at once.
+    """
+
+    LATER = 15 * 60
+    UNANSWERED = 60 * 60
+    DAY = 24 * 3600
+    SPEED_UNWANTED = DAY
+    NEVER = 7 * DAY
+    REFUSED = 6 * 3600
+
+    # What Lichess's decline reasons say about a rated standard challenge from
+    # a bot. An event carries them in lower case ("toofast", "nobot").
+    SPEED_REASONS = frozenset({"toofast", "tooslow", "timecontrol"})
+    NEVER_REASONS = frozenset({"nobot", "casual", "variant"})
+
+    def __init__(self, clock=time.time):
+        self._clock = clock
+        # name, or name|speed  ->  [until, times without an answer]
+        self._rests: Dict[str, List[float]] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key(username: str, speed: Optional[str] = None) -> str:
+        return username.lower() if speed is None else f"{username.lower()}|{speed}"
+
+    def _prune(self, now: float):
+        # A bot that was not asked again within a day of its rest starts afresh.
+        for key in [k for k, (until, _) in self._rests.items() if until + self.DAY < now]:
+            del self._rests[key]
+
+    def _rest(self, key: str, seconds: float, doubling: bool = False) -> float:
+        """Leave ``key`` alone for ``seconds`` from now; returns how long that is in the end."""
+        with self._lock:
+            now = self._clock()
+            self._prune(now)
+            until, unanswered = self._rests.get(key, [0, 0])
+            if doubling:
+                seconds = min(seconds * 2 ** unanswered, self.DAY)
+                unanswered += 1
+            if until > now + seconds:
+                # A rest already running is never cut short by a shorter one.
+                seconds = until - now
+            self._rests[key] = [now + seconds, unanswered]
+            return seconds
+
+    def resting(self, username: str, speed: str) -> bool:
+        """True while this bot is being left alone, at any speed or at this one."""
+        with self._lock:
+            now = self._clock()
+            return any(
+                self._rests.get(key, [0, 0])[0] > now
+                for key in (self._key(username), self._key(username, speed))
+            )
+
+    def declined(self, username: str, speed: Optional[str], reason: str) -> float:
+        """The bot declined; returns for how many seconds it is left alone."""
+        reason = reason.lower()
+        if reason == "later":
+            return self._rest(self._key(username), self.LATER)
+        if reason in self.SPEED_REASONS and speed:
+            return self._rest(self._key(username, speed), self.SPEED_UNWANTED)
+        if reason in self.NEVER_REASONS:
+            return self._rest(self._key(username), self.NEVER)
+        return self._rest(self._key(username), self.UNANSWERED, doubling=True)
+
+    def unanswered(self, username: str) -> float:
+        """The bot let the challenge lapse."""
+        return self._rest(self._key(username), self.UNANSWERED, doubling=True)
+
+    def refused(self, username: str, seconds: Optional[float] = None) -> float:
+        """Lichess would not create the challenge, for ``seconds`` if it said how long."""
+        return self._rest(self._key(username), seconds if seconds else self.REFUSED)
+
+    def played(self, username: str, speed: Optional[str] = None):
+        """The bot started a game at this speed: forget what was held against it.
+
+        A speed it declined stays declined: a game of blitz says nothing about bullet.
+        """
+        with self._lock:
+            self._rests.pop(self._key(username), None)
+            if speed:
+                self._rests.pop(self._key(username, speed), None)
+
+    def count(self) -> int:
+        """How many bots are being left alone right now, at any speed."""
+        with self._lock:
+            now = self._clock()
+            return len({key.split("|", 1)[0] for key, (until, _) in self._rests.items() if until > now})
+
+    def export(self) -> Dict[str, List[float]]:
+        with self._lock:
+            self._prune(self._clock())
+            return {key: [round(until, 3), unanswered] for key, (until, unanswered) in self._rests.items()}
+
+    def restore(self, rests: Any):
+        if not isinstance(rests, dict):
+            return
+        with self._lock:
+            for key, value in rests.items():
+                if (isinstance(key, str) and isinstance(value, list) and len(value) == 2
+                        and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)):
+                    self._rests[key] = [float(value[0]), max(int(value[1]), 0)]
+            self._prune(self._clock())
+
+
+# The bot's memory lives in its log directory: the one place it may write, in
+# the container and under the systemd unit alike.
+STATE_FILE = os.path.join("logs", "state.json")
+
+
+class StateFile:
+    """What the bot keeps across restarts, as a small JSON file."""
+
+    def __init__(self, path: str = STATE_FILE):
+        self.path = path
+        # Held by whoever gathers the data as well, so that an older picture
+        # is never written over a newer one.
+        self.lock = threading.RLock()
+        self._saved: Optional[str] = None
+        self._warned = False
+
+    def load(self) -> Dict[str, Any]:
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as e:
+            logger.warning(f"Could not read {self.path}, starting without it: {e}")
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def save(self, data: Dict[str, Any]):
+        with self.lock:
+            text = json.dumps(data)
+            if text == self._saved:
+                return
+            scratch = f"{self.path}.tmp"
+            try:
+                with open(scratch, "w") as f:
+                    f.write(text)
+                # Swapped in whole, so a crash never leaves half a file behind.
+                os.replace(scratch, self.path)
+                self._saved = text
+                self._warned = False
+            except OSError as e:
+                if not self._warned:
+                    logger.warning(f"Could not write {self.path}; limits and rests will not survive a restart: {e}")
+                    self._warned = True
 
 
 # ─────────────────────────────────────────────
@@ -114,8 +357,71 @@ class ChallengeTracker:
 # ─────────────────────────────────────────────
 
 class RateLimitError(Exception):
-    """Raised when the Lichess API returns HTTP 429 Too Many Requests."""
-    pass
+    """Lichess refused a request with HTTP 429 Too Many Requests."""
+
+    def __init__(self, message: str, retry_after: Optional[int] = None):
+        super().__init__(message)
+        # Seconds until the limit is lifted, when the answer says so.
+        self.retry_after = retry_after
+
+
+class ChallengeRefused(Exception):
+    """Lichess would not create a challenge to this opponent."""
+
+    def __init__(self, message: str, retry_after: Optional[int] = None):
+        super().__init__(message)
+        # Seconds until it would, when the answer says so.
+        self.retry_after = retry_after
+
+
+# Gateway answers that mean "Lichess is briefly unavailable": worth a retry.
+_GATEWAY_ERRORS = frozenset({502, 503, 504})
+
+
+def _http_status(exc: BaseException) -> Optional[int]:
+    """HTTP status of a failed Lichess call, or None if Lichess never answered.
+
+    Read it from the exception, never through ``exc.response``: a
+    requests.Response is falsy for every status of 400 and above, so
+    ``exc.response and exc.response.status_code == ...`` is false for exactly
+    the answers it is meant to recognise.
+    """
+    if isinstance(exc, ResponseError):
+        return exc.status_code
+    return None
+
+
+def _retry_after(exc: BaseException) -> Optional[int]:
+    """Seconds Lichess asks to wait, from a 429 answer that names the limit it applied.
+
+    The limit on games between bots answers
+    ``{"error": ..., "ratelimit": {"key": "bot.vsBot.day", "seconds": N}}``.
+    The general limiter only says "Too many requests", and then this is None.
+    """
+    cause = getattr(exc, "cause", None)
+    if isinstance(cause, dict) and isinstance(cause.get("ratelimit"), dict):
+        seconds = cause["ratelimit"].get("seconds")
+        if isinstance(seconds, int) and seconds > 0:
+            return seconds
+    return None
+
+
+_NETWORK_ERRORS = (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout)
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """True when Lichess could not be reached, as opposed to having answered.
+
+    berserk wraps whatever requests raises while a request is being sent in
+    ApiError, so a refused, reset or timed-out connection does not arrive as a
+    requests exception. Failures while a stream is being read come straight
+    from requests and are not wrapped. Both have to count.
+    """
+    if isinstance(exc, _NETWORK_ERRORS):
+        return True
+    if isinstance(exc, ApiError) and not isinstance(exc, ResponseError):
+        return isinstance(exc.__cause__, RequestException)
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -123,43 +429,47 @@ class RateLimitError(Exception):
 # ─────────────────────────────────────────────
 
 def handle_shutdown(signum, frame):
+    """First signal: let the game threads wind down, then exit. Second signal: exit now."""
     global shutdown_requested
     if shutdown_requested:
-        # Second signal - force exit immediately
         logger.warning("Force shutdown!")
         sys.exit(1)
-    
+
     shutdown_requested = True
+    _shutdown_event.set()
     logger.warning("Shutdown signal received, waiting for game threads to finish...")
-    
-    def graceful_exit():
-        SHUTDOWN_TIMEOUT = 15  # seconds to wait for game threads
-        deadline = time.monotonic() + SHUTDOWN_TIMEOUT
-        lock = _active_games_lock
-        if lock:
-            while time.monotonic() < deadline:
-                with lock:
-                    alive = {gid: t for gid, t in _active_games.items() if t.is_alive()}
-                if not alive:
-                    break
-                logger.info(f"Waiting for {len(alive)} game thread(s) to finish...")
-                for t in alive.values():
-                    t.join(timeout=max(0.5, deadline - time.monotonic()))
-        
-        # Remove heartbeat file so Docker detects unhealthy if process lingers
-        try:
-            os.remove(HEALTHCHECK_FILE)
-        except OSError:
-            pass
-        
-        logger.info("Graceful shutdown complete")
-        sys.exit(0)
-    
-    threading.Thread(target=graceful_exit, daemon=True).start()
+    threading.Thread(target=_finish_shutdown, daemon=True).start()
 
 
-signal.signal(signal.SIGINT, handle_shutdown)
-signal.signal(signal.SIGTERM, handle_shutdown)
+def _finish_shutdown(exit_process=os._exit):
+    """Wait for the game threads, then end the process.
+
+    The main thread is normally blocked reading the event stream, and
+    sys.exit() called from this thread would end this thread alone, leaving
+    the process to be killed by its supervisor. os._exit ends the process.
+    """
+    deadline = time.monotonic() + SHUTDOWN_TIMEOUT
+    state = _running_state
+    while state is not None and time.monotonic() < deadline:
+        with state.games_lock:
+            alive = [t for t in state.active_games.values() if t.is_alive()]
+        if not alive:
+            break
+        logger.info(f"Waiting for {len(alive)} game thread(s) to finish...")
+        for t in alive:
+            t.join(timeout=max(0.5, deadline - time.monotonic()))
+
+    # Remove the heartbeat so a process that lingers reads as unhealthy
+    healthcheck.clear()
+
+    logger.info("Graceful shutdown complete")
+    logging.shutdown()
+    exit_process(0)
+
+
+def install_signal_handlers():
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
 
 
 # ─────────────────────────────────────────────
@@ -252,8 +562,11 @@ def parse_time_to_milliseconds(time_value: Any) -> Optional[int]:
 # ─────────────────────────────────────────────
 
 def retry_with_backoff(func, max_retries=5, base_delay=1, max_delay=60, description="Operation"):
-    """Execute a function with exponential backoff retry logic.
-    
+    """Call ``func``, retrying with exponential backoff while Lichess is unreachable.
+
+    Network failures and gateway answers (502, 503, 504) are retried; any other
+    error is raised at once, since repeating the call would not change it.
+
     Args:
         func: Function to execute
         max_retries: Maximum number of retry attempts
@@ -270,33 +583,23 @@ def retry_with_backoff(func, max_retries=5, base_delay=1, max_delay=60, descript
     for attempt in range(max_retries):
         if shutdown_requested:
             raise KeyboardInterrupt("Shutdown requested")
-        
+
         try:
             return func()
-        except (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout) as e:
+        except Exception as e:
+            if not (_is_network_error(e) or _http_status(e) in _GATEWAY_ERRORS):
+                logger.error(f"{description} failed: {e}")
+                raise
+
             if attempt == max_retries - 1:
                 logger.error(f"{description} failed after {max_retries} attempts: {e}")
                 raise
-            
+
             delay = min(base_delay * (2 ** attempt), max_delay)
             logger.warning(f"{description} failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
             time.sleep(delay)
-        except berserk.exceptions.ResponseError as e:
-            # Handle 502, 503, 504 errors with retry
-            if hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]:
-                if attempt == max_retries - 1:
-                    logger.error(f"{description} failed after {max_retries} attempts: {e}")
-                    raise
-                
-                delay = min(base_delay * (2 ** attempt), max_delay)
-                logger.warning(f"{description} failed with {e.response.status_code} (attempt {attempt + 1}/{max_retries}). Retrying in {delay}s...")
-                time.sleep(delay)
-            else:
-                # For other errors, don't retry
-                raise
-        except Exception as e:
-            logger.error(f"{description} failed with unexpected error: {e}")
-            raise
+
+    raise ValueError("retry_with_backoff needs max_retries of at least 1")
 
 
 # ─────────────────────────────────────────────
@@ -304,16 +607,15 @@ def retry_with_backoff(func, max_retries=5, base_delay=1, max_delay=60, descript
 # ─────────────────────────────────────────────
 
 def determine_time_category(limit: int, increment: int) -> str | None:
-    # Reject unlimited time games (limit = 0 and increment = 0)
+    """Speed of a clock game the way Lichess names it, from the clock in seconds.
+
+    Lichess estimates a game's length as the initial time plus 40 increments.
+    Returns None for a game without a clock: a correspondence or unlimited
+    challenge carries no ``limit``, so both arrive here as 0 + 0.
+    """
     if limit == 0 and increment == 0:
         return None
-    
-    # Reject correspondence games (days per move > 0)
-    # In Lichess API, correspondence games have very large limits
-    # or are marked differently in variant/speed fields
-    if limit >= 259200:  # 3+ days in seconds = correspondence
-        return None
-    
+
     total = limit + increment * 40
     if total < 180:
         return "bullet"
@@ -324,47 +626,56 @@ def determine_time_category(limit: int, increment: int) -> str | None:
     return "classical"
 
 
-def should_accept_challenge(challenge: Dict[str, Any]) -> bool:
-    if not ACCEPT_CHALLENGES:
-        return False
+def _speed_decline_reason(category: str) -> str:
+    """The Lichess decline reason for a speed the bot does not play."""
+    accepted = [SPEEDS.index(speed) for speed in TIME_CONTROL if speed in SPEEDS]
+    if accepted and SPEEDS.index(category) < min(accepted):
+        return "tooFast"
+    if accepted and SPEEDS.index(category) > max(accepted):
+        return "tooSlow"
+    return "timeControl"
 
-    # Only accept standard chess — reject all variants (chess960, antichess, atomic, etc.)
+
+def challenge_decline_reason(challenge: Dict[str, Any]) -> Optional[str]:
+    """Why the bot will not play this challenge, or None when it will.
+
+    The reason is one of the keys Lichess has for declining a challenge. Lichess
+    shows the challenger its own text for the key, so the answer says what to
+    change: the variant, the clock, or nothing that can be changed (``generic``).
+    """
+    if not ACCEPT_CHALLENGES:
+        return "generic"
+
+    # Standard chess only: no chess960, antichess, atomic and the like
     variant = challenge.get("variant", {})
     variant_key = variant.get("key", "standard") if isinstance(variant, dict) else str(variant)
     if variant_key != "standard":
-        logger.info(f"Rejecting challenge: unsupported variant '{variant_key}'")
-        return False
+        logger.info(f"Declining challenge: unsupported variant '{variant_key}'")
+        return "standard"
 
-    challenger = challenge.get("challenger", {})
-    rating = challenger.get("rating", 1500)
-    
-    # Check if challenge has speed field (more reliable than calculating)
-    speed = challenge.get("speed")
-    if speed:
-        # Reject correspondence and unlimited time games
-        if speed in ["correspondence", "unlimited"]:
-            logger.info(f"Rejecting {speed} challenge")
-            return False
-
+    # A correspondence or unlimited challenge carries no clock
     clock = challenge.get("timeControl", {})
-    limit = clock.get("limit", 0)
-    increment = clock.get("increment", 0)
-
-    category = determine_time_category(limit, increment)
-    
-    # Reject if category is None (unlimited or correspondence)
-    if category is None:
-        logger.info(f"Rejecting challenge with no valid time category")
-        return False
-
-    if not (MIN_RATING <= rating <= MAX_RATING):
-        return False
+    category = determine_time_category(clock.get("limit", 0), clock.get("increment", 0))
+    if challenge.get("speed") in ("correspondence", "unlimited") or category is None:
+        logger.info("Declining challenge: not a game on the clock")
+        return "timeControl"
 
     if category not in TIME_CONTROL:
-        return False
+        logger.info(f"Declining challenge: {category} is not played")
+        return _speed_decline_reason(category)
+
+    rating = challenge.get("challenger", {}).get("rating", 1500)
+    if not (MIN_RATING <= rating <= MAX_RATING):
+        # Lichess has no reason that says "outside my rating range".
+        logger.info(f"Declining challenge: rating {rating} is outside {MIN_RATING}–{MAX_RATING}")
+        return "generic"
 
     logger.info(f"Accepting challenge from {rating} ({category})")
-    return True
+    return None
+
+
+def should_accept_challenge(challenge: Dict[str, Any]) -> bool:
+    return challenge_decline_reason(challenge) is None
 
 
 def get_game_end_reason(board: chess.Board) -> str:
@@ -407,46 +718,33 @@ def get_game_end_reason(board: chess.Board) -> str:
 
 
 def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
-    """Initialize Stockfish engine with hybrid strength system.
-    
-    Three-tier hybrid approach:
-    - Beginners/Intermediates (< LIMIT_STRENGTH_THRESHOLD=1800):
-        UCI_LimitStrength at opponent+100 + go movetime (fair, winnable games)
-    - Advanced (LIMIT_STRENGTH_THRESHOLD–FULL_STRENGTH_THRESHOLD = 1800–2799):
-        UCI_LimitStrength at opponent+100 + go movetime (scaled time).
-        NO native clocks — UCI_LimitStrength + go wtime causes Stockfish to
-        time-manage as a limited player, potentially hanging 30+ seconds.
-    - Elite (>= FULL_STRENGTH_THRESHOLD=2800): Full power + native clocks
+    """Start an engine set up for one opponent.
+
+    Below FULL_STRENGTH_THRESHOLD the engine's own strength limit is switched
+    on at the opponent's rating plus STRENGTH_ADVANTAGE, kept within what
+    Stockfish accepts for UCI_Elo (1320 at the low end) and at most 2850.
+    At or above the threshold, and against an opponent without a rating, the
+    engine plays at full strength.
+
+    How long it thinks is decided per move in play_game: a fixed move time
+    while the limit is on, the game clock at full strength.
     """
     sf = Stockfish(
         path=STOCKFISH_PATH,
         parameters=UCI_OPTIONS.copy(),
     )
-    
+
     if DYNAMIC_STRENGTH and opponent_rating:
         if opponent_rating < FULL_STRENGTH_THRESHOLD:
-            # Apply UCI_LimitStrength for ALL opponents below the full-power threshold.
-            # < 1800: movetime mode (extra cap, see play_game use_weak_mode branch)
-            # 1800–2799: native clocks — quality capped by UCI_Elo, no intentional blunders
             target_elo = min(max(opponent_rating + STRENGTH_ADVANTAGE, 1320), 2850)
             sf.update_engine_parameters({
                 "UCI_LimitStrength": True,
                 "UCI_Elo": target_elo,
             })
-            if opponent_rating < LIMIT_STRENGTH_THRESHOLD:
-                logger.info(
-                    f"Opponent {opponent_rating} ELO: UCI_LimitStrength = {target_elo} "
-                    f"(fair play mode, movetime cap)"
-                )
-            else:
-                logger.info(
-                    f"Opponent {opponent_rating} ELO: UCI_LimitStrength = {target_elo} "
-                    f"(intermediate mode, movetime cap)"
-                )
+            logger.info(f"Opponent {opponent_rating} ELO: UCI_LimitStrength = {target_elo}")
         else:
-            # Full power for elite opponents — no handicaps whatsoever
-            logger.info(f"Opponent {opponent_rating} ELO: Full strength engine (MAXIMUM POWER)")
-    
+            logger.info(f"Opponent {opponent_rating} ELO: full strength")
+
     return sf
 
 
@@ -531,7 +829,7 @@ def _extract_cp_from_info(info_line: str) -> Optional[int]:
     work uniformly without special-casing the caller.
 
     Returns:
-        cp value from white's perspective, or None if unavailable.
+        cp value from the side to move, as UCI reports it, or None if unavailable.
     """
     try:
         if ' score cp ' in info_line:
@@ -613,8 +911,7 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
     - movetime: supply move_time_ms for a fixed per-move budget
       (weak opponents / no clock data).
     - native clocks: supply wtime/btime/winc/binc so Stockfish manages its own
-      time. Stockfish\'s internal algorithm accounts for game phase, position
-      complexity, and increment — far superior to any manual formula.
+      time.
 
     The PV is extracted at zero cost from the info line already stored after the
     search, so no second engine call is involved.
@@ -623,10 +920,10 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
         stockfish: Initialized Stockfish instance (position already set)
         game_id: Game ID for logging
         move_time_ms: Fixed time budget in ms (movetime mode)
-        wtime: White\'s remaining clock in ms (native clock mode)
-        btime: Black\'s remaining clock in ms (native clock mode)
-        winc: White\'s increment in ms
-        binc: Black\'s increment in ms
+        wtime: White's remaining clock in ms (native clock mode)
+        btime: Black's remaining clock in ms (native clock mode)
+        winc: White's increment in ms
+        binc: Black's increment in ms
         prediction_depth: Number of PV half-moves to display in log
 
     Returns:
@@ -666,20 +963,18 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
 
 def calculate_move_time(opponent_rating: int | None,
                         base_time: int = STOCKFISH_TIME) -> int:
-    """Calculate movetime budget based on opponent strength.
+    """Move time for one move against an opponent of this rating.
 
-    Used for ALL opponents with UCI_LimitStrength active (< FULL_STRENGTH_THRESHOLD),
-    and as a fallback when the game has no clock data.
+    Used whenever the strength limit is on (opponents below
+    FULL_STRENGTH_THRESHOLD) and when a game gives no clock to search on.
 
-    IMPORTANT: native clocks (go wtime) cannot be used with UCI_LimitStrength —
-    Stockfish time-manages like a limited human and may hang 30+ seconds on move 1.
+    Limited games are searched with a fixed move time and not on the game
+    clock so that the bot answers quickly: left to manage a 5+3 clock itself,
+    Stockfish spends 20 to 30 seconds on the first move, limit or no limit.
 
-    Strategy:
-    - Below LIMIT_STRENGTH_THRESHOLD (1800): 40 % of base_time (1200ms default)
-      UCI_LimitStrength already handles fairness, minimal time keeps things lively.
-    - Between thresholds (1800–2799): 40–95 % linear scaling
-      More time = plays closer to its capped ELO ceiling.
-    - At or above FULL_STRENGTH_THRESHOLD (2800): 100 % (full power, native clocks)
+    - Below LIMIT_STRENGTH_THRESHOLD: 40 % of base_time.
+    - Between the two thresholds: 40 % rising linearly to 95 %.
+    - At or above FULL_STRENGTH_THRESHOLD, or with DYNAMIC_STRENGTH off: base_time.
 
     Returns:
         Thinking time in milliseconds
@@ -784,43 +1079,31 @@ def get_online_bots(client: berserk.Client, limit: int = 100) -> List[Dict[str, 
     return online_bots
 
 
-def filter_suitable_bots(bots: List[Dict[str, Any]], min_rating: int, max_rating: int, 
-                         bot_username: str) -> List[Dict[str, Any]]:
-    """Filter bots by rating criteria.
-    
+def filter_suitable_bots(bots: List[Dict[str, Any]], min_rating: int, max_rating: int,
+                         bot_username: str, speed: str) -> List[Dict[str, Any]]:
+    """Keep the bots whose rating at ``speed`` lies within the range.
+
+    The rating looked at is the one for the kind of game about to be offered.
+    A bot rated 2000 in blitz and 900 in bullet is a 900 opponent in a bullet
+    game, and one that has never played the speed has no rating to go by.
+
     Args:
-        bots: List of bot dictionaries
-        min_rating: Minimum rating threshold
-        max_rating: Maximum rating threshold
+        bots: Bots as returned by the Lichess list of online bots
+        min_rating: Lowest rating to challenge
+        max_rating: Highest rating to challenge
         bot_username: Our bot's username (to exclude self)
-    
-    Returns:
-        Filtered list of suitable bots
+        speed: "bullet", "blitz", "rapid" or "classical"
     """
     suitable = []
-    
+
     for bot in bots:
-        username = bot.get("username", "").lower()
-        
-        # Skip self
-        if username == bot_username.lower():
+        if bot.get("username", "").lower() == bot_username.lower():
             continue
-        
-        # Get perfs (performance ratings)
-        perfs = bot.get("perfs", {})
-        
-        # Check if bot has any rating in acceptable range
-        has_suitable_rating = False
-        for time_control in ["blitz", "rapid", "bullet", "classical"]:
-            if time_control in perfs:
-                rating = perfs[time_control].get("rating", 0)
-                if min_rating <= rating <= max_rating:
-                    has_suitable_rating = True
-                    break
-        
-        if has_suitable_rating:
+
+        perf = bot.get("perfs", {}).get(speed)
+        if perf and min_rating <= perf.get("rating", 0) <= max_rating:
             suitable.append(bot)
-    
+
     return suitable
 
 
@@ -854,28 +1137,35 @@ def challenge_bot(client: berserk.Client, opponent_username: str,
     except berserk.exceptions.ResponseError as e:
         logger.warning(f"Failed to challenge {opponent_username}: {e}")
         # Propagate rate-limit errors so callers can apply backoff
-        status = getattr(e, 'status_code', None)
-        if status == 429 or '429' in str(e):
-            raise RateLimitError(str(e))
+        status = _http_status(e)
+        if status == 429:
+            raise RateLimitError(str(e), _retry_after(e)) from e
+        if status in (400, 404):
+            # About this opponent: it takes no challenges, has played its 100
+            # games against bots for today, or is gone.
+            raise ChallengeRefused(str(e), _retry_after(e)) from e
         return None
     except Exception as e:
         logger.error(f"Error challenging {opponent_username}: {e}")
         return None
 
 
-def try_challenge_random_bot(client: berserk.Client, bot_username: str,
-                             tracker: ChallengeTracker) -> Optional[str]:
-    """Attempt to challenge a random suitable bot.
+def try_challenge_random_bot(client: berserk.Client, bot_username: str, tracker: ChallengeTracker,
+                             rests: Optional[OpponentRests] = None) -> Optional[tuple[str, str, str]]:
+    """Challenge one random suitable bot.
 
     Returns:
-        Challenge ID if a challenge was sent, None otherwise
+        (challenge id, opponent name, speed) if a challenge was created, None otherwise
     """
     if not ENABLE_AUTO_CHALLENGE:
         return None
 
     if not tracker.can_challenge():
-        remaining = tracker.get_remaining_challenges()
-        logger.info(f"Challenge rate limit reached — {remaining} challenges left this hour")
+        last_hour, last_day = tracker.counts()
+        logger.info(
+            f"Challenge limit reached — {last_hour}/{tracker.max_per_hour} this hour, "
+            f"{last_day}/{tracker.max_per_day} in 24 hours"
+        )
         return None
 
     logger.debug("Fetching online bots...")
@@ -885,33 +1175,104 @@ def try_challenge_random_bot(client: berserk.Client, bot_username: str,
         logger.info("No online bots found")
         return None
 
+    # The time control comes first: it decides which of a bot's ratings counts.
+    time_control = random.choice(CHALLENGE_TIME_CONTROLS)
+    speed = determine_time_category(time_control["limit"], time_control["increment"])
+
     suitable_bots = filter_suitable_bots(
         online_bots,
         CHALLENGE_MIN_RATING,
         CHALLENGE_MAX_RATING,
-        bot_username
+        bot_username,
+        speed,
     )
 
     if not suitable_bots:
         logger.info(
-            f"No suitable bots online (rating range: {CHALLENGE_MIN_RATING}–{CHALLENGE_MAX_RATING})"
+            f"No suitable bots online for {speed} "
+            f"(rating range: {CHALLENGE_MIN_RATING}–{CHALLENGE_MAX_RATING})"
         )
         return None
 
-    target_bot = random.choice(suitable_bots)
-    time_control = random.choice(CHALLENGE_TIME_CONTROLS)
+    if rests is not None:
+        rested = [bot for bot in suitable_bots if not rests.resting(bot["username"], speed)]
+        if not rested:
+            logger.info(f"All {len(suitable_bots)} suitable bots for {speed} are being left alone for now")
+            return None
+        suitable_bots = rested
 
-    challenge_id = challenge_bot(
-        client,
-        target_bot["username"],
-        time_control,
-        color="random"
-    )
+    opponent = random.choice(suitable_bots)["username"]
 
-    if challenge_id:
-        tracker.record_challenge()
+    # Counted before the outcome is known: Lichess counts the request too.
+    tracker.record_challenge()
+    try:
+        challenge_id = challenge_bot(client, opponent, time_control, color="random")
+    except ChallengeRefused as e:
+        if rests is not None:
+            rest = rests.refused(opponent, e.retry_after)
+            logger.info(f"Lichess would not create a challenge to {opponent} — leaving it alone for {_span(rest)}")
+        return None
 
-    return challenge_id
+    return (challenge_id, opponent, speed) if challenge_id else None
+
+
+# ─────────────────────────────────────────────
+# DRAW OFFERS AND ABANDONED GAMES
+# ─────────────────────────────────────────────
+
+# A draw is accepted while the position is worth at most this much to either side.
+DRAW_ACCEPT_WINDOW_CP = 200
+
+
+def should_accept_draw(evaluation_cp: int) -> bool:
+    """Accept a draw in a roughly level position only.
+
+    ``evaluation_cp`` is from the bot's side. A forced mate arrives as ±30000
+    and is declined either way: with a win in hand, or to make the opponent
+    prove the mate.
+    """
+    return -DRAW_ACCEPT_WINDOW_CP <= evaluation_cp <= DRAW_ACCEPT_WINDOW_CP
+
+
+def evaluation_for_bot(stockfish: Stockfish, board: chess.Board, bot_is_white: bool,
+                       last_eval_cp: Optional[int]) -> int:
+    """Value of the position in centipawns from the bot's side, a forced mate as ±30000.
+
+    The evaluation left by the bot's last search is used when there is one: it
+    was made with the bot to move, so it is already from the bot's side.
+    Otherwise the engine is asked. Its answer is from the side to move and is
+    turned round when that side is the opponent.
+    """
+    if last_eval_cp is not None:
+        return last_eval_cp
+
+    stockfish.set_fen_position(board.fen())
+    info = stockfish.get_evaluation()
+    if info["type"] == "cp":
+        cp = info["value"]
+    else:
+        cp = 30000 if info["value"] > 0 else -30000
+
+    bot_to_move = (board.turn == chess.WHITE) == bot_is_white
+    return cp if bot_to_move else -cp
+
+
+def _bot_post(client: berserk.Client, path: str):
+    """POST to a bot endpoint that berserk has no method for.
+
+    Goes through the client's own requestor, so the token, the timeout and the
+    error types are the same as for every other call.
+    """
+    client.bots._r.post(path)
+
+
+def answer_draw_offer(client: berserk.Client, game_id: str, accept: bool):
+    _bot_post(client, f"/api/bot/game/{game_id}/draw/{'yes' if accept else 'no'}")
+
+
+def claim_victory(client: berserk.Client, game_id: str):
+    """Claim the win of a game the opponent has left."""
+    _bot_post(client, f"/api/bot/game/{game_id}/claim-victory")
 
 
 # ─────────────────────────────────────────────
@@ -922,25 +1283,68 @@ class _GameStuck(Exception):
     """Raised by the watchdog when the game is over but the stream didn't report it."""
 
 
+class _Resync(Exception):
+    """The game thread no longer knows the state of its game and has to reread it."""
+
+
+# Rereads in a row, without a move played in between, before a game thread gives up.
+MAX_RESYNCS = 3
+
+
+def _abort_unstarted(client: berserk.Client, game_id: str, move_count: int):
+    """Abort a game the bot is giving up on, as long as that still costs nothing.
+
+    A game can be aborted until both sides have moved. Past that point it is
+    left alone: Lichess announces it again when the event stream reopens, and
+    a new thread picks it up.
+    """
+    if move_count >= 2:
+        return
+    try:
+        client.bots.abort_game(game_id)
+        logger.info(f"[{game_id}] Aborted the game")
+    except Exception as e:
+        logger.debug(f"[{game_id}] Could not abort the game: {e}")
+
+
+def submit_move(client: berserk.Client, game_id: str, move: str, attempts: int = 3):
+    """Send a move, trying again when Lichess cannot be reached.
+
+    An answer from Lichess, whatever it says, is final and is raised as it is.
+    """
+    delay = 2
+    for attempt in range(1, attempts + 1):
+        try:
+            client.bots.make_move(game_id, move)
+            return
+        except Exception as e:
+            if not _is_network_error(e) or attempt == attempts:
+                raise
+            logger.warning(f"[{game_id}] Network error while making move (attempt {attempt}/{attempts}): {e}")
+            _pause(delay)
+            delay *= 2
+
+
 def _stream_with_watchdog(stream, client, game_id, check_interval):
-    """Wrap a blocking game-stream iterator with an API watchdog.
+    """Yield the events of a game stream, and look in on the game while the stream is quiet.
 
-    A daemon reader thread pulls events from *stream* into a queue.
-    The main thread reads the queue with *check_interval* timeouts;
-    on each timeout it polls the Lichess API to verify the game is
-    still in progress.  This is safe for classical games (long thinks)
-    because the watchdog only breaks when the API confirms the game ended.
+    A daemon thread reads *stream* into a queue. Each time nothing has arrived
+    for *check_interval* seconds, Lichess is asked about the game:
 
-    Additionally, if the game stays in "started" status (no moves) for
-    longer than GAME_WATCHDOG_ABORT_TIMEOUT seconds, the watchdog will
-    attempt to abort/resign and terminate the stream to prevent the bot
-    from being stuck indefinitely by an offline opponent.
+    - The game has ended: raise _GameStuck, since the stream will say no more.
+    - Neither side has made its first move for GAME_WATCHDOG_ABORT_TIMEOUT
+      seconds: abort the game and raise _GameStuck. A game can be aborted, at
+      no cost to either side, until both have moved.
+    - Anything else: keep waiting. A game under way is never ended from here,
+      however long the opponent thinks; Lichess's clock takes care of that.
+
+    Failing to reach Lichess says nothing about the game and ends nothing. A
+    connection that has died shows up on the stream itself, as a read timeout.
     """
     q: queue.Queue = queue.Queue()
     _sentinel = object()
-    _consecutive_failures = 0
-    _MAX_CONSECUTIVE_FAILURES = 10  # after 10 failures (~10 min) force-end
-    _started_since: float | None = None  # monotonic time when we first saw "started" status
+    failed_checks = 0
+    unstarted_since: float | None = None  # when the game was first seen without both first moves
 
     def _reader():
         try:
@@ -956,66 +1360,47 @@ def _stream_with_watchdog(stream, client, game_id, check_interval):
     while True:
         try:
             item = q.get(timeout=check_interval)
-            _consecutive_failures = 0  # reset on any event
-            _started_since = None  # stream event received → game is progressing
+            unstarted_since = None  # something happened in the game
         except queue.Empty:
-            # No stream event — ask the API whether the game is still alive
             try:
                 game = client.games.export(game_id)
-                status = game.get("status")
-                if status in _TERMINAL_STATUSES:
-                    logger.info(f"[{game_id}] Watchdog: game ended via API ({status})")
-                    raise _GameStuck(f"Game {game_id} ended ({status}) but stream did not report it")
-
-                # Track how long the game has been in "started" status (no moves)
-                if status == "started":
-                    if _started_since is None:
-                        _started_since = time.monotonic()
-                    elapsed_stuck = time.monotonic() - _started_since
-                    if elapsed_stuck >= GAME_WATCHDOG_ABORT_TIMEOUT:
-                        logger.warning(
-                            f"[{game_id}] Watchdog: game stuck in '{status}' for "
-                            f"{elapsed_stuck:.0f}s — aborting"
-                        )
-                        try:
-                            client.bots.abort_game(game_id)
-                            logger.info(f"[{game_id}] Watchdog: abort sent")
-                        except Exception:
-                            try:
-                                client.bots.resign_game(game_id)
-                                logger.info(f"[{game_id}] Watchdog: resign sent (abort failed)")
-                            except Exception as resign_err:
-                                logger.warning(f"[{game_id}] Watchdog: resign also failed: {resign_err}")
-                        raise _GameStuck(
-                            f"Game {game_id} stuck in '{status}' for {elapsed_stuck:.0f}s, forced abort"
-                        )
-                    logger.info(
-                        f"[{game_id}] Watchdog: game still active ({status}) "
-                        f"— stuck for {elapsed_stuck:.0f}s/{GAME_WATCHDOG_ABORT_TIMEOUT}s"
-                    )
-                else:
-                    _started_since = None  # game progressed past "started"
-                    logger.info(f"[{game_id}] Watchdog: game still active ({status})")
-
-                _consecutive_failures = 0
-            except _GameStuck:
-                raise
             except Exception as e:
-                _consecutive_failures += 1
-                if _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-                    logger.warning(
-                        f"[{game_id}] Watchdog: {_consecutive_failures} consecutive API failures, "
-                        f"assuming game is over"
-                    )
-                    raise _GameStuck(
-                        f"Game {game_id}: watchdog could not verify game status "
-                        f"after {_consecutive_failures} attempts"
-                    )
-                if _consecutive_failures >= 3:
-                    logger.warning(f"[{game_id}] Watchdog API check failed ({_consecutive_failures}x): {e}")
-                else:
-                    logger.info(f"[{game_id}] Watchdog API check failed: {e}")
-            continue
+                failed_checks += 1
+                log = logger.warning if failed_checks >= 3 else logger.info
+                log(f"[{game_id}] Watchdog: could not check the game ({failed_checks}x in a row): {e}")
+                continue
+            failed_checks = 0
+
+            status = game.get("status")
+            if status in _TERMINAL_STATUSES:
+                logger.info(f"[{game_id}] Watchdog: game ended via API ({status})")
+                raise _GameStuck(f"Game {game_id} ended ({status}) but stream did not report it") from None
+
+            moves_played = len((game.get("moves") or "").split())
+            if moves_played >= 2:
+                unstarted_since = None
+                logger.info(f"[{game_id}] Watchdog: game still active ({status}, {moves_played} moves)")
+                continue
+
+            if unstarted_since is None:
+                unstarted_since = time.monotonic()
+            waited = time.monotonic() - unstarted_since
+            if waited < GAME_WATCHDOG_ABORT_TIMEOUT:
+                logger.info(
+                    f"[{game_id}] Watchdog: game not under way yet "
+                    f"({moves_played} moves, {waited:.0f}s/{GAME_WATCHDOG_ABORT_TIMEOUT}s)"
+                )
+                continue
+
+            logger.warning(f"[{game_id}] Watchdog: game not under way after {waited:.0f}s — aborting")
+            try:
+                client.bots.abort_game(game_id)
+            except Exception as e:
+                # Refused: a move has been played meanwhile, so the game is on after all.
+                logger.info(f"[{game_id}] Watchdog: abort refused ({e})")
+                unstarted_since = None
+                continue
+            raise _GameStuck(f"Game {game_id} was not under way after {waited:.0f}s and was aborted") from None
         if item is _sentinel:
             return
         if isinstance(item, BaseException):
@@ -1035,10 +1420,11 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
     btime_ms: int | None = None  # Black's remaining clock in milliseconds
     winc_ms: int = 0             # White's increment per move in milliseconds
     binc_ms: int = 0             # Black's increment per move in milliseconds
-    last_eval_cp: int | None = None  # Cached eval from last move search (white's perspective)
+    last_eval_cp: int | None = None  # Eval from the bot's last search, so from the bot's side
     last_opponent_draw: bool = False  # Tracks opponent draw flag from previous event (rising-edge detection)
     _claim_victory_timer: threading.Timer | None = None  # Timer for claiming win after opponentGone
     _no_first_move_timer: threading.Timer | None = None  # Abort game if opponent never plays first move
+    resyncs = 0  # Times in a row the game had to be reread from Lichess without a move being played
 
     try:
         # Retry stream connection with backoff
@@ -1160,81 +1546,24 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         )
                         if opponent_draw_now and not last_opponent_draw:
                             logger.info(f"[{game_id}] Draw offer received")
-                            
+
                             if stockfish:
+                                # Anything going wrong while judging the offer declines it.
+                                accept_draw = False
                                 try:
-                                    accept_draw = False
-
-                                    # Reuse the eval cached from the last move search — no extra engine
-                                    # call needed. Fall back to get_evaluation() only at game start.
-                                    if last_eval_cp is not None:
-                                        # last_eval_cp is from side-to-move perspective at search time,
-                                        # which was always the bot's turn → already bot's perspective.
-                                        evaluation = last_eval_cp
-                                    else:
-                                        # First few moves or no cache yet — quick explicit evaluation.
-                                        # get_evaluation() returns from current side-to-move perspective;
-                                        # flip only if it's the opponent's turn.
-                                        stockfish.set_fen_position(board.fen())
-                                        eval_info = stockfish.get_evaluation()
-                                        if eval_info["type"] == "cp":
-                                            raw_cp = eval_info["value"]
-                                        else:
-                                            mate = eval_info["value"]
-                                            raw_cp = 30000 if mate > 0 else -30000
-                                        bot_is_side_to_move = (board.turn == chess.WHITE) == bot_is_white
-                                        evaluation = raw_cp if bot_is_side_to_move else -raw_cp
-
-                                    logger.info(f"[{game_id}] Position evaluation: {evaluation} centipawns")
-
-                                    if abs(evaluation) >= 29000:
-                                        # Mate evaluation — always decline
-                                        if evaluation > 0:
-                                            logger.info(f"[{game_id}] Declining draw offer (we have mate)")
-                                        else:
-                                            logger.info(f"[{game_id}] Declining draw offer (getting mated, but will fight)")
-                                    elif -200 <= evaluation <= 200:
-                                        accept_draw = True
-                                        logger.info(f"[{game_id}] Accepting draw offer (balanced position: {evaluation}cp)")
-                                    elif evaluation > 200:
-                                        logger.info(f"[{game_id}] Declining draw offer (we're winning: {evaluation}cp)")
-                                    else:
-                                        logger.info(f"[{game_id}] Declining draw offer (we're losing but engine can play: {evaluation}cp)")
-
-                                    # Send decision via API (try library first, then fall back to BOT endpoint)
-                                    try:
-                                        client.board.handle_draw_offer(game_id, accept=accept_draw)
-                                    except Exception as api_error:
-                                        # If the error indicates this endpoint isn't for BOT accounts,
-                                        # fallback to the BOT HTTP endpoint which supports bot tokens.
-                                        err_text = str(api_error).lower()
-                                        if "not for bot accounts" in err_text or "403" in err_text or (getattr(api_error, 'response', None) and getattr(api_error.response, 'status_code', None) == 403):
-                                            try:
-                                                url_action = "yes" if accept_draw else "no"
-                                                url = f"https://lichess.org/api/bot/game/{game_id}/draw/{url_action}"
-                                                headers = {"Authorization": f"Bearer {TOKEN}"}
-                                                resp = requests.post(url, headers=headers, timeout=10)
-                                                if resp.status_code >= 400:
-                                                    logger.error(f"[{game_id}] BOT endpoint responded {resp.status_code}: {resp.text}")
-                                                else:
-                                                    logger.info(f"[{game_id}] Responded to draw via BOT endpoint: {url_action}")
-                                            except Exception as http_err:
-                                                logger.error(f"[{game_id}] Failed to respond to draw offer via BOT endpoint: {http_err}")
-                                        else:
-                                            logger.error(f"[{game_id}] Failed to respond to draw offer: {api_error}")
-
+                                    evaluation = evaluation_for_bot(stockfish, board, bot_is_white, last_eval_cp)
+                                    accept_draw = should_accept_draw(evaluation)
+                                    logger.info(
+                                        f"[{game_id}] {'Accepting' if accept_draw else 'Declining'} draw offer "
+                                        f"(evaluation for the bot: {evaluation:+d} cp)"
+                                    )
                                 except Exception as e:
                                     logger.error(f"[{game_id}] Error evaluating draw offer: {e}")
-                                    # On error, attempt to decline draw and continue playing
-                                    try:
-                                        client.board.handle_draw_offer(game_id, accept=False)
-                                    except Exception as api_error:
-                                        try:
-                                            url = f"https://lichess.org/api/bot/game/{game_id}/draw/no"
-                                            headers = {"Authorization": f"Bearer {TOKEN}"}
-                                            requests.post(url, headers=headers, timeout=10)
-                                        except Exception as e:
-                                            logger.debug(f"Draw decline failed for {game_id}: {e}")
+
+                                try:
+                                    answer_draw_offer(client, game_id, accept_draw)
+                                except Exception as e:
+                                    logger.error(f"[{game_id}] Failed to answer draw offer: {e}")
 
                         last_opponent_draw = opponent_draw_now
 
@@ -1251,15 +1580,10 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             if claim_seconds is not None:
                                 def _claim_win(_gid=game_id):
                                     try:
-                                        url = f"https://lichess.org/api/bot/game/{_gid}/claim-victory"
-                                        headers = {"Authorization": f"Bearer {TOKEN}"}
-                                        resp = requests.post(url, headers=headers, timeout=10)
-                                        if resp.status_code < 400:
-                                            logger.info(f"[{_gid}] Claimed victory (opponent gone)")
-                                        else:
-                                            logger.warning(f"[{_gid}] Claim victory returned {resp.status_code}: {resp.text}")
+                                        claim_victory(client, _gid)
+                                        logger.info(f"[{_gid}] Claimed victory (opponent gone)")
                                     except Exception as e:
-                                        logger.error(f"[{_gid}] Failed to claim victory: {e}")
+                                        logger.warning(f"[{_gid}] Could not claim victory: {e}")
                                 _claim_victory_timer = threading.Timer(claim_seconds + 1, _claim_win)
                                 _claim_victory_timer.daemon = True
                                 _claim_victory_timer.start()
@@ -1295,13 +1619,9 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         logger.info(f"[{game_id}] Calculating move (move {board.fullmove_number})...")
                         stockfish.set_fen_position(board.fen())
 
-                        # Decide search mode:
-                        # - UCI_LimitStrength active (< FULL_STRENGTH_THRESHOLD):
-                        #   MUST use go movetime. Native clocks + UCI_LimitStrength causes
-                        #   Stockfish to time-manage as a limited player would, potentially
-                        #   thinking 30+ seconds on the first move → Lichess abort.
-                        # - Full strength (>= FULL_STRENGTH_THRESHOLD):
-                        #   Native clocks — Stockfish manages time optimally.
+                        # With the strength limit on, search for a fixed move time, so
+                        # that the reply comes quickly. At full strength, and against an
+                        # opponent without a rating, let Stockfish manage the game clock.
                         use_movetime_mode = (
                             DYNAMIC_STRENGTH
                             and opponent_rating is not None
@@ -1478,97 +1798,71 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         # Cache eval for draw offer decisions — free from the search info line above
                         last_eval_cp = _get_last_eval_cp(stockfish)
 
-                        if move:
-                            # Double-check game isn't over before making move
-                            if board.is_game_over():
-                                reason = get_game_end_reason(board)
-                                logger.info(f"[{game_id}] Game ended while calculating move: {reason}")
-                                break
-                            
-                            # Retry mechanism for network errors during move submission
-                            max_retries = 3
-                            retry_delay = 2
-                            
-                            for attempt in range(max_retries):
-                                try:
-                                    client.bots.make_move(game_id, move)
-                                    board.push_uci(move)
-                                    last_move_count += 1  # Increment move count after our move
-                                    logger.info(f"[{game_id}] Played {move}")
-                                    break  # Success - exit retry loop
-                                except (ConnectionError, Timeout, ChunkedEncodingError, ProtocolError, RequestException) as net_err:
-                                    if attempt < max_retries - 1:
-                                        logger.warning(f"[{game_id}] Network error while making move (attempt {attempt + 1}/{max_retries}): {net_err}")
-                                        time.sleep(retry_delay)
-                                        retry_delay *= 2  # Exponential backoff
-                                    else:
-                                        logger.error(f"[{game_id}] Failed to make move after {max_retries} attempts: {net_err}")
-                                        logger.info(f"[{game_id}] Game interrupted due to persistent connection issues")
-                                        raise  # Re-raise to trigger outer exception handler
-                                except (ApiError, ResponseError) as api_err:
-                                    # berserk wraps RemoteDisconnected/connection errors as ApiError
-                                    err_str = str(api_err).lower()
-                                    if "not your turn" in err_str or "game already over" in err_str:
-                                        raise  # Not a network error — let outer handler deal with it
-                                    if "connection" in err_str or "remote" in err_str or "aborted" in err_str:
-                                        if attempt < max_retries - 1:
-                                            logger.warning(f"[{game_id}] Network error while making move (attempt {attempt + 1}/{max_retries}): {api_err}")
-                                            time.sleep(retry_delay)
-                                            retry_delay *= 2
-                                        else:
-                                            logger.error(f"[{game_id}] Failed to make move after {max_retries} attempts: {api_err}")
-                                            logger.info(f"[{game_id}] Game interrupted due to persistent connection issues")
-                                            raise
-                                    else:
-                                        raise  # Non-network API error — let outer handler deal with it
-                        else:
-                            logger.warning(f"[{game_id}] Stockfish returned no move")
+                        if not move:
+                            raise _Resync("the engine returned no move")
 
-                    except (ConnectionError, Timeout, ChunkedEncodingError, ProtocolError, RequestException) as e:
-                        # Network errors that couldn't be resolved after retries
-                        logger.warning(f"[{game_id}] Network error while making move: {e}")
-                        logger.info(f"[{game_id}] Game interrupted due to connection issues")
-                        break
-                    except (ApiError, ResponseError) as e:
-                        # Handle API-specific errors (connection-related ones were already retried above)
-                        error_str = str(e).lower()
-                        if "not your turn" in error_str or "game already over" in error_str:
-                            # Race condition: engine finished computing after game ended (abort/flag)
-                            logger.info(f"[{game_id}] Game ended while making move (race condition)")
-                        elif "connection" in error_str or "remote" in error_str or "aborted" in error_str:
-                            # Exhausted retries from the inner loop
-                            logger.warning(f"[{game_id}] Network error while making move: {e}")
-                            logger.info(f"[{game_id}] Game interrupted due to connection issues")
-                        else:
-                            logger.error(f"[{game_id}] API error while making move: {e}")
-                        break
+                        # Double-check game isn't over before making move
+                        if board.is_game_over():
+                            reason = get_game_end_reason(board)
+                            logger.info(f"[{game_id}] Game ended while calculating move: {reason}")
+                            break
+
+                        try:
+                            submit_move(client, game_id, move)
+                        except ResponseError as e:
+                            if _http_status(e) == 400:
+                                # Either the game ended while the engine was thinking, or an
+                                # earlier attempt got through and only its answer was lost,
+                                # or the board here is out of step. Lichess knows which.
+                                raise _Resync(f"move {move} was refused ({e})") from e
+                            raise
+
+                        board.push_uci(move)
+                        last_move_count += 1  # Increment move count after our move
+                        resyncs = 0
+                        logger.info(f"[{game_id}] Played {move}")
+
                     except StockfishException as e:
-                        logger.error(f"Stockfish error in game {game_id}: {e}")
-                        break
-                
+                        raise _Resync(f"the engine failed ({e})") from e
+
                 # If stream ends normally, exit
                 break
                 
-            except (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout) as e:
-                logger.warning(f"[{game_id}] Stream connection lost: {e}. Reconnecting in 5s...")
-                time.sleep(5)
-                continue
-            except ResponseError as e:
-                if hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]:
-                    logger.warning(f"[{game_id}] Lichess API error {e.response.status_code}. Reconnecting in 5s...")
-                    time.sleep(5)
-                    continue
-                logger.error(f"[{game_id}] API error in game stream: {e}", exc_info=True)
-                break
             except _GameStuck:
                 # Watchdog confirmed the game is over — just exit the thread
                 break
+            except _Resync as e:
+                # Reopening the game stream starts from the game as Lichess has
+                # it: finished, or with the true move list and a fresh engine.
+                resyncs += 1
+                if resyncs > MAX_RESYNCS:
+                    logger.error(f"[{game_id}] Giving up on the game: {e}")
+                    _abort_unstarted(client, game_id, last_move_count)
+                    break
+                logger.warning(f"[{game_id}] Rereading the game from Lichess: {e}")
+                _pause(1)
+                continue
             except Exception as e:
-                logger.error(f"[{game_id}] Unexpected stream error: {e}", exc_info=True)
-                break
+                status = _http_status(e)
+                if _is_network_error(e):
+                    logger.warning(f"[{game_id}] Connection lost: {e}. Reconnecting in 5s...")
+                    _pause(5)
+                elif status in _GATEWAY_ERRORS:
+                    logger.warning(f"[{game_id}] Lichess API error {status}. Reconnecting in 5s...")
+                    _pause(5)
+                elif status == 429:
+                    # Lichess asks for a full minute of silence after a 429.
+                    logger.warning(f"[{game_id}] Rate limited. Reconnecting in 60s...")
+                    _pause(60)
+                else:
+                    logger.error(f"[{game_id}] Giving up on the game: {e}", exc_info=True)
+                    _abort_unstarted(client, game_id, last_move_count)
+                    break
+                continue
 
     except Exception as e:
         logger.error(f"Game {game_id} crashed: {e}", exc_info=True)
+        _abort_unstarted(client, game_id, last_move_count)
 
     finally:
         if _claim_victory_timer is not None:
@@ -1589,37 +1883,257 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 # MAIN LOOP
 # ─────────────────────────────────────────────
 
-def challenge_loop(client: berserk.Client, bot_username: str,
-                   active_games: Dict[str, threading.Thread],
-                   active_games_lock: threading.Lock,
-                   challenge_tracker: ChallengeTracker,
-                   retry_event: threading.Event,
-                   pending_challenge: Dict):
+# Seconds the event loop may go without reading a line or trying to reconnect
+# before the process gives up and exits. The loop does one or the other at
+# least once a minute even while Lichess is unreachable, so this much silence
+# means the loop itself is stuck.
+STALL_EXIT_AFTER = 300
+
+
+class StreamMonitor:
+    """Remembers when Lichess last sent a line and when the event loop last moved."""
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._last_line: Optional[float] = None
+        self._last_progress = clock()
+
+    def line_received(self):
+        self._last_line = self._last_progress = self._clock()
+        healthcheck.beat()
+
+    def progress(self):
+        """The event loop is running, whether or not Lichess can be reached."""
+        self._last_progress = self._clock()
+
+    def alive(self, max_silence: float = 30) -> bool:
+        """True while lines keep arriving; Lichess sends one at least every 7 seconds."""
+        return self._last_line is not None and self._clock() - self._last_line <= max_silence
+
+    def silent_for(self) -> Optional[float]:
+        """Seconds since Lichess last sent a line, or None before the first one."""
+        return None if self._last_line is None else self._clock() - self._last_line
+
+    def stalled_for(self) -> float:
+        return self._clock() - self._last_progress
+
+
+def watch_event_loop(monitor: StreamMonitor, limit: float = STALL_EXIT_AFTER,
+                     interval: float = 15, exit_process=os._exit):
+    """End the process when the event loop stops moving, so its supervisor starts a fresh one.
+
+    A lost connection is not a stall: the loop notices it through the read
+    timeout and reconnects by itself. This is for the cases it cannot get out
+    of, a handler that never returns or a read that hangs despite the timeout.
+    """
+    while not shutdown_requested:
+        _pause(interval)
+        stalled = monitor.stalled_for()
+        if stalled > limit and not shutdown_requested:
+            logger.critical(f"The event loop has not moved for {stalled:.0f}s, exiting to be restarted")
+            logging.shutdown()
+            exit_process(1)
+            return
+
+
+def push_health(monitor: StreamMonitor, url: str, interval: float = KUMA_PUSH_INTERVAL, get=requests.get):
+    """Report to an Uptime Kuma push monitor, once every ``interval`` seconds.
+
+    "up" while Lichess has been heard from within the health check's limit,
+    "down" with the length of the silence otherwise, which is also what a bot
+    with a stuck event loop comes to report. A bot that has stopped reports
+    nothing at all, and Kuma raises the alarm when the reports stop.
+
+    The first report goes out as soon as Lichess is heard from, which takes
+    up to the 7 seconds between two of its keep-alives. That keeps the gap a
+    restart leaves in the reports short. A bot that cannot reach Lichess says
+    so after one interval.
+
+    The address holds the monitor's token: it is sent nowhere else and never
+    logged, and the request carries no Lichess credentials.
+    """
+    address = url.split("?", 1)[0]
+    failing = False
+    waited = 0
+    while monitor.silent_for() is None and waited < interval and not shutdown_requested:
+        _pause(1)
+        waited += 1
+    while not shutdown_requested:
+        if monitor.alive(healthcheck.MAX_AGE):
+            report = {"status": "up", "msg": "OK"}
+        else:
+            silence = monitor.silent_for()
+            heard = "not heard from yet" if silence is None else f"silent for {silence:.0f}s"
+            report = {"status": "down", "msg": f"Lichess {heard}"}
+        try:
+            get(address, params=report, timeout=10).raise_for_status()
+            failing = False
+        except Exception as e:
+            # Only the kind of error: its text would contain the address.
+            if not failing:
+                logger.warning(f"Could not report to Uptime Kuma ({type(e).__name__}); will keep trying")
+                failing = True
+        _pause(interval)
+
+
+def stream_events(session: requests.Session, base_url: str = LICHESS_URL):
+    """Yield every line of the account's event stream: an event, or None for a keep-alive.
+
+    Lichess writes an empty line every 7 seconds while it has nothing to
+    report. berserk's own iterator drops those lines, yet they are the only
+    sign that an idle stream is still connected, so the stream is read here.
+    """
+    try:
+        response = session.get(
+            f"{base_url}/api/stream/event",
+            stream=True,
+            headers={"Accept": "application/x-ndjson"},
+        )
+    except RequestException as e:
+        raise ApiError(e) from e
+
+    with response:
+        if not response.ok:
+            raise ResponseError(response)
+        for line in response.iter_lines():
+            yield json.loads(line) if line else None
+
+
+def _pause(seconds: float):
+    """Wait, but return at once when the bot is shutting down."""
+    _shutdown_event.wait(seconds)
+
+
+def run_event_loop(session: requests.Session, state: "BotState", base_url: str = LICHESS_URL):
+    """Follow the event stream until shutdown, reopening it whenever it ends or fails."""
+    while not shutdown_requested:
+        state.stream.progress()
+        try:
+            logger.info("Connecting to event stream...")
+            for event in stream_events(session, base_url):
+                state.stream.line_received()
+                if shutdown_requested:
+                    return
+                if event is None:
+                    continue
+
+                try:
+                    handle_event(event, state)
+                except Exception as e:
+                    logger.error(f"Event processing error: {e}", exc_info=True)
+
+            logger.warning("Event stream ended unexpectedly. Reconnecting in 10s...")
+            delay = 10
+        except Exception as e:
+            delay = _event_stream_retry_delay(e)
+
+        _pause(delay)
+
+
+@dataclass
+class BotState:
+    """What the event loop, the challenge loop and the game threads share."""
+    client: berserk.Client
+    username: str
+    tracker: ChallengeTracker
+    # One thread per game being played, keyed by game id.
+    active_games: Dict[str, threading.Thread] = field(default_factory=dict)
+    games_lock: threading.Lock = field(default_factory=threading.Lock)
+    # The outgoing challenge still waiting for an answer: {id, opponent, sent_at}, or empty.
+    pending_challenge: Dict[str, Any] = field(default_factory=dict)
+    # Set to wake the challenge loop before its current wait runs out.
+    retry_event: threading.Event = field(default_factory=threading.Event)
+    # Incoming challenges the bot has accepted whose game has not started yet,
+    # by challenge id with the time of acceptance. Each one holds a game slot.
+    accepted_challenges: Dict[str, float] = field(default_factory=dict)
+    stream: StreamMonitor = field(default_factory=StreamMonitor)
+    # Bots that are being left alone, and the file all of this is remembered in
+    rests: OpponentRests = field(default_factory=OpponentRests)
+    store: Optional[StateFile] = None
+
+    def remember(self):
+        """Write down what has to survive a restart: the challenges made and the bots left alone."""
+        if self.store is not None:
+            with self.store.lock:
+                self.store.save({"challenges": self.tracker.export(), "rests": self.rests.export()})
+
+    def recall(self):
+        """Take over what the previous run wrote down."""
+        if self.store is None:
+            return
+        saved = self.store.load()
+        self.tracker.restore(saved.get("challenges"))
+        self.rests.restore(saved.get("rests"))
+        _, last_day = self.tracker.counts()
+        logger.info(
+            f"Remembered from the previous run: {last_day} challenge(s) in the last 24 hours, "
+            f"{self.rests.count()} bot(s) being left alone"
+        )
+
+
+# How long an accepted challenge may take to show up as a game before its slot
+# is given back. Lichess starts the game at once; this only covers an accept
+# that was lost on the way.
+ACCEPTED_CHALLENGE_TTL = 30
+
+
+def free_game_slots(state: BotState) -> int:
+    """Game slots not taken by a running game or by an accepted challenge."""
+    now = time.monotonic()
+    with state.games_lock:
+        for cid in [c for c, at in state.accepted_challenges.items() if now - at > ACCEPTED_CHALLENGE_TTL]:
+            del state.accepted_challenges[cid]
+        running = sum(1 for t in state.active_games.values() if t.is_alive())
+        return MAX_CONCURRENT_GAMES - running - len(state.accepted_challenges)
+
+
+def cancel_pending_challenge(state: BotState, why: str):
+    """Withdraw the outgoing challenge, so that it cannot turn into a game later.
+
+    Lichess stops showing a real-time challenge after 20 seconds, but a bot
+    that queued its id can still accept it much later, when this bot may have
+    no slot left for the game.
+    """
+    challenge_id = state.pending_challenge.get("id")
+    if not challenge_id:
+        return
+    opponent = state.pending_challenge.get("opponent", "unknown")
+    state.pending_challenge.clear()
+    try:
+        state.client.challenges.cancel(challenge_id)
+        logger.info(f"Canceled challenge {challenge_id} to {opponent}: {why}")
+    except Exception as e:
+        logger.debug(f"Could not cancel challenge {challenge_id}: {e}")
+
+
+def challenge_loop(state: BotState):
     """Background thread that challenges bots whenever the bot is idle.
 
     Uses an event-based wait so the loop reacts immediately when a challenge
     is declined or canceled instead of sleeping through the full interval.
-
-    pending_challenge is a shared dict written here and read by the main event
-    loop: {'id': str, 'opponent': str, 'sent_at': float} or empty {}.
     """
     logger.info("Challenge loop started")
     ACCEPT_TIMEOUT = 90   # seconds to wait for opponent to accept
     RETRY_DELAY   = 30   # seconds to wait after a decline before trying again
+    STREAM_RECHECK_INTERVAL = 5  # seconds between looks at an event stream that is not connected
 
     # Exponential backoff state for HTTP 429 responses
     RATE_LIMIT_BASE  = 300   # initial backoff: 5 minutes
     RATE_LIMIT_MAX   = 3600  # maximum backoff: 60 minutes
     rate_limit_backoff = RATE_LIMIT_BASE  # current backoff duration (reset after success)
+    rate_limited_until = 0.0  # monotonic time before which Lichess is not asked again
+    stream_down = False  # so the outage is logged once, not on every pass
+
+    pending_challenge = state.pending_challenge
+    retry_event = state.retry_event
 
     while not shutdown_requested:
         try:
-            with active_games_lock:
-                active_count = sum(1 for t in active_games.values() if t.is_alive())
+            free_slots = free_game_slots(state)
 
-            if not ENABLE_AUTO_CHALLENGE or active_count >= MAX_CONCURRENT_GAMES:
-                if active_count >= MAX_CONCURRENT_GAMES:
-                    logger.debug(f"Skipping challenge: {active_count}/{MAX_CONCURRENT_GAMES} active game(s)")
+            if not ENABLE_AUTO_CHALLENGE or free_slots <= 0:
+                if free_slots <= 0:
+                    logger.debug(f"Skipping challenge: all {MAX_CONCURRENT_GAMES} game slot(s) are taken")
                 retry_event.clear()
                 retry_event.wait(timeout=CHALLENGE_CHECK_INTERVAL)
                 retry_event.clear()
@@ -1639,35 +2153,92 @@ def challenge_loop(client: berserk.Client, bot_username: str,
                     retry_event.clear()
                     continue
                 else:
-                    logger.info(
-                        f"No response from {pending_challenge['opponent']} after "
-                        f"{elapsed:.0f}s — they may be offline. Trying another bot in {RETRY_DELAY}s..."
-                    )
-                    pending_challenge.clear()
+                    opponent = pending_challenge["opponent"]
+                    if state.stream.alive():
+                        rest = state.rests.unanswered(opponent)
+                        logger.info(
+                            f"No response from {opponent} after {elapsed:.0f}s — leaving it alone for "
+                            f"{_span(rest)}. Trying another bot in {RETRY_DELAY}s..."
+                        )
+                    else:
+                        # Its answer would have come over the event stream.
+                        logger.info(f"No response from {opponent} after {elapsed:.0f}s, with the event stream down")
+                    cancel_pending_challenge(state, f"no answer after {elapsed:.0f}s")
+                    state.remember()
                     retry_event.wait(timeout=RETRY_DELAY)
                     retry_event.clear()
+
+            # ── Lichess has refused a challenge: wait the refusal out ────────
+            # A game starting or ending wakes this loop, and must not turn
+            # into another request while Lichess has asked for silence.
+            limited_for = rate_limited_until - time.monotonic()
+            if limited_for > 0:
+                retry_event.clear()
+                retry_event.wait(timeout=limited_for)
+                retry_event.clear()
+                continue
+
+            # ── Without the event stream a challenge would go unanswered ─────
+            if not state.stream.alive():
+                # An accepted challenge is announced on the event stream. With
+                # the stream down the game would start and never get a move.
+                # This is also the state at startup, until the first line arrives.
+                if not stream_down:
+                    logger.info("Event stream is not connected — not challenging until it is")
+                    stream_down = True
+                retry_event.clear()
+                retry_event.wait(timeout=STREAM_RECHECK_INTERVAL)
+                retry_event.clear()
+                continue
+            stream_down = False
+
+            # ── The bot's own limits ─────────────────────────────────────────
+            limit_wait = state.tracker.seconds_until_free()
+            if limit_wait > 0:
+                last_hour, last_day = state.tracker.counts()
+                logger.info(
+                    f"Challenge limit reached ({last_hour}/{state.tracker.max_per_hour} this hour, "
+                    f"{last_day}/{state.tracker.max_per_day} in 24 hours) — "
+                    f"next challenge in {limit_wait / 60:.0f} min"
+                )
+                retry_event.clear()
+                retry_event.wait(timeout=limit_wait)
+                retry_event.clear()
+                continue
 
             # ── Send a new challenge ─────────────────────────────────────────
             logger.info("Looking for a bot to challenge...")
             try:
-                challenge_id = try_challenge_random_bot(client, bot_username, challenge_tracker)
-            except RateLimitError:
+                challenge = try_challenge_random_bot(state.client, state.username, state.tracker, state.rests)
+            except RateLimitError as e:
+                state.remember()
+                if e.retry_after:
+                    # Lichess said when the limit ends; asking sooner is pointless.
+                    wait = e.retry_after + 60
+                else:
+                    wait = rate_limit_backoff
+                    rate_limit_backoff = min(rate_limit_backoff * 2, RATE_LIMIT_MAX)
                 logger.warning(
                     f"Rate limited by Lichess API (HTTP 429) — backing off for "
-                    f"{rate_limit_backoff // 60}m {rate_limit_backoff % 60}s before next attempt"
+                    f"{wait // 60}m {wait % 60}s before next attempt"
                 )
-                retry_event.clear()
-                retry_event.wait(timeout=rate_limit_backoff)
-                retry_event.clear()
-                rate_limit_backoff = min(rate_limit_backoff * 2, RATE_LIMIT_MAX)
+                rate_limited_until = time.monotonic() + wait
                 continue
 
             # Successful challenge attempt — reset backoff
             rate_limit_backoff = RATE_LIMIT_BASE
+            state.remember()
 
-            if challenge_id:
+            if challenge:
+                challenge_id, opponent, speed = challenge
+                with state.games_lock:
+                    already_playing = challenge_id in state.active_games
+                if already_playing:
+                    # Accepted before this thread got here; the game has the challenge's id.
+                    continue
                 pending_challenge["id"] = challenge_id
-                pending_challenge["opponent"] = "unknown"
+                pending_challenge["opponent"] = opponent
+                pending_challenge["speed"] = speed
                 pending_challenge["sent_at"] = time.monotonic()
                 # Wait up to ACCEPT_TIMEOUT; fires early on decline/cancel
                 retry_event.clear()
@@ -1686,50 +2257,65 @@ def challenge_loop(client: berserk.Client, bot_username: str,
     logger.info("Challenge loop stopped")
 
 
+def _event_stream_retry_delay(exc: BaseException) -> int:
+    """Log why the event stream stopped and return the seconds to wait before reopening it."""
+    status = _http_status(exc)
+    if _is_network_error(exc):
+        logger.warning(f"Event stream connection lost: {exc}. Reconnecting in 10s...")
+        return 10
+    if status in _GATEWAY_ERRORS:
+        logger.warning(f"Lichess API error {status}. Reconnecting in 15s...")
+        return 15
+    if status == 429:
+        # Lichess asks for a full minute of silence after a 429.
+        logger.warning("Rate limited by Lichess (429). Backing off for 60s...")
+        return 60
+    if status is not None:
+        logger.error(f"API error: {exc}. Reconnecting in 30s...")
+        return 30
+    logger.error(f"Main loop error: {exc}", exc_info=True)
+    return 10
+
+
 class TimeoutHTTPAdapter(requests.adapters.HTTPAdapter):
-    """HTTPAdapter with a default timeout so streaming reads don't hang forever."""
+    """HTTPAdapter that gives every request a timeout unless the caller set one.
+
+    requests hands the adapter ``timeout=None`` whenever the caller gave none,
+    so the key is always present: it has to be tested for None. ``setdefault``
+    never fires here and leaves every request, streams included, without a
+    timeout, and a read on a silently dropped connection then blocks forever.
+    """
     def __init__(self, *args, timeout=None, **kwargs):
         self.timeout = timeout
         super().__init__(*args, **kwargs)
 
-    def send(self, *args, **kwargs):
-        kwargs.setdefault("timeout", self.timeout)
-        return super().send(*args, **kwargs)
+    def send(self, request, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = self.timeout
+        return super().send(request, **kwargs)
 
 
-def main():
-    session = berserk.TokenSession(TOKEN)
-    # Lichess sends keepalive newlines every ~30s on streams.
-    # A 120s read timeout ensures dead connections are detected within ~2 min.
-    adapter = TimeoutHTTPAdapter(timeout=(10, 120))  # (connect, read)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    client = berserk.Client(session)
+# (connect, read) in seconds. Lichess writes an empty keep-alive line every
+# 7 seconds on the event stream and on game streams, so 30 seconds without a
+# byte means the connection is gone, not idle.
+HTTP_TIMEOUT = (10, 30)
 
-    # Get account with retry logic
-    account = retry_with_backoff(
-        lambda: client.account.get(),
-        max_retries=10,
-        base_delay=2,
-        description="Get account info"
-    )
-    
-    is_bot = account.get("title") == "BOT"
-    if not is_bot:
-        raise RuntimeError("This account is NOT a BOT account")
 
-    bot_username = account.get("username")
-    logger.info("Bot account verified: %s", bot_username)
+def abort_stale_games(client: berserk.Client):
+    """Abort games left over from a previous run that never got going.
 
-    # ── Clean up stuck games from previous session ──
+    A game with fewer than two moves can still be aborted at no cost. Anything
+    further along is left alone: Lichess announces every game in progress when
+    the event stream opens, and the game is picked up from there.
+    """
     try:
         ongoing = client.games.get_ongoing()
         if ongoing:
             logger.info(f"Found {len(ongoing)} ongoing game(s) from previous session")
             for game in ongoing:
                 gid = game.get("gameId") or game.get("id", "")
-                status = game.get("status", {})
-                status_name = status.get("name", status) if isinstance(status, dict) else str(status)
+                status = game.get("status")
+                status_name = status.get("name") if isinstance(status, dict) else status
                 opponent = game.get("opponent", {})
                 opp_name = opponent.get("username", "?")
 
@@ -1737,8 +2323,6 @@ def main():
                     logger.info(f"  [{gid}] Already finished ({status_name}), skipping")
                     continue
 
-                # Check if it's a game vs an offline/gone opponent that has been
-                # idle for a long time — try to abort (< 2 moves) or resign.
                 try:
                     full = client.games.export(gid)
                     moves = full.get("moves", "")
@@ -1757,189 +2341,217 @@ def main():
     except Exception as e:
         logger.warning(f"Could not check ongoing games: {e}")
 
-    global _active_games, _active_games_lock
-    active_games: Dict[str, threading.Thread] = {}
-    active_games_lock = threading.Lock()
-    _active_games = active_games
-    _active_games_lock = active_games_lock
-    challenge_tracker = ChallengeTracker(MAX_CHALLENGES_PER_HOUR)
-    retry_event = threading.Event()   # signals challenge loop to wake up immediately
-    pending_challenge: Dict = {}      # shared state: {id, opponent, sent_at}
+
+def _answer_challenge(answer, challenge_id: str, **kwargs) -> bool:
+    """Accept or decline a challenge; False when Lichess did not take the answer."""
+    try:
+        answer(challenge_id, **kwargs)
+        return True
+    except ResponseError as e:
+        if _http_status(e) == 404:
+            logger.debug(f"Challenge {challenge_id} no longer exists")
+        else:
+            logger.warning(f"Could not answer challenge {challenge_id}: {e}")
+    except ApiError as e:
+        logger.warning(f"Could not answer challenge {challenge_id}: {e}")
+    return False
+
+
+def handle_event(event: Dict[str, Any], state: BotState):
+    """Act on one event from the account's event stream."""
+    client = state.client
+    pending_challenge = state.pending_challenge
+    retry_event = state.retry_event
+    kind = event["type"]
+
+    if kind == "challenge":
+        challenge = event["challenge"]
+        cid = challenge["id"]
+
+        dest_user = challenge.get("destUser", {})
+        dest_username = dest_user.get("name", dest_user.get("id", "")).lower()
+
+        # Only incoming challenges (where we are the destination) need an answer
+        if dest_username == state.username.lower():
+            reason = challenge_decline_reason(challenge)
+            if reason is not None:
+                _answer_challenge(client.bots.decline_challenge, cid, reason=reason)
+            elif free_game_slots(state) <= 0:
+                # Accepting would start a game that has to be aborted at once.
+                logger.info(f"Declining challenge {cid}: all {MAX_CONCURRENT_GAMES} game slot(s) are taken")
+                _answer_challenge(client.bots.decline_challenge, cid, reason="later")
+            elif _answer_challenge(client.bots.accept_challenge, cid):
+                with state.games_lock:
+                    state.accepted_challenges[cid] = time.monotonic()
+                if pending_challenge and free_game_slots(state) <= 0:
+                    cancel_pending_challenge(state, "the last game slot went to an incoming challenge")
+        else:
+            # Outgoing challenge — update opponent name in pending tracker
+            logger.debug(f"Outgoing challenge to {dest_username}: {cid}")
+            if pending_challenge.get("id") == cid:
+                pending_challenge["opponent"] = dest_username
+
+    elif kind == "challengeDeclined":
+        challenge = event.get("challenge", {})
+        cid = challenge.get("id", "")
+        decliner = (challenge.get("destUser") or {}).get("name", "")
+        if not decliner or decliner.lower() == state.username.lower():
+            # Lichess reports a decline to both sides, so every challenge the
+            # bot turns down comes back here.
+            logger.debug(f"Lichess confirmed that challenge {cid} was declined")
+            return
+
+        reason_key = (challenge.get("declineReasonKey") or "generic").lower()
+        reason = challenge.get("declineReason") or reason_key
+        is_ours = pending_challenge.get("id") == cid
+        speed = challenge.get("speed") if challenge.get("speed") in SPEEDS else pending_challenge.get("speed")
+        rest = state.rests.declined(decliner, speed, reason_key)
+        logger.info(
+            f"Challenge {'(ours) ' if is_ours else ''}declined by {decliner}"
+            f" — reason: {reason}. Leaving it alone for {_span(rest)}"
+            f"{f' at {speed}' if reason_key in OpponentRests.SPEED_REASONS and speed else ''}"
+        )
+        if is_ours:
+            pending_challenge.clear()
+        state.remember()
+        # Always signal retry so challenge loop can pick the next bot
+        retry_timer = threading.Timer(30, retry_event.set)
+        retry_timer.daemon = True
+        retry_timer.start()
+
+    elif kind == "challengeCanceled":
+        challenge = event.get("challenge", {})
+        challenger = challenge.get("challenger", {}).get("name", "Unknown")
+        cid = challenge.get("id", "")
+        is_ours = pending_challenge.get("id") == cid
+        logger.info(
+            f"Challenge {'(ours) ' if is_ours else ''}canceled by {challenger}"
+        )
+        if is_ours:
+            pending_challenge.clear()
+            retry_event.set()
+
+    elif kind == "gameStart":
+        game_id = event["game"]["id"]
+        over_limit = False
+
+        with state.games_lock:
+            # Forget threads that have ended, so their slots are free again
+            dead = [gid for gid, t in state.active_games.items() if not t.is_alive()]
+            for gid in dead:
+                del state.active_games[gid]
+
+            # A game carries the id of the challenge it came from.
+            state.accepted_challenges.pop(game_id, None)
+
+            if game_id in state.active_games:
+                # Lichess announces every game in progress each time the event
+                # stream opens, so after a reconnect this arrives for games
+                # that already have a thread. Starting again would put two
+                # engines on one game, and counting it against the limit
+                # would abort or resign a game the bot is in the middle of.
+                logger.debug(f"Game {game_id} is already being played")
+                return
+
+            if len(state.active_games) >= MAX_CONCURRENT_GAMES:
+                over_limit = True
+            else:
+                # Register the thread before clearing pending_challenge or
+                # waking the challenge loop, so the loop's count of active
+                # games already includes this one.
+                thread = threading.Thread(
+                    target=play_game,
+                    args=(client, game_id, state.username),
+                    daemon=True,
+                )
+                state.active_games[game_id] = thread
+
+        if over_limit:
+            logger.warning(f"Concurrent game limit ({MAX_CONCURRENT_GAMES}) reached, cannot start game {game_id}")
+            try:
+                client.bots.abort_game(game_id)
+            except Exception:
+                try:
+                    client.bots.resign_game(game_id)
+                except Exception as e:
+                    logger.debug(f"Could not abort or resign {game_id}: {e}")
+            return
+
+        thread.start()
+
+        # A game carries the id of the challenge it came from, so this tells
+        # the bot's own challenge being accepted from any other game starting.
+        if pending_challenge.get("id") == game_id:
+            logger.info(f"Challenge to {pending_challenge.get('opponent', 'unknown')} accepted — game {game_id} started")
+            pending_challenge.clear()
+        # Whoever plays is no longer left alone, whichever side sent the challenge.
+        opponent = (event["game"].get("opponent") or {}).get("username")
+        if opponent:
+            state.rests.played(opponent, event["game"].get("speed"))
+            state.remember()
+        retry_event.set()
+
+        logger.info(f"Game {game_id} started")
+
+    elif kind == "gameFinish":
+        game_id = event["game"]["id"]
+        with state.games_lock:
+            if game_id in state.active_games:
+                # Clean up finished game thread
+                state.active_games[game_id].join(timeout=1)
+                del state.active_games[game_id]
+        logger.info(f"Game {game_id} finished — looking for next challenge...")
+        retry_event.set()  # wake challenge loop immediately when game ends
+
+
+def main():
+    install_signal_handlers()
+
+    session = berserk.TokenSession(TOKEN)
+    adapter = TimeoutHTTPAdapter(timeout=HTTP_TIMEOUT)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    client = berserk.Client(session)
+
+    # Get account with retry logic
+    account = retry_with_backoff(
+        lambda: client.account.get(),
+        max_retries=10,
+        base_delay=2,
+        description="Get account info"
+    )
+
+    is_bot = account.get("title") == "BOT"
+    if not is_bot:
+        raise RuntimeError("This account is NOT a BOT account")
+
+    bot_username = account.get("username")
+    logger.info("Bot account verified: %s", bot_username)
+
+    abort_stale_games(client)
+
+    state = BotState(
+        client=client,
+        username=bot_username,
+        tracker=ChallengeTracker(MAX_CHALLENGES_PER_HOUR, MAX_CHALLENGES_PER_DAY),
+        store=StateFile(),
+    )
+    state.recall()
+    global _running_state
+    _running_state = state
 
     # Start challenge loop in background thread
-    challenge_thread = threading.Thread(
-        target=challenge_loop,
-        args=(client, bot_username, active_games, active_games_lock,
-              challenge_tracker, retry_event, pending_challenge),
-        daemon=True
-    )
+    challenge_thread = threading.Thread(target=challenge_loop, args=(state,), daemon=True)
     challenge_thread.start()
     logger.info("Background challenge thread started")
 
-    # Write initial heartbeat
-    def _write_heartbeat():
-        try:
-            with open(HEALTHCHECK_FILE, "w") as f:
-                f.write(str(time.time()))
-        except OSError:
-            pass
+    threading.Thread(target=watch_event_loop, args=(state.stream,), daemon=True).start()
 
-    _write_heartbeat()
+    if KUMA_PUSH_URL:
+        threading.Thread(target=push_health, args=(state.stream, KUMA_PUSH_URL), daemon=True).start()
+        logger.info(f"Reporting health to Uptime Kuma every {KUMA_PUSH_INTERVAL}s")
 
-    # Main event loop with automatic reconnection
-    while not shutdown_requested:
-        try:
-            logger.info("Connecting to event stream...")
-            _write_heartbeat()
-            for event in client.bots.stream_incoming_events():
-                _write_heartbeat()
-                if shutdown_requested:
-                    break
-
-                try:
-                    if event["type"] == "challenge":
-                        challenge = event["challenge"]
-                        cid = challenge["id"]
-                        
-                        # Check if this is an incoming challenge (destUser is us)
-                        dest_user = challenge.get("destUser", {})
-
-                        dest_username = dest_user.get("name", dest_user.get("id", "")).lower()
-                        
-                        # Only process incoming challenges (where we are the destination)
-                        if dest_username == bot_username.lower():
-                            if should_accept_challenge(challenge):
-                                try:
-                                    client.bots.accept_challenge(cid)
-                                except berserk.exceptions.ResponseError as e:
-                                    if "404" in str(e):
-                                        logger.debug(f"Challenge {cid} no longer exists")
-                                    else:
-                                        logger.warning(f"Failed to accept challenge: {e}")
-                            else:
-                                try:
-                                    client.bots.decline_challenge(cid)
-                                except berserk.exceptions.ResponseError as e:
-                                    if "404" in str(e):
-                                        logger.debug(f"Challenge {cid} no longer exists")
-                                    else:
-                                        logger.warning(f"Failed to decline challenge: {e}")
-                        else:
-                            # Outgoing challenge — update opponent name in pending tracker
-                            logger.debug(f"Outgoing challenge to {dest_username}: {cid}")
-                            if pending_challenge.get("id") == cid:
-                                pending_challenge["opponent"] = dest_username
-                    
-                    elif event["type"] == "challengeDeclined":
-                        challenge = event.get("challenge", {})
-                        decliner = challenge.get("destUser", {}).get("name", "Unknown")
-                        reason = challenge.get("declineReason", challenge.get("declineReasonKey", "no reason given"))
-                        cid = challenge.get("id", "")
-                        is_ours = pending_challenge.get("id") == cid
-                        logger.info(
-                            f"Challenge {'(ours) ' if is_ours else ''}declined by {decliner}"
-                            f" — reason: {reason}"
-                        )
-                        if is_ours:
-                            pending_challenge.clear()
-                        # Always signal retry so challenge loop can pick the next bot
-                        threading.Timer(30, retry_event.set).start()
-
-                    elif event["type"] == "challengeCanceled":
-                        challenge = event.get("challenge", {})
-                        challenger = challenge.get("challenger", {}).get("name", "Unknown")
-                        cid = challenge.get("id", "")
-                        is_ours = pending_challenge.get("id") == cid
-                        logger.info(
-                            f"Challenge {'(ours) ' if is_ours else ''}canceled by {challenger}"
-                        )
-                        if is_ours:
-                            pending_challenge.clear()
-                            retry_event.set()
-
-                    elif event["type"] == "gameStart":
-                        game_id = event["game"]["id"]
-
-                        # Clean up dead threads before checking limits
-                        with active_games_lock:
-                            dead = [gid for gid, t in active_games.items() if not t.is_alive()]
-                            for gid in dead:
-                                del active_games[gid]
-
-                            if len(active_games) >= MAX_CONCURRENT_GAMES:
-                                logger.warning(f"Concurrent game limit ({MAX_CONCURRENT_GAMES}) reached, cannot start game {game_id}")
-                                try:
-                                    client.bots.abort_game(game_id)
-                                except Exception:
-                                    try:
-                                        client.bots.resign_game(game_id)
-                                    except Exception as e:
-                                        logger.debug(f"Could not abort or resign {game_id}: {e}")
-                                continue
-
-                        # Start game thread and register in active_games FIRST —
-                        # before clearing pending_challenge or waking the challenge loop.
-                        # This ensures the loop's active_count check sees the new game
-                        # and won't send a second challenge.
-                        thread = threading.Thread(
-                            target=play_game,
-                            args=(client, game_id, bot_username),
-                            daemon=True,
-                        )
-                        with active_games_lock:
-                            active_games[game_id] = thread
-                        thread.start()
-
-                        # Now safe to clear pending challenge and wake the loop
-                        if pending_challenge:
-                            logger.info(
-                                f"Challenge accepted — game {game_id} started "
-                                f"(challenge id: {pending_challenge.get('id', '?')})"
-                            )
-                            pending_challenge.clear()
-                            retry_event.set()
-
-                        logger.info(f"Game {game_id} started")
-
-                    elif event["type"] == "gameFinish":
-                        game_id = event["game"]["id"]
-                        with active_games_lock:
-                            if game_id in active_games:
-                                # Clean up finished game thread
-                                active_games[game_id].join(timeout=1)
-                                del active_games[game_id]
-                        logger.info(f"Game {game_id} finished — looking for next challenge...")
-                        retry_event.set()  # wake challenge loop immediately when game ends
-
-                except Exception as e:
-                    logger.error(f"Event processing error: {e}", exc_info=True)
-            
-            # Stream ended normally — reconnect
-            logger.warning("Event stream ended unexpectedly. Reconnecting in 10s...")
-            time.sleep(10)
-            continue
-            
-        except (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout) as e:
-            logger.warning(f"Event stream connection lost: {e}. Reconnecting in 10s...")
-            time.sleep(10)
-            continue
-        except berserk.exceptions.ResponseError as e:
-            if hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]:
-                logger.warning(f"Lichess API error {e.response.status_code}. Reconnecting in 15s...")
-                time.sleep(15)
-                continue
-            elif hasattr(e, 'response') and e.response and e.response.status_code == 429:
-                logger.warning("Rate limited by Lichess (429). Backing off for 60s...")
-                time.sleep(60)
-                continue
-            else:
-                logger.error(f"API error: {e}. Reconnecting in 30s...", exc_info=True)
-                time.sleep(30)
-                continue
-        except Exception as e:
-            logger.error(f"Main loop error: {e}", exc_info=True)
-            time.sleep(10)
-            continue
+    run_event_loop(session, state)
 
     logger.info("Shutting down bot")
 

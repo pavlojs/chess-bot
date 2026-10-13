@@ -32,9 +32,9 @@ path from the CPU, and a VM with a generic CPU model hides AVX2.
 
 ## Logs
 
-Relevant lines from `logs/axiom_bot.log`. Remove your token if it appears.
-Set the log level to DEBUG if the failure is intermittent — the best-effort
-cleanup paths only report there.
+Relevant lines from `logs/axiom_bot.log`, which records more than the console
+does: everything from DEBUG up, with the function each line came from. In the
+container the file is on the `logs` volume. Remove your token if it appears.
 
 ```
 paste here

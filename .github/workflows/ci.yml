@@ -4,6 +4,11 @@ on:
   push:
     branches: [main, dev]
   workflow_dispatch:
+    inputs:
+      keep_image:
+        description: Keep the built image as an artifact, to try it before promoting
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -17,10 +22,55 @@ jobs:
     uses: ./.github/workflows/tests.yml
 
   image:
-    name: Build and push image
-    # Images are cut from main only, and only from a commit whose tests passed.
-    # dev pushes run the suite and stop there — nothing is published from dev.
-    needs: test
+    name: Build and check image
+    # Built on every push, so a change that breaks the image, or one of the
+    # things it promises, shows on dev. Nothing is published from this job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: axiom-chess-bot
+          tags: type=raw,value=candidate
+
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # No shell, no package manager, nothing writable but the log directory,
+      # and an engine that still plays under those limits.
+      - name: Check the image
+        run: scripts/check_image.sh axiom-chess-bot:candidate
+
+      - name: Save the image
+        if: inputs.keep_image
+        run: docker save axiom-chess-bot:candidate | gzip > axiom-chess-bot-candidate.tar.gz
+
+      - name: Keep the image as an artifact
+        if: inputs.keep_image
+        uses: actions/upload-artifact@v7
+        with:
+          name: axiom-chess-bot-candidate
+          path: axiom-chess-bot-candidate.tar.gz
+          retention-days: 3
+          compression-level: 0
+
+  publish:
+    name: Publish image
+    # Images are published from main only, and only from a commit whose tests
+    # and image checks passed. dev pushes stop before this job.
+    needs: [test, image]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -34,7 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to Container Registry
         uses: docker/login-action@v4
@@ -45,7 +95,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           # This job only ever runs on main, so every tag it produces is a
@@ -55,8 +105,10 @@ jobs:
             type=sha,prefix=main-
             type=raw,value=latest
 
+      # Rebuilt from the cache the image job filled, so the layers pushed are
+      # the layers that were checked.
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -65,4 +117,3 @@ jobs:
           provenance: true
           sbom: true
           cache-from: type=gha
-          cache-to: type=gha,mode=max

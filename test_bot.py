@@ -4,14 +4,11 @@ Unit tests for Axiom Chess Bot
 
 import unittest
 from unittest.mock import Mock, patch, MagicMock
-from datetime import datetime, timedelta
+from datetime import timedelta
 import os
-import signal
-import time
 import threading
 
 import chess
-import requests
 
 # Mock TOKEN before importing bot
 os.environ.setdefault('TOKEN', 'test_token_for_testing')
@@ -157,56 +154,6 @@ class TestChallengeAcceptance(unittest.TestCase):
              patch('bot.TIME_CONTROL', ['bullet', 'blitz', 'rapid', 'classical']):
             result = should_accept_challenge(challenge)
             self.assertFalse(result)
-
-
-class TestBoardState(unittest.TestCase):
-    """Test chess board state handling."""
-    
-    def test_board_initialization(self):
-        """Test that board is properly initialized."""
-        board = chess.Board()
-        self.assertEqual(board.fen(), chess.STARTING_FEN)
-    
-    def test_board_move_application(self):
-        """Test that moves are correctly applied to board."""
-        board = chess.Board()
-        
-        # Apply starting move
-        move_uci = 'e2e4'
-        board.push_uci(move_uci)
-        
-        # Verify board state changed
-        self.assertNotEqual(board.fen(), chess.STARTING_FEN)
-    
-    def test_board_multiple_moves(self):
-        """Test board state with multiple moves."""
-        board = chess.Board()
-        moves = ['e2e4', 'c7c5', 'g1f3', 'd7d6']
-        
-        for move_uci in moves:
-            board.push_uci(move_uci)
-        
-        # Verify board has processed all moves
-        self.assertEqual(len(list(board.move_stack)), 4)
-    
-    def test_invalid_move_handling(self):
-        """Test that invalid moves raise appropriate errors."""
-        board = chess.Board()
-        
-        with self.assertRaises(ValueError):
-            board.push_uci('invalid')
-    
-    def test_game_over_detection(self):
-        """Test detection of game over state."""
-        board = chess.Board()
-        self.assertFalse(board.is_game_over())
-        
-        # Fool's mate: 1. f3 e6 2. g4 Qh4#
-        moves = ['f2f3', 'e7e6', 'g2g4', 'd8h4']
-        for move_uci in moves:
-            board.push_uci(move_uci)
-        
-        self.assertTrue(board.is_game_over())
 
 
 class TestStockfishInitialization(unittest.TestCase):
@@ -444,20 +391,6 @@ class TestGameEndReason(unittest.TestCase):
             self.assertIn("fifty-move rule", reason.lower())
 
 
-class TestErrorHandling(unittest.TestCase):
-    """Test error handling in game play."""
-    
-    def test_api_error_import(self):
-        """Test that ApiError can be imported from berserk.exceptions."""
-        from berserk.exceptions import ApiError
-        self.assertIsNotNone(ApiError)
-    
-    def test_response_error_import(self):
-        """Test that ResponseError can be imported from berserk.exceptions."""
-        from berserk.exceptions import ResponseError
-        self.assertIsNotNone(ResponseError)
-
-
 class TestLogging(unittest.TestCase):
     """Test logging configuration."""
     
@@ -475,194 +408,553 @@ class TestLogging(unittest.TestCase):
 class TestChallengeTracker(unittest.TestCase):
     """Test challenge tracker functionality."""
     
+    def setUp(self):
+        self.now = 10_000.0
+
+    def tracker(self, per_hour=3, per_day=100):
+        from bot import ChallengeTracker
+        return ChallengeTracker(max_per_hour=per_hour, max_per_day=per_day, clock=lambda: self.now)
+
     def test_initial_state(self):
-        """Test that tracker starts with no challenges."""
-        from bot import ChallengeTracker
-        
-        tracker = ChallengeTracker(max_per_hour=3)
+        tracker = self.tracker()
+
         self.assertTrue(tracker.can_challenge())
         self.assertEqual(tracker.get_remaining_challenges(), 3)
-    
-    def test_record_challenge(self):
-        """Test recording challenges."""
-        from bot import ChallengeTracker
-        
-        tracker = ChallengeTracker(max_per_hour=3)
-        
-        tracker.record_challenge()
-        self.assertEqual(tracker.get_remaining_challenges(), 2)
-        
-        tracker.record_challenge()
-        self.assertEqual(tracker.get_remaining_challenges(), 1)
-        
-        tracker.record_challenge()
-        self.assertEqual(tracker.get_remaining_challenges(), 0)
+        self.assertEqual(tracker.seconds_until_free(), 0)
+        self.assertEqual(tracker.counts(), (0, 0))
+
+    def test_hourly_limit(self):
+        tracker = self.tracker(per_hour=3)
+        for expected_left in (2, 1, 0):
+            tracker.record_challenge()
+            self.assertEqual(tracker.get_remaining_challenges(), expected_left)
+            self.now += 60
+
         self.assertFalse(tracker.can_challenge())
-    
-    def test_hourly_reset(self):
-        """Test that challenges older than 1 hour are removed."""
-        from bot import ChallengeTracker
-        
-        tracker = ChallengeTracker(max_per_hour=3)
-        
-        # Manually add old challenge
-        old_time = datetime.now() - timedelta(hours=2)
-        tracker.challenge_times.append(old_time)
-        
-        # Should still have capacity
+        # Three attempts at t, t+60, t+120; now t+180. The first leaves the hour at t+3600.
+        self.assertEqual(tracker.seconds_until_free(), 3600 - 180)
+
+    def test_an_attempt_leaves_the_hour_after_sixty_minutes(self):
+        tracker = self.tracker(per_hour=1)
+        tracker.record_challenge()
+
+        self.now += 3599
+        self.assertFalse(tracker.can_challenge())
+        self.now += 1
         self.assertTrue(tracker.can_challenge())
-        self.assertEqual(tracker.get_remaining_challenges(), 3)
-    
-    def test_filter_suitable_bots(self):
-        """Test filtering bots by rating."""
+        self.assertEqual(tracker.counts(), (0, 1))
+
+    def test_daily_limit_holds_when_the_hourly_one_does_not(self):
+        """10 an hour is 240 a day: the daily limit has to stop it at its own number."""
+        tracker = self.tracker(per_hour=10, per_day=180)
+        sent = 0
+        for minute in range(24 * 60):      # one day, minute by minute
+            if tracker.can_challenge():
+                tracker.record_challenge()
+                sent += 1
+            if minute < 24 * 60 - 1:
+                self.now += 60
+
+        # 23h59 after the first attempt: all 180 are still inside the day.
+        self.assertEqual(sent, 180)
+        self.assertFalse(tracker.can_challenge())
+        self.assertEqual(tracker.seconds_until_free(), 60)
+
+    def test_no_window_of_a_day_ever_exceeds_the_daily_limit(self):
+        tracker = self.tracker(per_hour=10, per_day=180)
+        times = []
+        for _ in range(3 * 24 * 60):       # three days
+            if tracker.can_challenge():
+                tracker.record_challenge()
+                times.append(self.now)
+            self.now += 60
+
+        worst = max(sum(1 for t in times if start <= t < start + 86400) for start in times)
+        self.assertLessEqual(worst, 180)
+        self.assertGreater(len(times), 360)    # and it does keep going on later days
+
+    def test_wait_time_is_exact_for_the_daily_limit(self):
+        tracker = self.tracker(per_hour=100, per_day=2)
+        tracker.record_challenge()
+        self.now += 100
+        tracker.record_challenge()
+        self.now += 100
+
+        # Two attempts at t and t+100; now t+200. The first leaves the day at t+86400.
+        self.assertEqual(tracker.seconds_until_free(), 86400 - 200)
+        self.now += 86400 - 200
+        self.assertTrue(tracker.can_challenge())
+
+    def test_a_limit_of_zero_never_allows_a_challenge(self):
+        tracker = self.tracker(per_hour=0)
+
+        self.assertFalse(tracker.can_challenge())
+        self.assertGreater(tracker.seconds_until_free(), 0)
+
+
+class Clock:
+    """A clock the test moves by hand."""
+
+    def __init__(self, now=1_000_000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def forward(self, seconds):
+        self.now += seconds
+
+
+class TestOpponentRests(unittest.TestCase):
+    """How long a bot is left alone depends on what it did with the last challenge."""
+
+    MINUTE, HOUR, DAY = 60, 3600, 86400
+
+    def setUp(self):
+        from bot import OpponentRests
+        self.clock = Clock()
+        self.rests = OpponentRests(self.clock)
+
+    def test_a_bot_nothing_is_held_against_is_not_resting(self):
+        self.assertFalse(self.rests.resting("SomeBot", "blitz"))
+
+    def test_later_means_a_quarter_of_an_hour(self):
+        self.assertEqual(self.rests.declined("BusyBot", "blitz", "later"), 15 * self.MINUTE)
+
+        self.assertTrue(self.rests.resting("BusyBot", "blitz"))
+        self.assertTrue(self.rests.resting("BusyBot", "rapid"))      # busy is busy at any speed
+        self.clock.forward(15 * self.MINUTE)
+        self.assertFalse(self.rests.resting("BusyBot", "blitz"))
+
+    def test_later_stays_a_quarter_of_an_hour_however_often(self):
+        for _ in range(4):
+            self.assertEqual(self.rests.declined("BusyBot", "blitz", "later"), 15 * self.MINUTE)
+
+    def test_an_unwanted_speed_rests_that_speed_only_for_a_day(self):
+        for reason in ("toofast", "tooslow", "timecontrol"):         # as an event spells them
+            with self.subTest(reason=reason):
+                self.assertEqual(self.rests.declined(f"Picky{reason}", "bullet", reason), self.DAY)
+                self.assertTrue(self.rests.resting(f"Picky{reason}", "bullet"))
+                self.assertFalse(self.rests.resting(f"Picky{reason}", "rapid"))
+
+    def test_a_bot_that_takes_no_such_challenge_at_all_rests_a_week(self):
+        for reason in ("nobot", "casual", "variant"):
+            with self.subTest(reason=reason):
+                self.assertEqual(self.rests.declined(f"Never{reason}", "blitz", reason), 7 * self.DAY)
+                self.assertTrue(self.rests.resting(f"Never{reason}", "classical"))
+
+    def test_a_reason_is_understood_in_the_spelling_of_the_api_documentation_too(self):
+        self.assertEqual(self.rests.declined("NeverBot", "blitz", "noBot"), 7 * self.DAY)
+        self.assertEqual(self.rests.declined("PickyBot", "bullet", "tooFast"), self.DAY)
+
+    def test_the_other_reasons_say_nothing_lasting_about_a_rated_standard_challenge_from_a_bot(self):
+        for reason in ("generic", "rated", "standard", "onlybot", "something lichess adds later"):
+            with self.subTest(reason=reason):
+                self.assertEqual(self.rests.declined(f"Odd{reason}", "blitz", reason), self.HOUR)
+
+    def test_a_speed_reason_without_a_known_speed_counts_like_no_reason(self):
+        self.assertEqual(self.rests.declined("PickyBot", None, "toofast"), self.HOUR)
+
+    def test_no_answer_rests_an_hour_then_twice_as_long_each_time_in_a_row(self):
+        spans = []
+        for _ in range(7):
+            spans.append(self.rests.unanswered("AwayBot"))
+            self.clock.forward(spans[-1] + 1)       # challenged again as soon as the rest is over
+
+        hours = [span / self.HOUR for span in spans]
+        self.assertEqual(hours, [1, 2, 4, 8, 16, 24, 24])       # and never more than a day
+
+    def test_a_decline_without_a_reason_counts_like_no_answer(self):
+        self.assertEqual(self.rests.declined("VagueBot", "blitz", "generic"), self.HOUR)
+        self.clock.forward(self.HOUR + 1)
+        self.assertEqual(self.rests.unanswered("VagueBot"), 2 * self.HOUR)
+
+    def test_in_a_row_ends_after_a_day_of_peace(self):
+        self.rests.unanswered("AwayBot")
+        self.clock.forward(self.HOUR + self.DAY + 1)             # the rest ended more than a day ago
+
+        self.assertEqual(self.rests.unanswered("AwayBot"), self.HOUR)
+
+    def test_a_refusal_by_lichess_lasts_as_long_as_lichess_says(self):
+        self.assertEqual(self.rests.refused("TiredBot", 5000), 5000)
+        self.clock.forward(4999)
+        self.assertTrue(self.rests.resting("TiredBot", "blitz"))
+        self.clock.forward(2)
+        self.assertFalse(self.rests.resting("TiredBot", "blitz"))
+
+    def test_a_refusal_without_a_time_lasts_six_hours(self):
+        self.assertEqual(self.rests.refused("ClosedBot"), 6 * self.HOUR)
+
+    def test_later_does_not_count_towards_the_doubling(self):
+        for _ in range(3):
+            self.rests.declined("BusyBot", "blitz", "later")
+            self.clock.forward(15 * self.MINUTE + 1)
+
+        self.assertEqual(self.rests.unanswered("BusyBot"), self.HOUR)
+
+    def test_a_rest_is_never_cut_short_by_a_shorter_one(self):
+        self.rests.declined("NeverBot", "blitz", "nobot")
+        self.clock.forward(self.HOUR)
+
+        left = self.rests.declined("NeverBot", "blitz", "later")       # a late answer to an older challenge
+
+        self.assertEqual(left, 7 * self.DAY - self.HOUR)
+        self.clock.forward(6 * self.DAY)
+        self.assertTrue(self.rests.resting("NeverBot", "blitz"))
+
+    def test_a_bot_that_plays_is_cleared(self):
+        self.rests.unanswered("ComeBackBot")
+
+        self.rests.played("ComeBackBot", "blitz")
+
+        self.assertFalse(self.rests.resting("ComeBackBot", "blitz"))
+        self.assertEqual(self.rests.unanswered("ComeBackBot"), self.HOUR)     # and counts from one again
+
+    def test_a_game_at_one_speed_does_not_undo_the_decline_of_another(self):
+        self.rests.declined("PickyBot", "bullet", "toofast")
+        self.rests.declined("PickyBot", "blitz", "timecontrol")
+
+        self.rests.played("PickyBot", "blitz")
+
+        self.assertTrue(self.rests.resting("PickyBot", "bullet"))
+        self.assertFalse(self.rests.resting("PickyBot", "blitz"))
+
+    def test_names_are_matched_whatever_their_case(self):
+        self.rests.declined("LeelaQueenOdds", "blitz", "nobot")
+
+        self.assertTrue(self.rests.resting("leelaqueenodds", "blitz"))
+        self.rests.played("LEELAQUEENODDS")
+        self.assertFalse(self.rests.resting("LeelaQueenOdds", "blitz"))
+
+    def test_clearing_one_bot_leaves_a_bot_with_a_longer_name_alone(self):
+        self.rests.declined("Bot", "blitz", "nobot")
+        self.rests.declined("Bot2", "blitz", "nobot")
+
+        self.rests.played("Bot", "blitz")
+
+        self.assertTrue(self.rests.resting("Bot2", "blitz"))
+
+    def test_bots_are_counted_once_and_only_while_they_rest(self):
+        self.rests.declined("PickyBot", "bullet", "toofast")
+        self.rests.declined("PickyBot", "rapid", "tooslow")
+        self.rests.declined("BusyBot", "blitz", "later")
+        self.assertEqual(self.rests.count(), 2)
+
+        self.clock.forward(self.HOUR)                    # BusyBot's quarter of an hour is over
+
+        self.assertEqual(self.rests.count(), 1)
+
+    def test_what_is_written_down_is_taken_over_by_the_next_run(self):
+        from bot import OpponentRests
+        self.rests.declined("NeverBot", "blitz", "nobot")
+        self.rests.declined("PickyBot", "bullet", "toofast")
+        self.rests.unanswered("AwayBot")
+        self.clock.forward(self.HOUR + 1)
+        self.rests.unanswered("AwayBot")                                   # second time in a row
+        written = self.rests.export()
+
+        self.clock.forward(30 * self.MINUTE)                               # the bot was down for a while
+        after_restart = OpponentRests(self.clock)
+        after_restart.restore(written)
+
+        self.assertTrue(after_restart.resting("NeverBot", "rapid"))
+        self.assertTrue(after_restart.resting("PickyBot", "bullet"))
+        self.assertFalse(after_restart.resting("PickyBot", "blitz"))
+        self.assertTrue(after_restart.resting("AwayBot", "blitz"))
+        self.clock.forward(2 * self.HOUR)
+        self.assertEqual(after_restart.unanswered("AwayBot"), 4 * self.HOUR)  # the count came along
+
+    def test_rests_that_are_long_over_are_not_written_down(self):
+        self.rests.declined("BusyBot", "blitz", "later")
+        self.clock.forward(2 * self.DAY)
+
+        self.assertEqual(self.rests.export(), {})
+
+    def test_a_damaged_record_is_ignored(self):
+        from bot import OpponentRests
+        for damaged in (None, "text", [1, 2], {"bot": "soon"}, {"bot": [1]}, {"bot": ["a", "b"]}, {5: [1, 2]},
+                        {"bot": [True, False]}):
+            with self.subTest(damaged=damaged):
+                rests = OpponentRests(self.clock)
+                rests.restore(damaged)
+                self.assertEqual(rests.export(), {})
+
+
+class TestChallengeMemory(unittest.TestCase):
+    """The challenges of the last day count across a restart, as they do at Lichess."""
+
+    def setUp(self):
+        self.wall = Clock(1_800_000_000.0)
+
+    def tracker(self, running_for=0.0, per_hour=10, per_day=180):
+        """A tracker in a process that has been running for ``running_for`` seconds."""
+        from bot import ChallengeTracker
+        offset = self.wall.now - running_for
+        return ChallengeTracker(per_hour, per_day, clock=lambda: self.wall.now - offset, wall_clock=self.wall)
+
+    def test_attempts_are_taken_over_at_the_age_they_had(self):
+        before = self.tracker(running_for=5000)
+        for _ in range(3):
+            before.record_challenge()
+            self.wall.forward(600)
+        written = before.export()
+
+        self.wall.forward(120)                      # down for two minutes
+        after = self.tracker()
+        after.restore(written)
+
+        self.assertEqual(after.counts(), (3, 3))
+        self.assertEqual(after.get_remaining_challenges(), 7)
+
+    def test_a_restart_does_not_hand_out_a_fresh_allowance(self):
+        """The reason the count is kept: a full day's worth sent, then a restart."""
+        before = self.tracker(per_hour=1000, per_day=180)
+        for _ in range(180):
+            before.record_challenge()
+            self.wall.forward(60)
+        self.assertFalse(before.can_challenge())
+
+        after = self.tracker(per_hour=1000, per_day=180)
+        after.restore(before.export())
+
+        self.assertFalse(after.can_challenge())
+        self.assertGreater(after.seconds_until_free(), 20 * 3600)
+
+    def test_the_hourly_limit_is_also_kept(self):
+        before = self.tracker(per_hour=2)
+        before.record_challenge()
+        before.record_challenge()
+
+        self.wall.forward(600)
+        after = self.tracker(per_hour=2)
+        after.restore(before.export())
+
+        self.assertFalse(after.can_challenge())
+        self.assertEqual(after.seconds_until_free(), 3000)
+
+    def test_attempts_older_than_a_day_are_left_behind(self):
+        before = self.tracker()
+        before.record_challenge()
+        written = before.export()
+
+        self.wall.forward(86400 + 1)
+        after = self.tracker()
+        after.restore(written)
+
+        self.assertEqual(after.counts(), (0, 0))
+
+    def test_a_time_ahead_of_the_clock_counts_as_just_made(self):
+        """Written before the clock was set back. Forgetting it would hand out a challenge Lichess has counted."""
+        after = self.tracker(per_hour=1)
+        after.restore([self.wall.now + 30])
+
+        self.assertEqual(after.counts(), (1, 1))
+        self.assertEqual(after.seconds_until_free(), 3600)
+
+    def test_what_is_written_down_does_not_change_while_nothing_happens(self):
+        tracker = self.tracker()
+        tracker.record_challenge()
+        written = tracker.export()
+
+        self.wall.forward(0.0004)                # the two clocks never tick in step
+
+        self.assertEqual(tracker.export(), written)
+
+    def test_a_damaged_record_is_ignored(self):
+        for damaged in (None, "text", {"a": 1}, ["x", None, {}, True]):
+            with self.subTest(damaged=damaged):
+                tracker = self.tracker()
+                tracker.restore(damaged)
+                self.assertEqual(tracker.counts(), (0, 0))
+
+
+class TestStateFile(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.directory, ignore_errors=True))
+        self.path = os.path.join(self.directory, "state.json")
+
+    def store(self, path=None):
+        from bot import StateFile
+        return StateFile(path or self.path)
+
+    def test_what_is_saved_is_what_is_loaded(self):
+        data = {"challenges": [1.5, 2.5], "rests": {"bot": [9.0, 2]}}
+        self.store().save(data)
+
+        self.assertEqual(self.store().load(), data)
+        self.assertEqual(os.listdir(self.directory), ["state.json"])      # no scratch file left
+
+    def test_no_file_means_nothing_remembered(self):
+        self.assertEqual(self.store().load(), {})
+
+    def test_a_file_that_is_not_json_means_nothing_remembered(self):
+        for content in ("", "{half a file", "[1, 2, 3]", "null"):
+            with self.subTest(content=content):
+                with open(self.path, "w") as f:
+                    f.write(content)
+                self.assertEqual(self.store().load(), {})
+
+    def test_a_place_that_cannot_be_written_does_not_stop_the_bot(self):
+        store = self.store(os.path.join(self.directory, "no", "such", "directory", "state.json"))
+
+        store.save({"challenges": []})          # must not raise
+        store.save({"challenges": []})
+
+        self.assertEqual(store.load(), {})
+
+    def test_a_save_replaces_the_file_whole(self):
+        self.store().save({"challenges": list(range(1000))})
+        self.store().save({"challenges": [1]})
+
+        self.assertEqual(self.store().load(), {"challenges": [1]})
+
+    def test_nothing_is_written_while_nothing_has_changed(self):
+        store = self.store()
+        store.save({"challenges": [1.5]})
+        written = os.stat(self.path).st_ino      # a save puts a new file in place
+
+        store.save({"challenges": [1.5]})
+        self.assertEqual(os.stat(self.path).st_ino, written)
+
+        store.save({"challenges": [1.5, 2.5]})
+        self.assertNotEqual(os.stat(self.path).st_ino, written)
+
+    def test_a_save_that_failed_is_tried_again(self):
+        missing = os.path.join(self.directory, "later")
+        store = self.store(os.path.join(missing, "state.json"))
+        store.save({"challenges": [1.5]})
+
+        os.mkdir(missing)                        # the log directory turns up
+        store.save({"challenges": [1.5]})
+
+        self.assertEqual(store.load(), {"challenges": [1.5]})
+
+
+class TestFilterSuitableBots(unittest.TestCase):
+    """Opponents are chosen by their rating in the kind of game being offered."""
+
+    def names(self, bots, speed, low=1500, high=2900, me="Axiom_BOT"):
         from bot import filter_suitable_bots
-        
+        return [b["username"] for b in filter_suitable_bots(bots, low, high, me, speed)]
+
+    def bot(self, name, **ratings):
+        return {"username": name, "perfs": {speed: {"rating": rating} for speed, rating in ratings.items()}}
+
+    def test_rating_range_is_inclusive(self):
         bots = [
-            {"username": "bot1", "perfs": {"blitz": {"rating": 1400}}},  # Too low
-            {"username": "bot2", "perfs": {"blitz": {"rating": 1600}}},  # Good
-            {"username": "bot3", "perfs": {"blitz": {"rating": 2500}}},  # Good
-            {"username": "bot4", "perfs": {"blitz": {"rating": 3000}}},  # Too high
-            {"username": "TestBot", "perfs": {"blitz": {"rating": 2000}}},  # Self (should be excluded)
+            self.bot("low", blitz=1499),
+            self.bot("floor", blitz=1500),
+            self.bot("mid", blitz=2200),
+            self.bot("ceiling", blitz=2900),
+            self.bot("high", blitz=2901),
         ]
-        
-        suitable = filter_suitable_bots(bots, 1500, 2900, "TestBot")
-        
-        self.assertEqual(len(suitable), 2)
-        self.assertEqual(suitable[0]["username"], "bot2")
-        self.assertEqual(suitable[1]["username"], "bot3")
+
+        self.assertEqual(self.names(bots, "blitz"), ["floor", "mid", "ceiling"])
+
+    def test_the_bot_never_picks_itself(self):
+        bots = [self.bot("axiom_bot", blitz=2000), self.bot("other", blitz=2000)]
+
+        self.assertEqual(self.names(bots, "blitz"), ["other"])
+
+    def test_only_the_rating_of_the_speed_being_played_counts(self):
+        """Rated 2000 in blitz and 900 in bullet: a 900 opponent in a bullet game."""
+        bots = [self.bot("specialist", blitz=2000, bullet=900, rapid=1700)]
+
+        self.assertEqual(self.names(bots, "blitz"), ["specialist"])
+        self.assertEqual(self.names(bots, "rapid"), ["specialist"])
+        self.assertEqual(self.names(bots, "bullet"), [])
+
+    def test_a_bot_without_a_rating_at_that_speed_is_skipped(self):
+        bots = [self.bot("blitz_only", blitz=2000), {"username": "no_perfs"}]
+
+        self.assertEqual(self.names(bots, "classical"), [])
+
+    def test_the_speed_follows_the_time_control_that_was_drawn(self):
+        """try_challenge_random_bot must look at the rating for the game it offers."""
+        from bot import ChallengeTracker, try_challenge_random_bot
+        client = Mock()
+        client.bots.get_online_bots.return_value = iter([
+            self.bot("BulletWeak", blitz=2000, bullet=900),
+            self.bot("BulletFine", blitz=1000, bullet=2000),
+        ])
+        client.challenges.create.return_value = {"id": "chal0001"}
+        tracker = ChallengeTracker(5, 100)
+
+        with patch("bot.ENABLE_AUTO_CHALLENGE", True), \
+             patch("bot.CHALLENGE_TIME_CONTROLS", [{"limit": 60, "increment": 0}]), \
+             patch("bot.CHALLENGE_MIN_RATING", 1500), patch("bot.CHALLENGE_MAX_RATING", 2900):
+            result = try_challenge_random_bot(client, "Axiom_BOT", tracker)
+
+        self.assertEqual(result, ("chal0001", "BulletFine", "bullet"))
+        self.assertEqual(client.challenges.create.call_args.args[0], "BulletFine")
 
 
-class TestDrawOfferHandling(unittest.TestCase):
-    """Test draw offer handling logic."""
-    
-    @patch('bot.Stockfish')
-    def test_accept_draw_balanced_position(self, mock_stockfish_class):
-        """Test that draw is accepted in balanced positions (±200cp)."""
-        # Mock Stockfish to return balanced evaluation
-        mock_sf = Mock()
-        mock_sf.get_evaluation.return_value = {"type": "cp", "value": 50}
-        
-        # Simulate bot deciding on draw offer
-        eval_info = mock_sf.get_evaluation()
-        evaluation = eval_info["value"]
-        
-        # Bot is white, so evaluation is from white's perspective
-        accept_draw = -200 <= evaluation <= 200
-        
-        self.assertTrue(accept_draw)
-        self.assertEqual(evaluation, 50)
-    
-    @patch('bot.Stockfish')
-    def test_decline_draw_winning_position(self, mock_stockfish_class):
-        """Test that draw is declined when bot is winning (>200cp)."""
-        # Mock Stockfish to return winning evaluation
-        mock_sf = Mock()
-        mock_sf.get_evaluation.return_value = {"type": "cp", "value": 921}
-        
-        eval_info = mock_sf.get_evaluation()
-        evaluation = eval_info["value"]
-        
-        # Bot is white, so evaluation is from white's perspective
-        accept_draw = -200 <= evaluation <= 200
-        
-        self.assertFalse(accept_draw)
-        self.assertGreater(evaluation, 200)
-    
-    @patch('bot.Stockfish')
-    def test_decline_draw_losing_position(self, mock_stockfish_class):
-        """Test that draw is declined when bot is losing (<-200cp)."""
-        # Mock Stockfish to return losing evaluation
-        mock_sf = Mock()
-        mock_sf.get_evaluation.return_value = {"type": "cp", "value": -1003}
-        
-        eval_info = mock_sf.get_evaluation()
-        evaluation = eval_info["value"]
-        
-        # Bot is white, so evaluation is from white's perspective
-        accept_draw = -200 <= evaluation <= 200
-        
-        self.assertFalse(accept_draw)
-        self.assertLess(evaluation, -200)
-    
-    @patch('bot.Stockfish')
-    def test_decline_draw_mate_position(self, mock_stockfish_class):
-        """Test that draw is declined when bot has mate."""
-        # Mock Stockfish to return mate evaluation
-        mock_sf = Mock()
-        mock_sf.get_evaluation.return_value = {"type": "mate", "value": 3}
-        
-        eval_info = mock_sf.get_evaluation()
-        
-        # Mate evaluation means always decline
-        accept_draw = eval_info["type"] != "mate"
-        
-        self.assertFalse(accept_draw)
-        self.assertEqual(eval_info["type"], "mate")
-    
-    @patch('bot.Stockfish')
-    def test_color_adjustment_for_black(self, mock_stockfish_class):
-        """Test draw eval fallback: get_evaluation() returns from side-to-move perspective.
+class TestDrawOffers(unittest.TestCase):
+    """When the bot takes a draw, and how it reads the position from its own side."""
 
-        When bot is black and it's the opponent's turn (white to move), Stockfish's
-        get_evaluation() reports from white's perspective.  The bot must negate it.
-        """
-        mock_sf = Mock()
-        # Stockfish says +300 from side-to-move (white) — bad for black bot
-        mock_sf.get_evaluation.return_value = {"type": "cp", "value": 300}
+    def engine(self, kind, value):
+        engine = Mock()
+        engine.get_evaluation.return_value = {"type": kind, "value": value}
+        return engine
 
-        eval_info = mock_sf.get_evaluation()
-        raw_cp = eval_info["value"]
+    def test_level_positions_are_accepted_up_to_the_window(self):
+        from bot import should_accept_draw
+        for cp in (0, 50, -50, 200, -200):
+            self.assertTrue(should_accept_draw(cp), cp)
 
-        # New logic: flip based on whether bot is side-to-move, not bot colour
-        bot_is_white = False
-        board_turn_is_white = True  # opponent (white) to move after draw offer
-        bot_is_side_to_move = (board_turn_is_white == bot_is_white)  # False
-        evaluation = raw_cp if bot_is_side_to_move else -raw_cp
+    def test_anything_beyond_the_window_is_declined(self):
+        from bot import should_accept_draw
+        for cp in (201, -201, 921, -915, 30000, -30000):
+            self.assertFalse(should_accept_draw(cp), cp)
 
-        # From bot's (black's) perspective: -300 → losing → reject draw
-        accept_draw = -200 <= evaluation <= 200
-        self.assertFalse(accept_draw)
-        self.assertEqual(evaluation, -300)
+    def test_the_evaluation_of_the_bots_last_search_is_used_as_it_is(self):
+        """It was made with the bot to move, so it is the bot's score whatever its colour."""
+        from bot import evaluation_for_bot
+        engine = self.engine("cp", 999)
+        board = chess.Board()
 
-    @patch('bot.Stockfish')
-    def test_cached_eval_no_color_flip(self, mock_stockfish_class):
-        """Cached last_eval_cp is already from bot's perspective — no flip needed.
+        self.assertEqual(evaluation_for_bot(engine, board, bot_is_white=False, last_eval_cp=-340), -340)
+        self.assertEqual(evaluation_for_bot(engine, board, bot_is_white=True, last_eval_cp=120), 120)
+        engine.get_evaluation.assert_not_called()
 
-        The search that produced last_eval_cp ran on the bot's turn, so UCI
-        'score cp' is from the bot's side-to-move.  The draw handler must
-        use it directly regardless of bot colour.
-        """
-        # Bot is black, cached eval shows bot is losing (-400 from bot's perspective)
-        last_eval_cp = -400
-        evaluation = last_eval_cp  # NO flip — already bot's perspective
+    def test_without_a_search_the_engine_is_asked_about_the_current_position(self):
+        from bot import evaluation_for_bot
+        engine = self.engine("cp", 80)
+        board = chess.Board()
+        board.push_uci("e2e4")
 
-        accept_draw = -200 <= evaluation <= 200
-        self.assertFalse(accept_draw)
-        self.assertEqual(evaluation, -400)
+        evaluation_for_bot(engine, board, bot_is_white=False, last_eval_cp=None)
 
-    @patch('bot.Stockfish')
-    def test_cached_eval_positive_black_accepts_draw(self, mock_stockfish_class):
-        """Cached eval +50 as black → balanced → should accept draw."""
-        last_eval_cp = 50
-        evaluation = last_eval_cp
-        accept_draw = -200 <= evaluation <= 200
-        self.assertTrue(accept_draw)
+        engine.set_fen_position.assert_called_once_with(board.fen())
 
-    @patch('bot.Stockfish')
-    def test_fallback_eval_bot_is_side_to_move(self, mock_stockfish_class):
-        """Fallback eval when bot IS side-to-move → no flip needed."""
-        mock_sf = Mock()
-        mock_sf.get_evaluation.return_value = {"type": "cp", "value": -150}
+    def test_the_engines_answer_is_kept_when_the_bot_is_to_move(self):
+        from bot import evaluation_for_bot
+        board = chess.Board()                      # white to move
 
-        raw_cp = mock_sf.get_evaluation()["value"]
-        bot_is_white = True
-        board_turn_is_white = True  # bot's turn
-        bot_is_side_to_move = (board_turn_is_white == bot_is_white)
-        evaluation = raw_cp if bot_is_side_to_move else -raw_cp
+        self.assertEqual(evaluation_for_bot(self.engine("cp", 300), board, bot_is_white=True, last_eval_cp=None), 300)
 
-        self.assertEqual(evaluation, -150)  # no flip
-        accept_draw = -200 <= evaluation <= 200
-        self.assertTrue(accept_draw)
+        board.push_uci("e2e4")                     # black to move
+        self.assertEqual(evaluation_for_bot(self.engine("cp", 300), board, bot_is_white=False, last_eval_cp=None), 300)
+
+    def test_the_engines_answer_is_turned_round_when_the_opponent_is_to_move(self):
+        """The engine speaks for the side to move; +300 for the opponent is -300 for the bot."""
+        from bot import evaluation_for_bot
+        board = chess.Board()                      # white to move, bot is black
+
+        self.assertEqual(evaluation_for_bot(self.engine("cp", 300), board, bot_is_white=False, last_eval_cp=None), -300)
+
+    def test_a_forced_mate_becomes_a_score_no_draw_window_reaches(self):
+        from bot import evaluation_for_bot, should_accept_draw
+        board = chess.Board()
+
+        winning = evaluation_for_bot(self.engine("mate", 3), board, bot_is_white=True, last_eval_cp=None)
+        losing = evaluation_for_bot(self.engine("mate", -2), board, bot_is_white=True, last_eval_cp=None)
+        mated_opponent_to_move = evaluation_for_bot(self.engine("mate", 2), board, bot_is_white=False, last_eval_cp=None)
+
+        self.assertEqual((winning, losing, mated_opponent_to_move), (30000, -30000, -30000))
+        self.assertFalse(should_accept_draw(winning) or should_accept_draw(losing))
 
 
 class TestStockfishUpdater(unittest.TestCase):
@@ -670,46 +962,31 @@ class TestStockfishUpdater(unittest.TestCase):
     
     def test_get_binary_name(self):
         """Test that correct binary name is determined for the platform."""
-        from stockfish_updater import get_binary_name
-        
-        binary_name = get_binary_name()
-        
+        import stockfish_updater
+
+        binary_name = stockfish_updater.get_binary_name()
+
         # Should return a valid binary name
         self.assertIsInstance(binary_name, str)
         self.assertTrue(binary_name.startswith("stockfish-"))
     
     def test_get_installed_version(self):
         """Test version detection of installed Stockfish."""
-        from stockfish_updater import get_installed_version
-        
-        version = get_installed_version()
+        import stockfish_updater
+
+        version = stockfish_updater.get_installed_version()
         
         # Should return either None or a version string
         if version is not None:
             self.assertIsInstance(version, str)
     
-    def test_get_latest_release_info(self):
-        """Test fetching latest release info from GitHub."""
-        from stockfish_updater import get_latest_release_info
-        
-        try:
-            info = get_latest_release_info()
-            
-            # Should have required fields
-            self.assertIn("tag_name", info)
-            self.assertIn("assets", info)
-            self.assertIsInstance(info["assets"], list)
-        except Exception as e:
-            # Network errors are acceptable in tests
-            self.skipTest(f"Network request failed: {e}")
-
     def test_binary_name_is_a_universal_build(self):
         """Stockfish 19+ only ships universal builds; the old per-microarch
         assets (stockfish-ubuntu-x86-64) are the generic SSE2 build and no
         longer exist in the release."""
-        from stockfish_updater import get_binary_name
+        import stockfish_updater
 
-        binary_name = get_binary_name()
+        binary_name = stockfish_updater.get_binary_name()
 
         self.assertTrue(
             binary_name.endswith("-universal"),
@@ -749,62 +1026,60 @@ class TestStockfishUpdater(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 stockfish_updater.get_binary_name()
 
-    def test_download_url_matches_gzipped_asset(self):
-        """The asset lookup uses the .tar.gz name the release actually
-        publishes, not the old uncompressed .tar."""
+    DOWNLOADS = "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/"
+
+    def asset(self, name, digest="sha256:" + "ab" * 32, url=None):
+        return {"name": name, "digest": digest, "browser_download_url": url or self.DOWNLOADS + name}
+
+    def test_asset_lookup_returns_the_address_and_checksum_of_this_platforms_archive(self):
         import stockfish_updater
 
-        release = {
-            "tag_name": "sf_19",
-            "assets": [
-                {"name": "stockfish-linux-arm64-universal.tar.gz",
-                 "browser_download_url": "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/arm.tar.gz"},
-                {"name": "stockfish-linux-x86-64-universal.tar.gz",
-                 "browser_download_url": "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/x86.tar.gz"},
-            ],
-        }
-        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
-            url = stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+        release = {"tag_name": "sf_19", "assets": [
+            self.asset("stockfish-linux-arm64-universal.tar.gz", digest="sha256:" + "11" * 32),
+            self.asset("stockfish-linux-x86-64-universal.tar.gz", digest="sha256:" + "22" * 32),
+        ]}
 
-        self.assertTrue(url.endswith("x86.tar.gz"))
+        url, sha256 = stockfish_updater.find_release_asset("stockfish-linux-x86-64-universal", release)
 
-    def test_download_url_reports_available_assets_when_missing(self):
+        self.assertEqual(url, self.DOWNLOADS + "stockfish-linux-x86-64-universal.tar.gz")
+        self.assertEqual(sha256, "22" * 32)
+
+    def test_asset_lookup_reports_available_assets_when_missing(self):
         """A missing asset names what the release does contain, so the failure
         is diagnosable rather than a bare lookup error."""
         import stockfish_updater
 
-        release = {"tag_name": "sf_19", "assets": [{"name": "stockfish-macos-universal.tar.gz",
-                                                    "browser_download_url": "https://github.com/x"}]}
-        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
-            with self.assertRaises(RuntimeError) as ctx:
-                stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+        release = {"tag_name": "sf_19", "assets": [self.asset("stockfish-macos-universal.tar.gz")]}
+        with self.assertRaises(RuntimeError) as ctx:
+            stockfish_updater.find_release_asset("stockfish-linux-x86-64-universal", release)
 
         self.assertIn("stockfish-macos-universal.tar.gz", str(ctx.exception))
 
-    def test_download_url_rejects_unexpected_host(self):
-        """The download URL comes out of an API response and is made
-        executable, so a non-GitHub host is refused."""
+    def test_an_archive_without_a_published_checksum_is_refused(self):
         import stockfish_updater
 
-        release = {
-            "tag_name": "sf_19",
-            "assets": [{"name": "stockfish-linux-x86-64-universal.tar.gz",
-                        "browser_download_url": "https://evil.example.com/payload.tar.gz"}],
-        }
-        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
-            with self.assertRaises(RuntimeError) as ctx:
-                stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+        for digest in (None, "", "md5:abcdef"):
+            with self.subTest(digest=digest):
+                release = {"assets": [self.asset("stockfish-linux-x86-64-universal.tar.gz", digest=digest)]}
+                with self.assertRaises(RuntimeError) as ctx:
+                    stockfish_updater.find_release_asset("stockfish-linux-x86-64-universal", release)
+                self.assertIn("SHA-256", str(ctx.exception))
 
-        self.assertIn("unexpected host", str(ctx.exception))
-
-    def test_download_url_accepts_github_hosts(self):
-        """Both hosts GitHub serves release assets from are allowed."""
+    def test_a_download_address_outside_the_stockfish_releases_is_refused(self):
+        """The address comes out of an API response and what it points at is run."""
         import stockfish_updater
 
-        for host in ("github.com", "objects.githubusercontent.com"):
-            with self.subTest(host=host):
-                url = f"https://{host}/official-stockfish/x.tar.gz"
-                self.assertEqual(stockfish_updater._check_download_url(url), url)
+        for url in (
+            "https://evil.example.com/payload.tar.gz",
+            "https://github.com/someone-else/Stockfish/releases/download/sf_19/x.tar.gz",
+            "http://github.com/official-stockfish/Stockfish/releases/download/sf_19/x.tar.gz",
+            "https://github.com.evil.example/official-stockfish/Stockfish/releases/download/x.tar.gz",
+        ):
+            with self.subTest(url=url):
+                release = {"assets": [self.asset("stockfish-linux-x86-64-universal.tar.gz", url=url)]}
+                with self.assertRaises(RuntimeError) as ctx:
+                    stockfish_updater.find_release_asset("stockfish-linux-x86-64-universal", release)
+                self.assertIn("unexpected address", str(ctx.exception))
 
     def test_log_build_info_reports_compilation_settings(self):
         """The installed build's code path is logged, so a generic build on a
@@ -828,6 +1103,147 @@ class TestStockfishUpdater(unittest.TestCase):
 
         with patch("subprocess.run", side_effect=FileNotFoundError):
             self.assertIsNone(stockfish_updater.log_build_info("/nonexistent/stockfish"))
+
+
+class TestStockfishInstall(unittest.TestCase):
+    """Download, check and install, against a local server standing in for GitHub."""
+
+    BINARY = "stockfish-linux-x86-64-universal"
+
+    def setUp(self):
+        import io
+        import tarfile
+        import tempfile
+        from lichess_stub import StubLichess
+
+        self.server = StubLichess()
+        self.addCleanup(self.server.close)
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.directory, ignore_errors=True))
+        self.target = os.path.join(self.directory, "installed-stockfish")
+
+        # An archive laid out like a release: the binary nested in a directory.
+        self.engine = b"#!/bin/sh\necho engine\n"
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            info = tarfile.TarInfo(f"stockfish/{self.BINARY}")
+            info.size = len(self.engine)
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(self.engine))
+        self.archive = buffer.getvalue()
+        self.sha256 = __import__("hashlib").sha256(self.archive).hexdigest()
+
+        self.server.reply("GET", f"/download/{self.BINARY}.tar.gz", 200, self.archive)
+        self.url = f"{self.server.url}/download/{self.BINARY}.tar.gz"
+        for target, value in {
+            "stockfish_updater.RELEASE_DOWNLOAD_PREFIX": f"{self.server.url}/download/",
+            "stockfish_updater.INSTALL_PATH": self.target,
+            "stockfish_updater.GITHUB_API": f"{self.server.url}/releases/latest",
+        }.items():
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_matching_archive_is_installed_and_executable(self):
+        import stockfish_updater
+
+        stockfish_updater.download_and_install(self.url, self.sha256, self.BINARY)
+
+        with open(self.target, "rb") as f:
+            self.assertEqual(f.read(), self.engine)
+        self.assertEqual(os.stat(self.target).st_mode & 0o777, 0o755)
+
+    def test_an_archive_that_differs_from_the_published_checksum_is_not_installed(self):
+        import stockfish_updater
+
+        with self.assertRaises(RuntimeError) as ctx:
+            stockfish_updater.download_and_install(self.url, "00" * 32, self.BINARY)
+
+        self.assertIn("does not match", str(ctx.exception))
+        self.assertFalse(os.path.exists(self.target))
+
+    def test_the_checksum_is_compared_without_regard_to_case(self):
+        import stockfish_updater
+
+        stockfish_updater.download_and_install(self.url, self.sha256.upper(), self.BINARY)
+
+        self.assertTrue(os.path.exists(self.target))
+
+    def test_an_archive_without_the_expected_binary_is_not_installed(self):
+        import stockfish_updater
+
+        with self.assertRaises(RuntimeError) as ctx:
+            stockfish_updater.download_and_install(self.url, self.sha256, "stockfish-linux-arm64-universal")
+
+        self.assertIn("Could not find", str(ctx.exception))
+        self.assertFalse(os.path.exists(self.target))
+
+    def test_nothing_is_fetched_from_an_address_outside_the_releases(self):
+        import stockfish_updater
+
+        with self.assertRaises(RuntimeError):
+            stockfish_updater.download_and_install(f"{self.server.url}/elsewhere/x.tar.gz", self.sha256, self.BINARY)
+
+        self.assertEqual(self.server.requests, [])
+
+    def test_a_missing_engine_is_installed_from_the_latest_release(self):
+        import stockfish_updater
+
+        self.server.reply("GET", "/releases/latest", 200, {"tag_name": "sf_19", "assets": [
+            {"name": f"{self.BINARY}.tar.gz", "digest": f"sha256:{self.sha256}", "browser_download_url": self.url},
+        ]})
+        with patch("stockfish_updater.get_binary_name", return_value=self.BINARY), \
+             patch("stockfish_updater.log_build_info"):
+            path = stockfish_updater.ensure_stockfish_installed(auto_update=True)
+
+        self.assertEqual(path, self.target)
+        self.assertTrue(os.access(self.target, os.X_OK))
+
+    def test_an_engine_that_is_present_is_left_alone_without_auto_update(self):
+        import stockfish_updater
+
+        with open(self.target, "w") as f:
+            f.write("#!/bin/sh\necho 'Stockfish 18 by the Stockfish developers'\n")
+        os.chmod(self.target, 0o700)
+
+        with patch("stockfish_updater.get_binary_name", return_value=self.BINARY), \
+             patch("stockfish_updater.log_build_info"):
+            path = stockfish_updater.ensure_stockfish_installed(auto_update=False)
+
+        self.assertEqual(path, self.target)
+        self.assertEqual(self.server.requests, [])
+
+    def test_an_older_engine_is_replaced_and_a_current_one_is_not(self):
+        import stockfish_updater
+
+        release = {"assets": [{"name": f"{self.BINARY}.tar.gz", "digest": f"sha256:{self.sha256}", "browser_download_url": self.url}]}
+        for installed, latest, replaced in (("18", "sf_19", True), ("19", "sf_19", False)):
+            with self.subTest(installed=installed, latest=latest):
+                with open(self.target, "w") as f:
+                    f.write(f"#!/bin/sh\necho 'Stockfish {installed} by the Stockfish developers'\n")
+                os.chmod(self.target, 0o700)
+                self.server.reply("GET", "/releases/latest", 200, {"tag_name": latest, **release})
+
+                with patch("stockfish_updater.get_binary_name", return_value=self.BINARY), \
+                     patch("stockfish_updater.log_build_info"):
+                    stockfish_updater.ensure_stockfish_installed(auto_update=True)
+
+                with open(self.target, "rb") as f:
+                    self.assertEqual(f.read() == self.engine, replaced)
+
+    def test_a_failed_update_check_keeps_the_installed_engine(self):
+        import stockfish_updater
+
+        with open(self.target, "w") as f:
+            f.write("#!/bin/sh\necho 'Stockfish 18 by the Stockfish developers'\n")
+        os.chmod(self.target, 0o700)
+        self.server.reply("GET", "/releases/latest", 503, {"message": "unavailable"})
+
+        with patch("stockfish_updater.get_binary_name", return_value=self.BINARY), \
+             patch("stockfish_updater.log_build_info"):
+            path = stockfish_updater.ensure_stockfish_installed(auto_update=True)
+
+        self.assertEqual(path, self.target)
 
 
 class TestParseTimeToMilliseconds(unittest.TestCase):
@@ -951,23 +1367,65 @@ class TestParsePvFromInfo(unittest.TestCase):
         self.assertEqual(pv, "")
 
 
-class TestMoveTimeCalculationSignature(unittest.TestCase):
-    """Verify calculate_move_time no longer accepts time-pressure arguments."""
+class TestDeclineReasons(unittest.TestCase):
+    """The reason handed to Lichess says what the challenger would have to change."""
 
-    def test_signature_has_two_params_only(self):
-        import inspect
-        from bot import calculate_move_time
-        params = list(inspect.signature(calculate_move_time).parameters)
-        self.assertEqual(params, ["opponent_rating", "base_time"],
-                         "calculate_move_time should only take opponent_rating and base_time")
+    def reason(self, time_control=None, **fields):
+        from bot import challenge_decline_reason
+        challenge = {
+            "id": "chal0001",
+            "challenger": {"rating": fields.pop("rating", 1800)},
+            "variant": {"key": fields.pop("variant", "standard")},
+            "timeControl": time_control or {"type": "clock", "limit": 300, "increment": 0},
+            **fields,
+        }
+        return challenge_decline_reason(challenge)
 
-    @patch('bot.DYNAMIC_STRENGTH', True)
-    @patch('bot.LIMIT_STRENGTH_THRESHOLD', 1800)
-    @patch('bot.FULL_STRENGTH_THRESHOLD', 2200)
-    def test_returns_int(self):
-        from bot import calculate_move_time
-        result = calculate_move_time(2000, 3000)
-        self.assertIsInstance(result, int)
+    def setUp(self):
+        for target, value in {"bot.ACCEPT_CHALLENGES": True, "bot.MIN_RATING": 1320, "bot.MAX_RATING": 2800,
+                              "bot.TIME_CONTROL": ["bullet", "blitz", "rapid", "classical"]}.items():
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_challenge_the_bot_plays_has_no_reason(self):
+        self.assertIsNone(self.reason())
+        self.assertIsNone(self.reason(rating=1320))
+        self.assertIsNone(self.reason(rating=2800))
+
+    def test_variants_are_declined_as_standard_only(self):
+        for variant in ("chess960", "antichess", "atomic", "fromPosition"):
+            self.assertEqual(self.reason(variant=variant), "standard", variant)
+
+    def test_games_without_a_clock_are_declined_as_a_time_control(self):
+        self.assertEqual(self.reason({"type": "correspondence", "daysPerTurn": 2}, speed="correspondence"), "timeControl")
+        self.assertEqual(self.reason({"type": "unlimited"}), "timeControl")
+
+    def test_a_rating_outside_the_range_has_only_the_general_reason(self):
+        self.assertEqual(self.reason(rating=1319), "generic")
+        self.assertEqual(self.reason(rating=2801), "generic")
+
+    def test_a_speed_outside_the_played_ones_names_the_direction(self):
+        with patch("bot.TIME_CONTROL", ["rapid"]):
+            self.assertEqual(self.reason({"limit": 60, "increment": 0}), "tooFast")
+            self.assertEqual(self.reason({"limit": 300, "increment": 0}), "tooFast")
+            self.assertEqual(self.reason({"limit": 1800, "increment": 0}), "tooSlow")
+            self.assertIsNone(self.reason({"limit": 600, "increment": 5}))
+
+    def test_the_clock_is_judged_before_the_rating(self):
+        """A bullet challenge to a bot that plays no bullet is too fast, whoever sends it."""
+        with patch("bot.TIME_CONTROL", ["blitz", "rapid", "classical"]):
+            self.assertEqual(self.reason({"limit": 60, "increment": 0}, rating=900), "tooFast")
+
+    def test_accepting_nothing_declines_everything(self):
+        with patch("bot.ACCEPT_CHALLENGES", False):
+            self.assertEqual(self.reason(), "generic")
+
+    def test_the_yes_or_no_answer_follows_the_reason(self):
+        from bot import should_accept_challenge
+        base = {"challenger": {"rating": 1800}, "variant": {"key": "standard"}, "timeControl": {"limit": 300, "increment": 0}}
+        self.assertTrue(should_accept_challenge(base))
+        self.assertFalse(should_accept_challenge({**base, "variant": {"key": "atomic"}}))
 
 
 class TestBulletChallengeAcceptance(unittest.TestCase):
@@ -1013,7 +1471,7 @@ class TestBulletChallengeAcceptance(unittest.TestCase):
 
 
 class TestExtractMateFromInfo(unittest.TestCase):
-    """Test _extract_mate_from_info helper (added in commit d0fad89)."""
+    """Test _extract_mate_from_info helper."""
 
     def setUp(self):
         from bot import _extract_mate_from_info
@@ -1046,7 +1504,7 @@ class TestExtractMateFromInfo(unittest.TestCase):
 
 
 class TestGetMovePredictionSignature(unittest.TestCase):
-    """Verify get_move_prediction returns a 3-tuple (commit d0fad89 / c90afb6)."""
+    """get_move_prediction returns the move with the mate distance and the evaluation."""
 
     def _make_stockfish_mock(self, info_line: str, best_move: str = "e2e4"):
         sf = Mock()
@@ -1095,242 +1553,8 @@ class TestGetMovePredictionSignature(unittest.TestCase):
         self.assertEqual(cp_val, -30000)
 
 
-class TestDrawOfferFallback(unittest.TestCase):
-    """Test draw offer BOT endpoint fallback logic (commit 8367bb0)."""
-
-    def test_fallback_triggered_on_not_for_bot_accounts(self):
-        """When 'not for bot accounts' appears in error, fallback POST is used."""
-        import requests as req_module
-        error = Exception("This endpoint is not for bot accounts")
-
-        with patch('bot.requests.post') as mock_post, \
-             patch('bot.TOKEN', 'test_token'):
-            mock_post.return_value = Mock(status_code=200, text="ok")
-
-            # Simulate the fallback condition check
-            err_text = str(error).lower()
-            should_fallback = (
-                "not for bot accounts" in err_text
-                or "403" in err_text
-                or (getattr(error, 'response', None)
-                    and getattr(error.response, 'status_code', None) == 403)
-            )
-            self.assertTrue(should_fallback)
-
-    def test_fallback_triggered_on_403_in_message(self):
-        error = Exception("403 Forbidden")
-        err_text = str(error).lower()
-        should_fallback = (
-            "not for bot accounts" in err_text
-            or "403" in err_text
-            or (getattr(error, 'response', None)
-                and getattr(error.response, 'status_code', None) == 403)
-        )
-        self.assertTrue(should_fallback)
-
-    def test_fallback_triggered_on_response_status_403(self):
-        error = Exception("API error")
-        mock_resp = Mock()
-        mock_resp.status_code = 403
-        error.response = mock_resp
-
-        err_text = str(error).lower()
-        should_fallback = (
-            "not for bot accounts" in err_text
-            or "403" in err_text
-            or (getattr(error, 'response', None)
-                and getattr(error.response, 'status_code', None) == 403)
-        )
-        self.assertTrue(should_fallback)
-
-    def test_no_fallback_for_generic_error(self):
-        error = Exception("some other network error")
-        err_text = str(error).lower()
-        should_fallback = (
-            "not for bot accounts" in err_text
-            or "403" in err_text
-            or (getattr(error, 'response', None)
-                and getattr(error.response, 'status_code', None) == 403)
-        )
-        self.assertFalse(should_fallback)
-
-    def test_fallback_url_accept(self):
-        """Verify correct URL is constructed for accept."""
-        game_id = "abc123"
-        accept = True
-        url_action = "accept" if accept else "decline"
-        url = f"https://lichess.org/api/bot/game/{game_id}/draw/{url_action}"
-        self.assertEqual(url, "https://lichess.org/api/bot/game/abc123/draw/accept")
-
-    def test_fallback_url_decline(self):
-        """Verify correct URL is constructed for decline."""
-        game_id = "abc123"
-        accept = False
-        url_action = "accept" if accept else "decline"
-        url = f"https://lichess.org/api/bot/game/{game_id}/draw/{url_action}"
-        self.assertEqual(url, "https://lichess.org/api/bot/game/abc123/draw/decline")
-
-
-class TestPredictionRecoverThreshold(unittest.TestCase):
-    """Test PREDICTION_RECOVER_THRESHOLD config and eval_for_bot logic.
-
-    Recovery search, follow-mate, and avoid-mate branches now fire
-    unconditionally for every opponent regardless of their rating
-    (PREDICTION_MIN_USE_ELO was removed in v2.4.2).
-    """
-
-    def test_config_default_value(self):
-        from bot import PREDICTION_RECOVER_THRESHOLD
-        # Default is 400 cp
-        self.assertIsInstance(PREDICTION_RECOVER_THRESHOLD, int)
-        self.assertGreater(PREDICTION_RECOVER_THRESHOLD, 0)
-
-    def test_eval_for_bot_is_pred_cp_directly(self):
-        """UCI score cp is from side-to-move (always the bot) — no colour flip needed."""
-        # Losing as white: pred_cp already negative from bot's perspective
-        pred_cp_white = -450
-        eval_for_bot = pred_cp_white  # no negation
-        self.assertEqual(eval_for_bot, -450)
-
-    def test_eval_for_bot_black_no_negation(self):
-        """When bot is black and losing, pred_cp is negative — should NOT be negated.
-
-        Old (wrong): eval_for_bot = -pred_cp → positive when losing as black → recovery never fired.
-        New (correct): eval_for_bot = pred_cp → negative when losing as black → recovery fires.
-        """
-        # bot is black, down 9 pawns — Stockfish reports -915 from side-to-move (black)
-        pred_cp = -915
-        eval_for_bot = pred_cp   # direct, no negation
-        self.assertEqual(eval_for_bot, -915)
-        # must trigger recovery
-        self.assertLessEqual(eval_for_bot, -400)
-
-    def test_recovery_triggered_when_below_threshold(self):
-        """Recovery path taken when eval is worse than -threshold."""
-        threshold = 400
-        eval_for_bot = -450  # worse than -400
-        self.assertLessEqual(eval_for_bot, -threshold)
-
-    def test_recovery_not_triggered_near_threshold(self):
-        """Recovery not taken when eval is just within threshold."""
-        threshold = 400
-        eval_for_bot = -399
-        self.assertGreater(eval_for_bot, -threshold)
-
-    def test_recovery_not_triggered_when_winning(self):
-        threshold = 400
-        eval_for_bot = 200
-        self.assertGreater(eval_for_bot, -threshold)
-
-    def test_recovery_uses_full_power_not_limited_engine(self):
-        """Recovery uses ELO boost when below FULL_STRENGTH_THRESHOLD (v2.4.2).
-
-        Below the threshold: UCI_LimitStrength stays active, ELO raised by
-        PREDICTION_RECOVER_ELO_BOOST. Keeps the game winnable for the opponent.
-        """
-        from bot import PREDICTION_RECOVER_ELO_BOOST, FULL_STRENGTH_THRESHOLD
-        target_elo = 1600   # well below 2800
-        recover_elo = min(target_elo + PREDICTION_RECOVER_ELO_BOOST, 2850)
-        self.assertEqual(recover_elo, target_elo + PREDICTION_RECOVER_ELO_BOOST)
-        # Below threshold — should use ELO boost path, not full power
-        self.assertLess(recover_elo, FULL_STRENGTH_THRESHOLD)
-
-    def test_recovery_escalates_to_full_power_near_threshold(self):
-        """When boosted ELO >= FULL_STRENGTH_THRESHOLD, switch to full-power instead.
-
-        An opponent near 2800 already has _target_elo at 2850 (max cap).
-        Adding PREDICTION_RECOVER_ELO_BOOST still gives 2850, which is >= 2800
-        (FULL_STRENGTH_THRESHOLD). In this case recovery should use full-power
-        Stockfish, not the ELO-capped engine.
-        """
-        from bot import PREDICTION_RECOVER_ELO_BOOST, FULL_STRENGTH_THRESHOLD
-        # Opponent near 2800: _target_elo already at Stockfish max
-        target_elo = 2850
-        recover_elo = min(target_elo + PREDICTION_RECOVER_ELO_BOOST, 2850)
-        # recover_elo is capped at 2850 — >= FULL_STRENGTH_THRESHOLD → full power path
-        self.assertGreaterEqual(recover_elo, FULL_STRENGTH_THRESHOLD)
-
-    def test_recovery_elo_boost_caps_at_2850(self):
-        """ELO boost must never exceed the Stockfish max of 2850."""
-        from bot import PREDICTION_RECOVER_ELO_BOOST
-        target_elo = 2800
-        recover_elo = min(target_elo + PREDICTION_RECOVER_ELO_BOOST, 2850)
-        self.assertLessEqual(recover_elo, 2850)
-
-    def test_recover_elo_boost_default(self):
-        """PREDICTION_RECOVER_ELO_BOOST default is 200."""
-        from bot import PREDICTION_RECOVER_ELO_BOOST
-        self.assertEqual(PREDICTION_RECOVER_ELO_BOOST, 200)
-
-    @patch('bot.PREDICTION_RECOVER_THRESHOLD', 400)
-    def test_recovery_threshold_env_override(self):
-        """Patching PREDICTION_RECOVER_THRESHOLD is respected in comparisons."""
-        from bot import PREDICTION_RECOVER_THRESHOLD
-        self.assertEqual(PREDICTION_RECOVER_THRESHOLD, 400)
-
-
-class TestMatingPvLogic(unittest.TestCase):
-    """Test mate-based prediction routing logic (commit d0fad89)."""
-
-    def test_positive_mate_val_follows_predicted_move(self):
-        """When mate_val > 0, bot should follow the predicted continuation."""
-        predicted_move = "d1h5"
-        mate_val = 3
-
-        if mate_val is not None and mate_val > 0:
-            move = predicted_move or "fallback"
-        elif mate_val is not None and mate_val < 0:
-            move = "defensive_move"
-        else:
-            move = predicted_move or "standard"
-
-        self.assertEqual(move, "d1h5")
-
-    def test_negative_mate_val_picks_defensive_move(self):
-        """When mate_val < 0, bot should avoid the predicted continuation."""
-        predicted_move = "e8g8"
-        mate_val = -2
-
-        if mate_val is not None and mate_val > 0:
-            move = predicted_move or "fallback"
-        elif mate_val is not None and mate_val < 0:
-            move = "defensive_move"  # engine re-search
-        else:
-            move = predicted_move or "standard"
-
-        self.assertEqual(move, "defensive_move")
-
-    def test_none_mate_val_uses_predicted_move(self):
-        """When mate_val is None (no mate), normal prediction path is used."""
-        predicted_move = "e2e4"
-        mate_val = None
-
-        if mate_val is not None and mate_val > 0:
-            move = "mating"
-        elif mate_val is not None and mate_val < 0:
-            move = "defensive_move"
-        else:
-            move = predicted_move or "standard"
-
-        self.assertEqual(move, "e2e4")
-
-    def test_none_mate_val_no_predicted_move_falls_back(self):
-        """When both mate_val and predicted_move are None, fallback is used."""
-        predicted_move = None
-        mate_val = None
-
-        if mate_val is not None and mate_val > 0:
-            move = "mating"
-        elif mate_val is not None and mate_val < 0:
-            move = "defensive_move"
-        else:
-            move = predicted_move or "standard_search"
-
-        self.assertEqual(move, "standard_search")
-
-
 class TestFullPowerMateMove(unittest.TestCase):
-    """Test _get_full_power_move helper — disables UCI_LimitStrength, restores after (v2.4.2)."""
+    """Test _get_full_power_move helper — disables UCI_LimitStrength, restores after."""
 
     def _make_stockfish_mock(self, best_move: str = "e2e4"):
         mock_sf = MagicMock()
@@ -1403,36 +1627,7 @@ class TestFullPowerMateMove(unittest.TestCase):
 
 
 class TestClockAdjustedSecondarySearch(unittest.TestCase):
-    """Validate clock-budget logic for secondary searches after prediction (v2.4.2).
-
-    The play_game loop computes _remaining_after_pred = max(0, _my_remaining - elapsed_ms)
-    to ensure mate / recovery searches never exceed the original per-move clock budget.
-    These tests validate that inline arithmetic pattern directly.
-    """
-
-    def test_remaining_after_pred_normal(self):
-        """Remaining clock is reduced by the elapsed prediction time."""
-        _my_remaining = 30_000   # 30 s
-        _pred_elapsed_ms = 1_200
-        _remaining_after_pred = max(0, _my_remaining - _pred_elapsed_ms)
-        self.assertEqual(_remaining_after_pred, 28_800)
-
-    def test_remaining_after_pred_floors_at_zero(self):
-        """remaining_after_pred never goes negative (e.g., lag spike longer than remaining)."""
-        _my_remaining = 500
-        _pred_elapsed_ms = 800   # elapsed > remaining (extreme lag spike)
-        _remaining_after_pred = max(0, _my_remaining - _pred_elapsed_ms)
-        self.assertEqual(_remaining_after_pred, 0)
-
-    def test_remaining_after_pred_none_passthrough(self):
-        """When _my_remaining is None (no clock data), remaining_after_pred stays None."""
-        _my_remaining = None
-        _pred_elapsed_ms = 1_000
-        _remaining_after_pred = (
-            max(0, _my_remaining - _pred_elapsed_ms)
-            if _my_remaining else None
-        )
-        self.assertIsNone(_remaining_after_pred)
+    """A second search in the same move is budgeted from the clock left after the first."""
 
     def test_clock_aware_uses_adjusted_remaining(self):
         """clock_aware_move_time respects remaining_after_pred, not original remaining."""
@@ -1449,466 +1644,298 @@ class TestClockAdjustedSecondarySearch(unittest.TestCase):
         self.assertLess(budget_adjusted, budget_original,
                         "Adjusted-clock budget must be smaller than original-clock budget")
 
-    def test_fallback_uses_movetime_min_ms_not_full_budget(self):
-        """Exceptional fallback path uses MOVETIME_MIN_MS, not the full move_time budget."""
-        from bot import MOVETIME_MIN_MS
-        move_time = 3_000   # 3 s — a normal rapid-game budget
-        # Simulated exceptional path: _get_full_power_move returns None
-        full_power_result = None
-        fallback_time = MOVETIME_MIN_MS   # must NOT be move_time
-        move = full_power_result or f"stockfish.get_best_move_time({fallback_time})"
-        self.assertIn(str(MOVETIME_MIN_MS), move)
-        self.assertNotIn(str(move_time), move)
+
+class TestAbortStaleGames(unittest.TestCase):
+    """What the bot does on startup with games left over from its previous run."""
+
+    STARTED = {"id": 20, "name": "started"}
+
+    def client(self, ongoing, exports=None):
+        """Games as Lichess lists them; each gets the status of a game in progress unless it has one."""
+        client = Mock()
+        client.games.get_ongoing.return_value = [{"status": self.STARTED, **game} for game in ongoing]
+        client.games.export.side_effect = lambda gid: (exports or {})[gid]
+        return client
+
+    def run_cleanup(self, client):
+        from bot import abort_stale_games
+        abort_stale_games(client)
+
+    def test_nothing_ongoing_asks_nothing_more(self):
+        client = self.client([])
+
+        self.run_cleanup(client)
+
+        client.games.export.assert_not_called()
+        client.bots.abort_game.assert_not_called()
+
+    def test_a_game_nobody_has_moved_in_is_aborted(self):
+        client = self.client([{"gameId": "stuck001", "opponent": {"username": "gone"}}],
+                             {"stuck001": {"moves": ""}})
+
+        self.run_cleanup(client)
+
+        client.bots.abort_game.assert_called_once_with("stuck001")
+
+    def test_a_game_with_one_move_can_still_be_aborted(self):
+        client = self.client([{"gameId": "stuck001", "opponent": {"username": "gone"}}],
+                             {"stuck001": {"moves": "e2e4"}})
+
+        self.run_cleanup(client)
+
+        client.bots.abort_game.assert_called_once_with("stuck001")
+
+    def test_a_listing_without_a_status_is_treated_as_a_game_in_progress(self):
+        client = Mock()
+        client.games.get_ongoing.return_value = [{"gameId": "stuck001", "opponent": {"username": "gone"}}]
+        client.games.export.return_value = {"moves": ""}
+
+        self.run_cleanup(client)
+
+        client.bots.abort_game.assert_called_once_with("stuck001")
+
+    def test_a_game_under_way_is_left_for_the_event_stream(self):
+        client = self.client([{"gameId": "live0001", "opponent": {"username": "rival"}}],
+                             {"live0001": {"moves": "e2e4 e7e5 g1f3"}})
+
+        self.run_cleanup(client)
+
+        client.bots.abort_game.assert_not_called()
+        client.bots.resign_game.assert_not_called()
+
+    def test_a_game_that_is_already_over_is_not_looked_up(self):
+        for status in ({"name": "aborted"}, "mate"):
+            with self.subTest(status=status):
+                client = self.client([{"gameId": "done0001", "status": status, "opponent": {"username": "x"}}])
+
+                self.run_cleanup(client)
+
+                client.games.export.assert_not_called()
+                client.bots.abort_game.assert_not_called()
+
+    def test_each_game_is_judged_on_its_own(self):
+        client = self.client(
+            [{"gameId": "stuck001", "opponent": {"username": "a"}},
+             {"gameId": "live0001", "opponent": {"username": "b"}},
+             {"id": "stuck002", "opponent": {"username": "c"}}],
+            {"stuck001": {"moves": ""}, "live0001": {"moves": "d2d4 d7d5"}, "stuck002": {"moves": "c2c4"}},
+        )
+
+        self.run_cleanup(client)
+
+        self.assertEqual([c.args[0] for c in client.bots.abort_game.call_args_list], ["stuck001", "stuck002"])
+
+    def test_a_refused_abort_does_not_stop_the_cleanup(self):
+        client = self.client(
+            [{"gameId": "stuck001", "opponent": {"username": "a"}}, {"gameId": "stuck002", "opponent": {"username": "b"}}],
+            {"stuck001": {"moves": ""}, "stuck002": {"moves": ""}},
+        )
+        client.bots.abort_game.side_effect = [RuntimeError("too late"), None]
+
+        self.run_cleanup(client)
+
+        self.assertEqual(client.bots.abort_game.call_count, 2)
+
+    def test_lichess_being_unreachable_does_not_stop_the_start(self):
+        client = Mock()
+        client.games.get_ongoing.side_effect = RuntimeError("no network")
+
+        self.run_cleanup(client)      # must not raise
+
+        client.bots.abort_game.assert_not_called()
 
 
-class TestTimeoutHTTPAdapter(unittest.TestCase):
-    """Test TimeoutHTTPAdapter sets default timeout on all requests."""
+class QuietStream:
+    """A game stream that delivers the given events and then says nothing until released."""
 
-    def test_default_timeout_applied(self):
-        from bot import TimeoutHTTPAdapter
-        adapter = TimeoutHTTPAdapter(timeout=(10, 120))
-        self.assertEqual(adapter.timeout, (10, 120))
+    def __init__(self, *events):
+        self._events = list(events)
+        self._release = threading.Event()
+        self._later = []
 
-    def test_send_sets_timeout_in_kwargs(self):
-        from bot import TimeoutHTTPAdapter
-        adapter = TimeoutHTTPAdapter(timeout=(5, 60))
+    def then(self, *events):
+        """Deliver these when ``release`` is called."""
+        self._later = list(events)
+        return self
 
-        # Mock the parent send method
-        with patch.object(requests.adapters.HTTPAdapter, 'send', return_value=Mock()) as mock_send:
-            fake_request = Mock()
-            adapter.send(fake_request)
-            _, kwargs = mock_send.call_args
-            self.assertEqual(kwargs.get('timeout'), (5, 60))
+    def release(self):
+        self._release.set()
 
-    def test_explicit_timeout_not_overridden(self):
-        from bot import TimeoutHTTPAdapter
-        adapter = TimeoutHTTPAdapter(timeout=(5, 60))
-
-        with patch.object(requests.adapters.HTTPAdapter, 'send', return_value=Mock()) as mock_send:
-            fake_request = Mock()
-            adapter.send(fake_request, timeout=30)
-            _, kwargs = mock_send.call_args
-            # Explicit timeout should be preserved, not overridden
-            self.assertEqual(kwargs.get('timeout'), 30)
+    def __iter__(self):
+        yield from self._events
+        self._release.wait(10)
+        yield from self._later
 
 
-class TestHealthcheck(unittest.TestCase):
-    """Test healthcheck heartbeat mechanism."""
+class TestGameWatchdog(unittest.TestCase):
+    """What the bot does while a game stream is quiet."""
 
-    def test_healthcheck_file_constant(self):
-        from bot import HEALTHCHECK_FILE
-        self.assertEqual(HEALTHCHECK_FILE, "/tmp/axiom_heartbeat")
+    def setUp(self):
+        self.client = Mock()
+        self.checks = 0
 
-    def test_heartbeat_file_writable(self):
-        """Verify heartbeat file can be written and read back."""
-        import tempfile
-        from bot import HEALTHCHECK_FILE
-        # Use a temp file to avoid side effects
-        with tempfile.NamedTemporaryFile(mode='w', suffix='_heartbeat', delete=True) as f:
-            f.write(str(time.time()))
-            f.flush()
-            f.seek(0)
-            # File should exist and contain a valid timestamp
-            self.assertTrue(os.path.exists(f.name))
+    def lichess_says(self, *answers):
+        """Answers to "how is the game?", in order; the last one repeats. An exception is raised."""
+        answers = list(answers)
 
+        def export(game_id):
+            self.checks += 1
+            answer = answers[0] if len(answers) == 1 else answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
 
-class TestGracefulShutdown(unittest.TestCase):
-    """Test graceful shutdown handler."""
+        self.client.games.export.side_effect = export
 
-    def test_shutdown_flag_set(self):
-        """handle_shutdown sets shutdown_requested to True."""
-        import bot
-        original = bot.shutdown_requested
-        try:
-            bot.shutdown_requested = False
-            # Patch sys.exit and threading to prevent actual exit
-            with patch('bot.sys.exit'), \
-                 patch('bot.threading.Thread'):
-                bot.handle_shutdown(signal.SIGTERM, None)
-            self.assertTrue(bot.shutdown_requested)
-        finally:
-            bot.shutdown_requested = original
-
-    def test_double_signal_force_exits(self):
-        """Second signal calls sys.exit(1) for forced shutdown."""
-        import bot
-        original = bot.shutdown_requested
-        try:
-            bot.shutdown_requested = True  # simulate first signal already received
-            with self.assertRaises(SystemExit) as ctx:
-                bot.handle_shutdown(signal.SIGTERM, None)
-            self.assertEqual(ctx.exception.code, 1)
-        finally:
-            bot.shutdown_requested = original
-
-
-class TestConcurrentGameLimit(unittest.TestCase):
-    """Test concurrent game limit logic."""
-
-    def test_limit_prevents_excess_games(self):
-        """When active_games >= MAX_CONCURRENT_GAMES, new game should be rejected."""
-        import threading
-        max_concurrent = 1
-        active_games = {"game1": threading.Thread(target=lambda: None)}
-        active_games["game1"].start()
-        active_games["game1"].join()  # make it finish but keep in dict
-
-        # Simulate dead-thread cleanup + limit check (mirrors main loop logic)
-        dead = [gid for gid, t in active_games.items() if not t.is_alive()]
-        for gid in dead:
-            del active_games[gid]
-
-        # After cleanup, dead thread removed → slot available
-        self.assertLess(len(active_games), max_concurrent)
-
-    def test_limit_blocks_when_game_alive(self):
-        """A still-running game thread blocks new games."""
-        import threading
-        max_concurrent = 1
-
-        blocker = threading.Event()
-        def busy():
-            blocker.wait(timeout=5)
-
-        t = threading.Thread(target=busy, daemon=True)
-        t.start()
-        active_games = {"game1": t}
-
-        # Thread is alive → at limit
-        alive_count = sum(1 for t in active_games.values() if t.is_alive())
-        self.assertGreaterEqual(alive_count, max_concurrent)
-
-        blocker.set()  # cleanup
-        t.join(timeout=2)
-
-
-class TestTerminalStatuses(unittest.TestCase):
-    """Test _TERMINAL_STATUSES constant."""
-
-    def test_terminal_statuses_is_frozenset(self):
-        from bot import _TERMINAL_STATUSES
-        self.assertIsInstance(_TERMINAL_STATUSES, frozenset)
-
-    def test_terminal_statuses_contains_expected(self):
-        from bot import _TERMINAL_STATUSES
-        for status in ["mate", "resign", "stalemate", "timeout", "draw",
-                        "outoftime", "aborted", "cheat", "noStart",
-                        "unknownFinish", "variantEnd"]:
-            self.assertIn(status, _TERMINAL_STATUSES)
-
-    def test_started_not_terminal(self):
-        from bot import _TERMINAL_STATUSES
-        self.assertNotIn("started", _TERMINAL_STATUSES)
-        self.assertNotIn("created", _TERMINAL_STATUSES)
-
-
-class TestGameStuckException(unittest.TestCase):
-    """Test _GameStuck exception class."""
-
-    def test_is_exception(self):
-        from bot import _GameStuck
-        self.assertTrue(issubclass(_GameStuck, Exception))
-
-    def test_message_preserved(self):
-        from bot import _GameStuck
-        exc = _GameStuck("test message")
-        self.assertEqual(str(exc), "test message")
-
-
-class TestStreamWithWatchdog(unittest.TestCase):
-    """Test _stream_with_watchdog handles idle streams and terminal games."""
-
-    def test_yields_events_from_stream(self):
-        """Normal stream events are yielded through the watchdog."""
+    def watch(self, stream, interval=0.02, abort_timeout=600):
         from bot import _stream_with_watchdog
-        events = [{"type": "gameState", "moves": "e2e4"}, {"type": "gameState", "moves": "e2e4 e7e5"}]
-        mock_client = Mock()
-        result = list(_stream_with_watchdog(iter(events), mock_client, "test123", check_interval=5))
-        self.assertEqual(result, events)
+        with patch("bot.GAME_WATCHDOG_ABORT_TIMEOUT", abort_timeout):
+            yield from _stream_with_watchdog(stream, self.client, "game0001", interval)
 
-    def test_watchdog_checks_api_on_idle(self):
-        """When stream is idle, watchdog polls the API."""
-        from bot import _stream_with_watchdog, _GameStuck
+    def test_events_pass_through_in_order_and_the_stream_end_ends_it(self):
+        events = [{"type": "gameFull"}, {"type": "gameState", "moves": "e2e4"}]
 
-        # Create a stream that blocks forever
-        block = threading.Event()
-        def slow_stream():
-            block.wait(timeout=10)
-            return
-            yield  # make it a generator
+        self.assertEqual(list(self.watch(iter(events))), events)
+        self.client.games.export.assert_not_called()
 
-        mock_client = Mock()
-        mock_client.games.export.return_value = {"status": "aborted"}
+    def test_an_error_on_the_stream_is_raised_to_the_game_thread(self):
+        def broken():
+            yield {"type": "gameFull"}
+            raise ConnectionError("stream cut")
+
+        watched = self.watch(broken())
+
+        self.assertEqual(next(watched), {"type": "gameFull"})
+        with self.assertRaises(ConnectionError):
+            next(watched)
+
+    def test_a_game_that_ended_without_the_stream_saying_so_is_closed(self):
+        from bot import _GameStuck
+        self.lichess_says({"status": "resign", "moves": "e4 e5 Nf3"})
+        stream = QuietStream({"type": "gameFull"})
+        self.addCleanup(stream.release)
+        watched = self.watch(stream)
+        next(watched)
 
         with self.assertRaises(_GameStuck):
-            # Very short interval so test is fast
-            for _ in _stream_with_watchdog(slow_stream(), mock_client, "test123", check_interval=0.1):
-                pass
+            next(watched)
 
-        mock_client.games.export.assert_called_with("test123")
-        block.set()  # cleanup
+    def test_a_long_think_in_a_game_under_way_ends_nothing(self):
+        """Status "started" covers a whole game in progress, not only one without moves."""
+        self.lichess_says({"status": "started", "moves": "e4 e5 Nf3 Nc6"})
+        stream = QuietStream({"type": "gameFull"}).then({"type": "gameState", "moves": "e2e4 e7e5 g1f3 b8c6 f1b5"})
+        watched = self.watch(stream, abort_timeout=0.05)   # far shorter than the silence below
+        next(watched)
 
-    def test_watchdog_continues_if_game_active(self):
-        """Watchdog does not break if API says game is still active."""
-        from bot import _stream_with_watchdog
+        threading.Timer(0.5, stream.release).start()       # the opponent moves after a long silence
+        event = next(watched)
 
-        call_count = 0
-        event_ready = threading.Event()
+        self.assertEqual(event["type"], "gameState")
+        self.assertGreater(self.checks, 5)
+        self.client.bots.abort_game.assert_not_called()
+        self.client.bots.resign_game.assert_not_called()
 
-        def delayed_stream():
-            # First, delay to trigger watchdog
-            event_ready.wait(timeout=5)
+    def test_a_game_nobody_moves_in_is_aborted_after_the_timeout(self):
+        from bot import _GameStuck
+        self.lichess_says({"status": "started", "moves": ""})
+        stream = QuietStream({"type": "gameFull"})
+        self.addCleanup(stream.release)
+        watched = self.watch(stream, abort_timeout=0.1)
+        next(watched)
+
+        with self.assertRaises(_GameStuck):
+            next(watched)
+
+        self.client.bots.abort_game.assert_called_once_with("game0001")
+        self.client.bots.resign_game.assert_not_called()
+
+    def test_a_game_with_one_move_can_still_be_aborted(self):
+        from bot import _GameStuck
+        self.lichess_says({"status": "started", "moves": "e4"})
+        stream = QuietStream({"type": "gameFull"})
+        self.addCleanup(stream.release)
+        watched = self.watch(stream, abort_timeout=0.1)
+        next(watched)
+
+        with self.assertRaises(_GameStuck):
+            next(watched)
+
+        self.client.bots.abort_game.assert_called_once_with("game0001")
+
+    def test_no_abort_before_the_timeout(self):
+        self.lichess_says({"status": "started", "moves": ""})
+        stream = QuietStream({"type": "gameFull"}).then({"type": "gameState", "moves": "e2e4"})
+        watched = self.watch(stream, abort_timeout=600)
+        next(watched)
+
+        threading.Timer(0.3, stream.release).start()
+        event = next(watched)
+
+        self.assertEqual(event["moves"], "e2e4")
+        self.client.bots.abort_game.assert_not_called()
+
+    def test_a_refused_abort_means_the_game_is_on_and_is_never_a_resignation(self):
+        self.lichess_says({"status": "started", "moves": ""})
+        self.client.bots.abort_game.side_effect = RuntimeError("Too late to abort")
+        stream = QuietStream({"type": "gameFull"}).then({"type": "gameState", "moves": "e2e4 e7e5"})
+        watched = self.watch(stream, abort_timeout=0.1)
+        next(watched)
+
+        threading.Timer(0.6, stream.release).start()
+        event = next(watched)
+
+        self.assertEqual(event["type"], "gameState")
+        self.assertGreaterEqual(self.client.bots.abort_game.call_count, 1)
+        self.client.bots.resign_game.assert_not_called()
+
+    def test_a_move_restarts_the_wait_for_the_other_first_move(self):
+        from bot import _GameStuck
+        self.lichess_says({"status": "started", "moves": "e4"})
+
+        import time
+
+        def stream():
+            yield {"type": "gameFull"}
+            time.sleep(0.15)                      # most of the abort timeout...
             yield {"type": "gameState", "moves": "e2e4"}
+            time.sleep(5)
 
-        mock_client = Mock()
-        # First API call: game active → continue. Then stream delivers event.
-        def export_side_effect(gid):
-            nonlocal call_count
-            call_count += 1
-            event_ready.set()  # wake up the stream after first watchdog check
-            return {"status": "started"}
+        watched = self.watch(stream(), interval=0.02, abort_timeout=0.25)
+        next(watched)
+        self.assertEqual(next(watched)["type"], "gameState")
+        self.client.bots.abort_game.assert_not_called()   # ...and then a move, so the wait starts over
 
-        mock_client.games.export.side_effect = export_side_effect
+        with self.assertRaises(_GameStuck):
+            next(watched)
+        self.client.bots.abort_game.assert_called_once()
 
-        result = list(_stream_with_watchdog(delayed_stream(), mock_client, "test123", check_interval=0.1))
-        self.assertEqual(len(result), 1)
-        self.assertGreaterEqual(call_count, 1)
+    def test_failing_to_reach_lichess_ends_nothing(self):
+        """However often the check fails, the game goes on when its stream does."""
+        self.lichess_says(RuntimeError("HTTP 429"))
+        stream = QuietStream({"type": "gameFull"}).then({"type": "gameState", "moves": "e2e4 e7e5"})
+        watched = self.watch(stream, abort_timeout=0.05)
+        next(watched)
 
-    def test_watchdog_re_raises_stream_exceptions(self):
-        """Exceptions from the underlying stream are re-raised."""
-        from bot import _stream_with_watchdog
+        threading.Timer(0.5, stream.release).start()
+        event = next(watched)
 
-        def failing_stream():
-            raise ConnectionError("lost connection")
-            yield  # make it a generator
+        self.assertEqual(event["type"], "gameState")
+        self.assertGreater(self.checks, 10)
+        self.client.bots.abort_game.assert_not_called()
+        self.client.bots.resign_game.assert_not_called()
 
-        mock_client = Mock()
-        with self.assertRaises(ConnectionError):
-            for _ in _stream_with_watchdog(failing_stream(), mock_client, "x", check_interval=1):
-                pass
+    def test_a_check_that_works_again_is_acted_on(self):
+        from bot import _GameStuck
+        self.lichess_says(RuntimeError("down"), RuntimeError("down"), {"status": "mate", "moves": "f3 e5 g4 Qh4#"})
+        stream = QuietStream({"type": "gameFull"})
+        self.addCleanup(stream.release)
+        watched = self.watch(stream)
+        next(watched)
 
+        with self.assertRaises(_GameStuck):
+            next(watched)
 
-class TestGameWatchdogConfig(unittest.TestCase):
-    """Test GAME_WATCHDOG_INTERVAL config."""
-
-    def test_config_importable(self):
-        from config import GAME_WATCHDOG_INTERVAL
-        self.assertIsInstance(GAME_WATCHDOG_INTERVAL, int)
-        self.assertGreater(GAME_WATCHDOG_INTERVAL, 0)
-
-    def test_default_value(self):
-        from config import GAME_WATCHDOG_INTERVAL
-        self.assertEqual(GAME_WATCHDOG_INTERVAL, 60)
-
-
-class TestOpponentGoneHandling(unittest.TestCase):
-    """Test opponentGone event handling logic."""
-
-    def test_opponent_gone_event_structure(self):
-        """Verify opponentGone event parsing logic."""
-        event = {"type": "opponentGone", "gone": True, "claimWinInSeconds": 10}
-        self.assertTrue(event.get("gone", False))
-        self.assertEqual(event.get("claimWinInSeconds"), 10)
-
-    def test_opponent_returned_event(self):
-        """Verify opponentGone with gone=False is recognized."""
-        event = {"type": "opponentGone", "gone": False}
-        self.assertFalse(event.get("gone", False))
-        self.assertIsNone(event.get("claimWinInSeconds"))
-
-    def test_claim_victory_timer_created(self):
-        """Timer is created and is a daemon for auto-cleanup."""
-        claim_seconds = 15
-        timer = threading.Timer(claim_seconds + 1, lambda: None)
-        timer.daemon = True
-        self.assertTrue(timer.daemon)
-        self.assertFalse(timer.is_alive())
-        timer.cancel()  # cleanup
-
-    def test_claim_victory_timer_cancellation(self):
-        """Timer can be cancelled before firing."""
-        fired = threading.Event()
-        timer = threading.Timer(0.5, fired.set)
-        timer.daemon = True
-        timer.start()
-        timer.cancel()
-        time.sleep(0.7)  # wait past the timer
-        self.assertFalse(fired.is_set(), "Timer should have been cancelled")
-
-
-class TestStartupGameCleanup(unittest.TestCase):
-    """Test startup stuck game cleanup logic."""
-
-    def test_ongoing_games_empty(self):
-        """No action when no ongoing games."""
-        mock_client = Mock()
-        mock_client.games.get_ongoing.return_value = []
-        ongoing = mock_client.games.get_ongoing()
-        self.assertEqual(len(ongoing), 0)
-
-    def test_ongoing_game_already_finished(self):
-        """Already finished games are skipped."""
-        from bot import _TERMINAL_STATUSES
-        game = {"gameId": "abc", "status": {"name": "aborted"}, "opponent": {"username": "test"}}
-        status = game.get("status", {})
-        status_name = status.get("name", status) if isinstance(status, dict) else str(status)
-        self.assertIn(status_name, _TERMINAL_STATUSES)
-
-    def test_ongoing_game_few_moves_abort(self):
-        """Games with < 2 moves should be aborted."""
-        mock_client = Mock()
-        mock_client.games.export.return_value = {"moves": "e2e4", "status": "started"}
-        full = mock_client.games.export("abc")
-        moves = full.get("moves", "")
-        move_count = len(moves.split()) if moves else 0
-        self.assertLess(move_count, 2)
-
-    def test_ongoing_game_many_moves_resume(self):
-        """Games with >= 2 moves should be resumed, not aborted."""
-        mock_client = Mock()
-        mock_client.games.export.return_value = {"moves": "e2e4 e7e5 d2d4", "status": "started"}
-        full = mock_client.games.export("abc")
-        moves = full.get("moves", "")
-        move_count = len(moves.split()) if moves else 0
-        self.assertGreaterEqual(move_count, 2)
-
-    def test_status_as_string(self):
-        """Handle status field that is a plain string rather than dict."""
-        from bot import _TERMINAL_STATUSES
-        game = {"gameId": "abc", "status": "started", "opponent": {"username": "test"}}
-        status = game.get("status", {})
-        status_name = status.get("name", status) if isinstance(status, dict) else str(status)
-        self.assertNotIn(status_name, _TERMINAL_STATUSES)
-
-
-class TestGameStreamReconnect502(unittest.TestCase):
-    """Test that game stream handles 502/503/504 as reconnectable errors."""
-
-    def _make_response_error(self, status_code):
-        """Create a ResponseError with the given status code."""
-        from berserk.exceptions import ResponseError
-        mock_resp = Mock()
-        mock_resp.status_code = status_code
-        mock_resp.text = f"Error {status_code}"
-        mock_resp.args = (f"Error {status_code}",)
-        try:
-            exc = ResponseError(mock_resp)
-        except Exception:
-            # Fallback for different berserk versions
-            exc = ResponseError.__new__(ResponseError)
-            exc.response = mock_resp
-            Exception.__init__(exc, f"Error {status_code}")
-        exc.response = mock_resp
-        return exc
-
-    def test_response_error_502_is_retriable(self):
-        """ResponseError with 502 status should trigger reconnect, not break."""
-        e = self._make_response_error(502)
-        is_retriable = hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]
-        self.assertTrue(is_retriable)
-
-    def test_response_error_404_is_not_retriable(self):
-        """ResponseError with 404 status should NOT be retried."""
-        e = self._make_response_error(404)
-        is_retriable = hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]
-        self.assertFalse(is_retriable)
-
-
-class TestWatchdogConsecutiveFailures(unittest.TestCase):
-    """Test that watchdog escalates after consecutive API failures."""
-
-    def test_watchdog_raises_after_max_failures(self):
-        """After N consecutive API failures, watchdog force-ends the game."""
-        from bot import _stream_with_watchdog, _GameStuck
-
-        block = threading.Event()
-        def slow_stream():
-            block.wait(timeout=10)
-            return
-            yield
-
-        mock_client = Mock()
-        mock_client.games.export.side_effect = Exception("API unavailable")
-
-        with self.assertRaises(_GameStuck) as ctx:
-            for _ in _stream_with_watchdog(slow_stream(), mock_client, "fail_test", check_interval=0.05):
-                pass
-
-        self.assertIn("could not verify game status", str(ctx.exception))
-        block.set()
-
-    def test_watchdog_failure_count_resets_on_success(self):
-        """Successful API check resets the consecutive failure counter."""
-        from bot import _stream_with_watchdog
-
-        call_count = 0
-        event_ready = threading.Event()
-
-        def delayed_stream():
-            event_ready.wait(timeout=5)
-            yield {"type": "gameState", "moves": "e2e4"}
-
-        mock_client = Mock()
-        def export_side_effect(gid):
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 2:
-                raise Exception("temporary failure")
-            # Third call succeeds → stream event arrives
-            event_ready.set()
-            return {"status": "started"}
-
-        mock_client.games.export.side_effect = export_side_effect
-
-        result = list(_stream_with_watchdog(delayed_stream(), mock_client, "reset_test", check_interval=0.05))
-        self.assertEqual(len(result), 1)
-        # Should NOT have raised _GameStuck — failures reset on success
-        self.assertGreaterEqual(call_count, 3)
-
-
-class TestNoFirstMoveAbort(unittest.TestCase):
-    """Test that the bot aborts the game when the opponent never makes theirfirst move."""
-
-    def test_no_first_move_timer_starts_when_waiting_for_opponent(self):
-        """Timer should start when bot is black and opponent hasn't moved."""
-        # The timer is started inside play_game after gameFull.
-        # We test the logic: 0 moves + not our turn → timer should be set.
-        board = chess.Board()
-        bot_is_white = False  # bot is black
-        last_move_count = 0
-
-        is_my_turn = (
-            (board.turn == chess.WHITE and bot_is_white) or
-            (board.turn == chess.BLACK and not bot_is_white)
-        )
-        should_start_timer = last_move_count == 0 and not is_my_turn
-        self.assertTrue(should_start_timer)
-
-    def test_no_first_move_timer_not_started_when_bot_is_white(self):
-        """Timer should NOT start when bot is white (bot moves first)."""
-        board = chess.Board()
-        bot_is_white = True  # bot is white → it's our turn
-        last_move_count = 0
-
-        is_my_turn = (
-            (board.turn == chess.WHITE and bot_is_white) or
-            (board.turn == chess.BLACK and not bot_is_white)
-        )
-        should_start_timer = last_move_count == 0 and not is_my_turn
-        self.assertFalse(should_start_timer)
-
-    def test_no_first_move_timer_not_started_when_moves_exist(self):
-        """Timer should NOT start when there are already moves on the board."""
-        board = chess.Board()
-        bot_is_white = False
-        last_move_count = 1  # opponent already made a move
-
-        is_my_turn = (
-            (board.turn == chess.WHITE and bot_is_white) or
-            (board.turn == chess.BLACK and not bot_is_white)
-        )
-        should_start_timer = last_move_count == 0 and not is_my_turn
-        self.assertFalse(should_start_timer)
+        self.assertEqual(self.checks, 3)
 
 
 class TestGetLastInfoLine(unittest.TestCase):
@@ -1982,97 +2009,6 @@ class TestGetLastEvalCp(unittest.TestCase):
         sf.raw_stockfish_output.side_effect = Exception("crash")
         result = _get_last_eval_cp(sf)
         self.assertIsNone(result)
-
-
-class TestWatchdogAbortTimeout(unittest.TestCase):
-    """Tests for the game watchdog abort timeout feature."""
-
-    def test_abort_timeout_config_imported(self):
-        """GAME_WATCHDOG_ABORT_TIMEOUT is importable from config."""
-        from config import GAME_WATCHDOG_ABORT_TIMEOUT
-        self.assertIsInstance(GAME_WATCHDOG_ABORT_TIMEOUT, int)
-        self.assertGreater(GAME_WATCHDOG_ABORT_TIMEOUT, 0)
-
-    def test_abort_timeout_default_value(self):
-        """Default abort timeout is 600 seconds (10 minutes)."""
-        from config import GAME_WATCHDOG_ABORT_TIMEOUT
-        # If not overridden in env, default is 600
-        env_value = os.environ.get("GAME_WATCHDOG_ABORT_TIMEOUT")
-        if env_value is None:
-            self.assertEqual(GAME_WATCHDOG_ABORT_TIMEOUT, 600)
-
-    def test_terminal_statuses_include_aborted(self):
-        """Ensure 'aborted' is a terminal status (watchdog abort should end the game)."""
-        from bot import _TERMINAL_STATUSES
-        self.assertIn("aborted", _TERMINAL_STATUSES)
-
-
-class TestMaxConcurrentGamesConfig(unittest.TestCase):
-    """Tests for MAX_CONCURRENT_GAMES configuration."""
-
-    def test_config_importable(self):
-        """MAX_CONCURRENT_GAMES is importable from config."""
-        from config import MAX_CONCURRENT_GAMES
-        self.assertIsInstance(MAX_CONCURRENT_GAMES, int)
-        self.assertGreater(MAX_CONCURRENT_GAMES, 0)
-
-    def test_default_value_is_2(self):
-        """Default value is 2."""
-        from config import MAX_CONCURRENT_GAMES
-        env_value = os.environ.get("MAX_CONCURRENT_GAMES")
-        if env_value is None:
-            self.assertEqual(MAX_CONCURRENT_GAMES, 2)
-
-    def test_bot_imports_max_concurrent_games(self):
-        """bot.py imports MAX_CONCURRENT_GAMES from config."""
-        import bot
-        self.assertTrue(hasattr(bot, 'MAX_CONCURRENT_GAMES'))
-        self.assertEqual(bot.MAX_CONCURRENT_GAMES, bot.MAX_CONCURRENT_GAMES)
-
-    def test_bot_imports_abort_timeout(self):
-        """bot.py imports GAME_WATCHDOG_ABORT_TIMEOUT from config."""
-        import bot
-        self.assertTrue(hasattr(bot, 'GAME_WATCHDOG_ABORT_TIMEOUT'))
-
-
-class TestStreamWithWatchdogAbort(unittest.TestCase):
-    """Tests for _stream_with_watchdog stuck-game abort logic."""
-
-    @patch('bot.GAME_WATCHDOG_ABORT_TIMEOUT', 0)  # immediate abort for fast test
-    def test_stuck_started_game_triggers_abort(self):
-        """Watchdog should raise _GameStuck when game is in 'started' too long."""
-        from bot import _stream_with_watchdog, _GameStuck
-        import threading as _threading
-
-        mock_client = Mock()
-        mock_client.games.export.return_value = {"status": "started"}
-        mock_client.bots.abort_game.return_value = None
-
-        # Iterator that blocks on next() so reader thread never puts sentinel
-        block = _threading.Event()
-
-        class _BlockingIter:
-            def __iter__(self):
-                return self
-            def __next__(self):
-                block.wait()
-                raise StopIteration
-
-        gen = _stream_with_watchdog(_BlockingIter(), mock_client, "test123", check_interval=0.05)
-
-        try:
-            with self.assertRaises(_GameStuck):
-                for _ in gen:
-                    pass
-        finally:
-            block.set()  # unblock reader thread so it can exit cleanly
-
-    def test_game_stuck_exception_exists(self):
-        """_GameStuck exception class should be importable."""
-        from bot import _GameStuck
-        exc = _GameStuck("test msg")
-        self.assertIsInstance(exc, Exception)
-        self.assertEqual(str(exc), "test msg")
 
 
 class TestVariantRejection(unittest.TestCase):
@@ -2151,46 +2087,6 @@ class TestVariantRejection(unittest.TestCase):
             self.assertFalse(should_accept_challenge(c))
 
 
-class TestSyzygyPathConfig(unittest.TestCase):
-    """Tests for Syzygy tablebase auto-detection in config.py."""
-
-    def test_syzygy_path_added_when_tablebase_files_exist(self):
-        """SyzygyPath should be added to UCI_OPTIONS when .rtbw files exist."""
-        import importlib
-        import config as config_module
-
-        with patch.dict(os.environ, {"SF_SYZYGY_PATH": "/fake/syzygy"}, clear=False), \
-             patch("config.os.path.isdir", return_value=True), \
-             patch("config.os.listdir", return_value=["KQvK.rtbw", "KQvK.rtbz"]):
-            # Simulate detection logic
-            self.assertTrue(os.path.isdir.__wrapped__("/fake/syzygy") if hasattr(os.path.isdir, '__wrapped__') else True)
-            # Direct logic test: if dir exists and has .rtbw files, SyzygyPath should be set
-            has_tb = any(f.endswith((".rtbw", ".rtbz")) for f in ["KQvK.rtbw", "KQvK.rtbz"])
-            self.assertTrue(has_tb)
-
-    def test_syzygy_path_not_added_when_no_dir(self):
-        """SyzygyPath should NOT be in UCI_OPTIONS when the directory doesn't exist."""
-        from config import UCI_OPTIONS
-        # If no syzygy dir with tablebase files exists, the key should be absent
-        # (unless the test environment happens to have one)
-        syzygy_path = os.getenv("SF_SYZYGY_PATH", "./syzygy")
-        if not os.path.isdir(syzygy_path) or not any(
-            f.endswith((".rtbw", ".rtbz")) for f in (os.listdir(syzygy_path) if os.path.isdir(syzygy_path) else [])
-        ):
-            self.assertNotIn("SyzygyPath", UCI_OPTIONS)
-
-    def test_syzygy_path_not_added_when_dir_empty(self):
-        """SyzygyPath should NOT be set when syzygy dir exists but has no tablebase files."""
-        has_tb = any(f.endswith((".rtbw", ".rtbz")) for f in ["README.md"])
-        self.assertFalse(has_tb)
-
-    def test_syzygy_env_var_is_respected(self):
-        """SF_SYZYGY_PATH env var should override the default ./syzygy path."""
-        with patch.dict(os.environ, {"SF_SYZYGY_PATH": "/custom/path"}, clear=False):
-            result = os.getenv("SF_SYZYGY_PATH", "./syzygy")
-            self.assertEqual(result, "/custom/path")
-
-
 class TestTimeCategoryClassification(unittest.TestCase):
     """Tests for determine_time_category boundary conditions."""
 
@@ -2214,82 +2110,25 @@ class TestTimeCategoryClassification(unittest.TestCase):
         from bot import determine_time_category
         self.assertIsNone(determine_time_category(0, 0))
 
-    def test_correspondence_returns_none(self):
-        """Very large limits (correspondence) should return None."""
+    def test_speed_boundaries_follow_lichess(self):
+        """Estimated length is the initial time plus 40 increments."""
         from bot import determine_time_category
-        self.assertIsNone(determine_time_category(259200, 0))
+        cases = {
+            (60, 0): "bullet", (120, 1): "bullet", (179, 0): "bullet",
+            (180, 0): "blitz", (180, 2): "blitz", (300, 3): "blitz", (479, 0): "blitz",
+            (480, 0): "rapid", (600, 5): "rapid", (900, 10): "rapid", (1499, 0): "rapid",
+            (1500, 0): "classical", (1800, 0): "classical", (0, 40): "classical",
+        }
+        for (limit, increment), speed in cases.items():
+            self.assertEqual(determine_time_category(limit, increment), speed, f"{limit}+{increment}")
 
-
-class TestFirstMoveClockCap(unittest.TestCase):
-    """Test the first-move clock cap logic for both white and black.
-
-    Bug: the original condition ``board.fullmove_number <= 1 and
-    len(board.move_stack) == 0`` was only true for white on an empty board.
-    For black (stack has 1 move after opponent plays), the cap never applied
-    and Stockfish could think for minutes, causing Lichess to abort.
-    """
-
-    def test_black_first_move_detected(self):
-        """Bot as black with 1 move on stack should be detected as first move."""
-        board = chess.Board()
-        board.push_uci("c2c4")  # opponent's first move
-        bot_is_white = False
-        _bot_first_move = (
-            (bot_is_white and len(board.move_stack) == 0) or
-            (not bot_is_white and len(board.move_stack) == 1)
-        )
-        self.assertTrue(_bot_first_move)
-
-    def test_white_first_move_detected(self):
-        """Bot as white with empty stack should be detected as first move."""
-        board = chess.Board()
-        bot_is_white = True
-        _bot_first_move = (
-            (bot_is_white and len(board.move_stack) == 0) or
-            (not bot_is_white and len(board.move_stack) == 1)
-        )
-        self.assertTrue(_bot_first_move)
-
-    def test_second_move_not_capped_white(self):
-        """White's second move (stack=2) should NOT trigger first-move cap."""
-        board = chess.Board()
-        board.push_uci("e2e4")
-        board.push_uci("e7e5")
-        bot_is_white = True
-        _bot_first_move = (
-            (bot_is_white and len(board.move_stack) == 0) or
-            (not bot_is_white and len(board.move_stack) == 1)
-        )
-        self.assertFalse(_bot_first_move)
-
-    def test_second_move_not_capped_black(self):
-        """Black's second move (stack=3) should NOT trigger first-move cap."""
-        board = chess.Board()
-        board.push_uci("e2e4")
-        board.push_uci("e7e5")
-        board.push_uci("g1f3")
-        bot_is_white = False
-        _bot_first_move = (
-            (bot_is_white and len(board.move_stack) == 0) or
-            (not bot_is_white and len(board.move_stack) == 1)
-        )
-        self.assertFalse(_bot_first_move)
-
-    def test_cap_value_applied_to_btime_for_black(self):
-        """When bot is black on first move, btime should be capped at 15s."""
-        _FIRST_MOVE_CAP_MS = 15_000
-        btime_ms = 900_000  # 15 minutes
-        _effective_btime = btime_ms
-        bot_is_white = False
-        board = chess.Board()
-        board.push_uci("c2c4")
-        _bot_first_move = (
-            (bot_is_white and len(board.move_stack) == 0) or
-            (not bot_is_white and len(board.move_stack) == 1)
-        )
-        if _bot_first_move and not bot_is_white and btime_ms > _FIRST_MOVE_CAP_MS:
-            _effective_btime = _FIRST_MOVE_CAP_MS
-        self.assertEqual(_effective_btime, 15_000)
+    def test_a_challenge_without_a_clock_has_no_speed(self):
+        """Correspondence and unlimited challenges carry no limit and no increment."""
+        with patch('bot.ACCEPT_CHALLENGES', True), patch('bot.MIN_RATING', 1000), patch('bot.MAX_RATING', 3000):
+            for time_control in ({"type": "correspondence", "daysPerTurn": 3}, {"type": "unlimited"}):
+                challenge = {"id": "c", "challenger": {"rating": 1800}, "variant": {"key": "standard"},
+                             "timeControl": time_control}
+                self.assertFalse(should_accept_challenge(challenge), time_control)
 
 
 if __name__ == '__main__':

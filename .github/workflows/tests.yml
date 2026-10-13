@@ -22,8 +22,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.14 is what the container's Ubuntu LTS ships, so it is the version
-        # the bot actually runs on. The older ones cover local installs.
+        # 3.13 is what the container image ships, so it is the version the
+        # published bot runs on. The others cover local installs.
         python-version: ['3.11', '3.12', '3.13', '3.14']
 
     steps:
@@ -34,11 +34,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: requirements*.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
 
       # Importing bot.py pulls in config.py, which resolves a Stockfish binary.
       # Left to itself it downloads one from GitHub on every run, which makes
@@ -51,13 +52,13 @@ jobs:
           TOKEN: test_token_for_testing
           STOCKFISH_PATH: /usr/games/stockfish
           AUTO_UPDATE_STOCKFISH: 'false'
-        run: pytest --cov=bot --cov=logging_config --cov-report=xml --cov-report=term-missing
+        run: pytest --cov-report=xml
 
       - name: Upload coverage to Codecov
         # Only one matrix leg needs to report coverage; use the version the
         # container runs.
-        if: matrix.python-version == '3.14'
-        uses: codecov/codecov-action@v6
+        if: matrix.python-version == '3.13'
+        uses: codecov/codecov-action@v7
         with:
           files: ./coverage.xml
           token: ${{ secrets.CODECOV_TOKEN }}

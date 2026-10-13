@@ -1,12 +1,7 @@
-# Pinned exactly so a container built today matches the one built last month,
-# and so Dependabot has a concrete version to propose moving off.
+# What the bot needs to run. Pinned exactly so a container built today matches
+# the one built last month, and so Dependabot has a concrete version to move.
 berserk==0.14.0
 chess==1.11.2
 stockfish==5.2.0
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 requests==2.34.2
-
-# Test-only
-pytest==9.1.1
-pytest-asyncio==1.4.0
-pytest-cov==7.1.0

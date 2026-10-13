@@ -14,8 +14,10 @@ if not TOKEN:
 # Configure logging for this module
 logger = logging.getLogger(__name__)
 
-# Auto-install/update Stockfish if AUTO_UPDATE_STOCKFISH is enabled (default: True)
-AUTO_UPDATE_STOCKFISH = os.getenv("AUTO_UPDATE_STOCKFISH", "true").lower() in ("true", "1", "yes")
+# Install Stockfish on startup, and replace it when a newer release appears.
+# Off by default: it downloads a binary into /usr/local/bin and may ask for sudo,
+# which is for the person running the bot to decide.
+AUTO_UPDATE_STOCKFISH = os.getenv("AUTO_UPDATE_STOCKFISH", "false").lower() in ("true", "1", "yes")
 
 def find_stockfish_path():
     """Find or install Stockfish binary."""
@@ -25,7 +27,7 @@ def find_stockfish_path():
         logger.info(f"Using Stockfish from STOCKFISH_PATH: {env_path}")
         return env_path
     
-    # If auto-update is enabled, ensure latest version is installed
+    # If auto-update is enabled, install the latest release or update to it
     if AUTO_UPDATE_STOCKFISH:
         try:
             from stockfish_updater import ensure_stockfish_installed
@@ -55,10 +57,10 @@ def find_stockfish_path():
             return path
     
     raise FileNotFoundError(
-        "Stockfish not found. Please install it:\n"
-        "  Run: ./scripts/install_stockfish.sh\n"
-        "  Or download from: https://github.com/official-stockfish/Stockfish/releases\n"
-        "  Or set STOCKFISH_PATH environment variable"
+        "Stockfish not found. Install it in one of these ways:\n"
+        "  run ./scripts/install_stockfish.sh\n"
+        "  set AUTO_UPDATE_STOCKFISH=true to have the bot install it on startup\n"
+        "  set STOCKFISH_PATH to a binary from https://github.com/official-stockfish/Stockfish/releases"
     )
 
 STOCKFISH_PATH = find_stockfish_path()
@@ -110,24 +112,48 @@ PREDICTION_RECOVER_THRESHOLD = int(os.getenv("PREDICTION_RECOVER_THRESHOLD", "40
 PREDICTION_RECOVER_ELO_BOOST = int(os.getenv("PREDICTION_RECOVER_ELO_BOOST", "200"))
 
 ACCEPT_CHALLENGES = True
-MIN_RATING = 1320
-MAX_RATING = 2800
-TIME_CONTROL = ["bullet", "blitz", "rapid", "classical"]
 
-# Dynamic strength: THREE-TIER HYBRID approach for fair games at all levels
+# Rating range of the challengers the bot accepts, at the speed of the challenge.
+# 1320 is the lowest rating Stockfish's strength limit can be set to.
+MIN_RATING = int(os.getenv("MIN_RATING", "1320"))
+MAX_RATING = int(os.getenv("MAX_RATING", "2800"))
+
+# Lichess ratings run from 400 to 4000.
+LOWEST_RATING, HIGHEST_RATING = 400, 4000
+if not LOWEST_RATING <= MIN_RATING <= MAX_RATING <= HIGHEST_RATING:
+    raise ValueError(
+        f"MIN_RATING={MIN_RATING} and MAX_RATING={MAX_RATING} do not make a range: "
+        f"they have to satisfy {LOWEST_RATING} <= MIN_RATING <= MAX_RATING <= {HIGHEST_RATING}"
+    )
+
+# Speeds the bot plays, fastest first, and the ones it accepts challenges at
+SPEEDS = ("bullet", "blitz", "rapid", "classical")
+TIME_CONTROL = [
+    speed.strip().lower()
+    for speed in os.getenv("TIME_CONTROL", ",".join(SPEEDS)).split(",")
+    if speed.strip()
+]
+_unknown_speeds = [speed for speed in TIME_CONTROL if speed not in SPEEDS]
+if _unknown_speeds:
+    raise ValueError(
+        f"TIME_CONTROL names unknown speeds: {', '.join(_unknown_speeds)}. "
+        f"Choose from: {', '.join(SPEEDS)}"
+    )
+
+# Dynamic strength: the engine is limited to the opponent's level
 DYNAMIC_STRENGTH = os.getenv("DYNAMIC_STRENGTH", "true").lower() in ("true", "1", "yes")
 
-# THREE-TIER HYBRID SYSTEM:
-# 1. < LIMIT_STRENGTH_THRESHOLD (1800):
-#    UCI_LimitStrength at opponent+STRENGTH_ADVANTAGE + go movetime (fair, winnable)
-# 2. LIMIT_STRENGTH_THRESHOLD – FULL_STRENGTH_THRESHOLD (1800–2799):
-#    UCI_LimitStrength at opponent+STRENGTH_ADVANTAGE + go movetime (scaled time)
-#    NOTE: native clocks cannot be used with UCI_LimitStrength — causes Stockfish
-#    to time-manage as a limited player, potentially hanging 30+ seconds on first move.
-# 3. >= FULL_STRENGTH_THRESHOLD (2800): MAXIMUM POWER + native clocks, no handicaps
+# Three tiers by the opponent's rating:
+# 1. below LIMIT_STRENGTH_THRESHOLD: Stockfish's strength limit (UCI_LimitStrength)
+#    at opponent + STRENGTH_ADVANTAGE, 40 % of STOCKFISH_TIME per move
+# 2. from there to FULL_STRENGTH_THRESHOLD: the same limit, 40-95 % of STOCKFISH_TIME
+# 3. at or above FULL_STRENGTH_THRESHOLD: full strength, searched on the game clock
+#
+# Limited games get a fixed time per move so that the bot answers quickly; on
+# the game clock Stockfish takes tens of seconds over an early move.
 
-LIMIT_STRENGTH_THRESHOLD = int(os.getenv("LIMIT_STRENGTH_THRESHOLD", "1800"))  # Below: minimal movetime (40%); above: scaled movetime (40-95%)
-FULL_STRENGTH_THRESHOLD = int(os.getenv("FULL_STRENGTH_THRESHOLD", "2800"))    # At or above: FULL POWER + native clocks (no UCI_LimitStrength)
+LIMIT_STRENGTH_THRESHOLD = int(os.getenv("LIMIT_STRENGTH_THRESHOLD", "1800"))
+FULL_STRENGTH_THRESHOLD = int(os.getenv("FULL_STRENGTH_THRESHOLD", "2800"))
 
 # ELO bonus: UCI_Elo = opponent_rating + STRENGTH_ADVANTAGE
 # Applied for ALL opponents below FULL_STRENGTH_THRESHOLD
@@ -140,8 +166,13 @@ STRENGTH_ADVANTAGE = int(os.getenv("STRENGTH_ADVANTAGE", "100"))  # e.g. 1500 �
 # Enable automatic challenging of other bots
 ENABLE_AUTO_CHALLENGE = os.getenv("ENABLE_AUTO_CHALLENGE", "true").lower() in ("true", "1", "yes")
 
-# Maximum number of games to challenge per hour
+# Maximum number of challenges to create per hour
 MAX_CHALLENGES_PER_HOUR = int(os.getenv("MAX_CHALLENGES_PER_HOUR", "5"))
+
+# Maximum number of challenges to create in any 24 hours. Lichess allows an
+# account 200 a day and answers the rest with HTTP 429 until its window ends,
+# so this has to stay below 200.
+MAX_CHALLENGES_PER_DAY = int(os.getenv("MAX_CHALLENGES_PER_DAY", "180"))
 
 # ELO limits for challenging bots
 CHALLENGE_MIN_RATING = int(os.getenv("CHALLENGE_MIN_RATING", "1500"))
@@ -166,15 +197,34 @@ CHALLENGE_TIME_CONTROLS = [
 # Challenge check interval (seconds) - how often to check if we should challenge
 CHALLENGE_CHECK_INTERVAL = int(os.getenv("CHALLENGE_CHECK_INTERVAL", "60"))  # 1 minute
 
-# Game watchdog interval (seconds) — how often to poll the Lichess API
-# to verify a game is still active.  Unlike a hard stream timeout this
-# approach is safe for classical games where opponents think for a long time.
+# Seconds a game stream may be silent before the bot asks Lichess about the
+# game. A game that has ended closes its thread; a game under way is left alone
+# however long the opponent thinks.
 GAME_WATCHDOG_INTERVAL = int(os.getenv("GAME_WATCHDOG_INTERVAL", "60"))  # 1 minute
 
-# Maximum seconds a game can stay in "started" status (no moves made) before
-# the watchdog forcefully aborts it.  Prevents the bot from being stuck
-# indefinitely when an opponent goes offline before making any move.
+# Seconds a game may go without both sides having made their first move before
+# the bot aborts it. Until then an abort costs neither side anything.
 GAME_WATCHDOG_ABORT_TIMEOUT = int(os.getenv("GAME_WATCHDOG_ABORT_TIMEOUT", "600"))  # 10 minutes
 
 # Maximum number of concurrent games the bot will play simultaneously.
 MAX_CONCURRENT_GAMES = int(os.getenv("MAX_CONCURRENT_GAMES", "2"))
+
+# ─────────────────────────────────────────────
+# MONITORING
+# ─────────────────────────────────────────────
+
+# Address of an Uptime Kuma push monitor (optional). When set, the bot reports
+# to it every KUMA_PUSH_INTERVAL seconds: up while Lichess is being heard from,
+# down when it is not. A bot that has stopped reports nothing, and Kuma raises
+# the alarm when the reports stop coming. The address holds the monitor's
+# token, so it is never logged and no error message repeats it.
+KUMA_PUSH_URL = os.getenv("KUMA_PUSH_URL", "").strip()
+if KUMA_PUSH_URL and not KUMA_PUSH_URL.startswith(("http://", "https://")):
+    raise ValueError("KUMA_PUSH_URL has to be the http:// or https:// address of an Uptime Kuma push monitor")
+
+KUMA_PUSH_INTERVAL = int(os.getenv("KUMA_PUSH_INTERVAL", "60"))
+SHORTEST_PUSH_INTERVAL = 10
+if KUMA_PUSH_INTERVAL < SHORTEST_PUSH_INTERVAL:
+    raise ValueError(
+        f"KUMA_PUSH_INTERVAL={KUMA_PUSH_INTERVAL} is too short: at least {SHORTEST_PUSH_INTERVAL} seconds"
+    )

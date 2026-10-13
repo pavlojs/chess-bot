@@ -4,7 +4,8 @@
 #   sudo cp scripts/axiom-bot.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now axiom-bot
 #
-# Adjust User, Group and WorkingDirectory to match your setup.
+# Adjust User, Group, WorkingDirectory, ExecStart, EnvironmentFile and
+# ReadWritePaths to your user and to where the repository lives.
 
 [Unit]
 Description=Axiom Chess Bot
@@ -23,10 +24,11 @@ ExecStart=/home/pavlojs/git/chess-bot/scripts/run_bot.sh
 # exposing it in `systemctl show` or the process environment of other users.
 EnvironmentFile=/home/pavlojs/git/chess-bot/.env
 
+# The bot exits with an error when its event loop is stuck, so that it is
+# started afresh here.
 Restart=on-failure
 RestartSec=10s
-# Stop sending SIGTERM-then-wait; the bot drains active games on SIGINT.
-KillSignal=SIGINT
+# On SIGTERM the bot gives its game threads up to 15 seconds, then exits.
 TimeoutStopSec=30s
 
 # ── Hardening ────────────────────────────────────────────────────────────────
@@ -41,7 +43,6 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
-MemoryDenyWriteExecute=false
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM

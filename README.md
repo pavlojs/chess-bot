@@ -1,506 +1,260 @@
-# ♟️ Axiom Chess Bot
+# Axiom Chess Bot
 
-A powerful Lichess bot powered by the Stockfish engine with dynamic strength adjustment and intelligent game handling.
+A Lichess bot built on the Stockfish engine. It limits its strength to the opponent's rating, plays on its own account around the clock, and challenges other bots when it has nothing to do.
 
-![Chess Icon](https://img.shields.io/badge/Chess-♟️-black) ![Stockfish](https://img.shields.io/badge/Powered%20by-Stockfish-blue) ![Lichess](https://img.shields.io/badge/Platform-Lichess-green)
+[![CI](https://github.com/pavlojs/chess-bot/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/pavlojs/chess-bot/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/pavlojs/chess-bot/actions/workflows/codeql.yml/badge.svg?branch=dev)](https://github.com/pavlojs/chess-bot/actions/workflows/codeql.yml)
+[![Security](https://github.com/pavlojs/chess-bot/actions/workflows/security.yml/badge.svg?branch=dev)](https://github.com/pavlojs/chess-bot/actions/workflows/security.yml)
 
-## Play Against the Bot
+## Play against the bot
 
-🤖 **Official Bot Account**: [@Axiom_BOT](https://lichess.org/@/Axiom_BOT)
+The bot's account is [@Axiom_BOT](https://lichess.org/@/Axiom_BOT).
 
 [![Challenge Axiom_BOT](https://img.shields.io/badge/Challenge-Axiom__BOT-orange?style=for-the-badge&logo=lichess)](https://lichess.org/?user=Axiom_BOT#friend)
 
-The bot accepts challenges in **Bullet**, **Blitz**, **Rapid**, and **Classical** time controls. 
+It accepts a challenge when all of these hold:
 
-**Note:** The bot automatically rejects:
-- ❌ Correspondence games (days per move)
-- ❌ Unlimited time games (no clock)
-- ❌ Chess variants (Chess960, Antichess, Atomic, King of the Hill, etc.)
-- ✅ Accepts challenges from both human players and other bots
+- standard chess, rated or casual, from a human or from another bot;
+- a clock in bullet, blitz, rapid or classical (no correspondence, no unlimited games);
+- a challenger rated between 1320 and 2800 at that speed;
+- a free game slot. It plays two games at a time by default and declines the rest with "later".
 
-The bot automatically adjusts its strength to match your rating for competitive games!
+A challenge it does not take is declined with the reason Lichess has for it, so the challenger reads what to change: standard chess only, another time control, a slower or a faster game, or later. A rating outside the range gets Lichess's general "not accepting challenges at the moment", the closest there is. The speeds and the rating range are settings: `TIME_CONTROL`, `MIN_RATING` and `MAX_RATING`.
 
 ## Requirements
 
-- Python 3.10 or higher
-- Lichess BOT account
+- Python 3.11 or newer (CI runs the tests on 3.11 to 3.14)
+- A Lichess [BOT account](https://lichess.org/api#tag/Bot) and an API token for it with the `bot:play` scope
+- Stockfish. `./scripts/install_stockfish.sh` installs the latest release; the container image brings its own.
 
 ## Setup
 
 1. Clone this repository.
-2. Install Python dependencies: `pip install -r requirements.txt`
-3. Get a Lichess API token from https://lichess.org/account/oauth/token with board:play and bot:play scopes.
-4. Set environment variable: `export TOKEN="your_lichess_token"`
-5. Run the bot: `python bot.py`
-6. To stop the bot gracefully: Press `Ctrl+C` once — the bot waits up to **15 seconds** for any active games to finish (including Stockfish subprocess cleanup) before exiting cleanly. Press `Ctrl+C` a second time for immediate exit.
+2. Create the virtual environment: `./scripts/setup_venv.sh`
+3. Install Stockfish: `./scripts/install_stockfish.sh`. Skip this if there is a `stockfish` on your `PATH` already.
+4. Copy `.env.example` to `.env` and put your token in `TOKEN`. Create the token at https://lichess.org/account/oauth/token.
+5. Run the bot: `./scripts/run_bot.sh`
+6. Stop it with `Ctrl+C`. The bot gives its game threads up to 15 seconds to wind down and then exits; a second `Ctrl+C` exits at once. A game that is still going is not resigned: it is picked up again if the bot is back before its clock runs out.
 
-**Stockfish Auto-Update**: The bot automatically downloads and installs the latest Stockfish from GitHub on first run (same method as Docker build). This ensures you're always using the newest version.
+### Stockfish
 
-- To disable auto-update: set `AUTO_UPDATE_STOCKFISH=false` in your environment or `.env` file
-- To use a custom Stockfish binary: set `STOCKFISH_PATH=/path/to/stockfish`
+`./scripts/install_stockfish.sh` looks at the [official Stockfish releases](https://github.com/official-stockfish/Stockfish/releases). If `/usr/local/bin/stockfish` is missing or is not the latest release, it downloads the build for this platform, checks the archive against the SHA-256 the release publishes, and installs it, asking for `sudo` when `/usr/local/bin` is not writable. Run it again to update.
 
-Manual Stockfish installation (if auto-update is disabled):
-```bash
-./scripts/install_stockfish.sh
-```
-
-### How It Works
-
-The bot uses the same Stockfish installation method as the Docker build:
-1. On first run, `config.py` calls `stockfish_updater.py`
-2. Downloads latest Stockfish from [official GitHub releases](https://github.com/official-stockfish/Stockfish/releases)
-3. Extracts and installs to `/usr/local/bin/stockfish`
-4. On subsequent runs, checks for updates and upgrades if available
-
-This ensures consistency between local development and Docker deployment.
+- To use a binary you chose yourself: set `STOCKFISH_PATH=/path/to/stockfish`. Without it the bot takes the `stockfish` on the `PATH`.
+- To have the bot do the same each time it starts: set `AUTO_UPDATE_STOCKFISH=true`. It is off by default, because it puts a downloaded binary into a system directory and may ask for `sudo`, and that is yours to decide.
 
 ## Testing
 
-[![Tests](https://github.com/pavlojs/chess-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/pavlojs/chess-bot/actions/workflows/tests.yml)
-
-Run the comprehensive test suite:
 ```bash
-pytest              # Run all tests
-pytest -v           # Verbose output
-pytest --cov        # With coverage report
+pip install -r requirements-dev.txt   # done already by scripts/setup_venv.sh
+pytest
 ```
 
-See [TESTING.md](TESTING.md) for detailed testing guide.
+See [TESTING.md](TESTING.md) for what the suite covers and how it is built.
 
 ## Deployment
 
-### Running Automatically on System Startup (Linux)
+### Docker
 
-1. Run `./scripts/setup_venv.sh` to set up the virtual environment.
-2. Copy `scripts/axiom-bot.service` to `/etc/systemd/system/` (adjust `User`, `Group`, `WorkingDirectory` and `ReadWritePaths` for your user and directory).
-3. Reload systemd: `sudo systemctl daemon-reload`
-4. Enable the service: `sudo systemctl enable axiom-bot`
-5. Start the service: `sudo systemctl start axiom-bot`
-6. Check status: `sudo systemctl status axiom-bot`
-7. View logs: `tail -f logs/axiom_bot.log`
-
-### Docker Deployment
-
-[![Build and Push Docker Image](https://github.com/pavlojs/chess-bot/actions/workflows/build-and-push-docker.yml/badge.svg)](https://github.com/pavlojs/chess-bot/actions/workflows/build-and-push-docker.yml)
-
-#### Option 1: Using Pre-built Image from GitHub Container Registry
-
-After each successful test run, a Docker image is automatically built and pushed to GitHub Container Registry. You can pull and run it directly:
-
-```bash
-# Set your Lichess token
-export TOKEN="your_lichess_token"
-
-# Pull and run the latest image
-docker run -e TOKEN=$TOKEN ghcr.io/pavlojs/axiom-chess-bot:latest
-```
-
-Or using Docker Compose:
+`ghcr.io/pavlojs/axiom-chess-bot:latest` is built from `main` each time `dev` is promoted, after the tests and the image checks have passed on that commit. Every build is also tagged `main-<commit>`. The [docker-compose.yml](docker-compose.yml) in this repository runs it:
 
 ```yaml
 services:
   axiom-bot:
     image: ghcr.io/pavlojs/axiom-chess-bot:latest
-    env_file: .env  # Load environment variables from .env file
-    volumes:
-      - ./config.py:/app/config.py  # Optional: mount config for time-control/challenge customisation
+    container_name: axiom-bot
+    env_file: .env
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import os,time,sys; f='/tmp/axiom_heartbeat'; sys.exit(0 if os.path.exists(f) and time.time()-float(open(f).read())<300 else 1)\""]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=1m,noexec,nosuid,nodev
+    volumes:
+      - logs:/app/logs
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  logs:
 ```
 
-> **Docker healthcheck**: the bot writes a heartbeat timestamp to `/tmp/axiom_heartbeat` on every event-loop iteration. Docker checks the file every 60 seconds; if it is missing or older than 5 minutes (indicating a silent disconnect or frozen process), the container is automatically restarted after 3 consecutive failures.
+Put your token in a `.env` file beside it (copy [.env.example](.env.example)) and run `docker compose up -d`. A change to `.env` takes effect with the next `docker compose up -d`.
 
-#### Option 2: Build Locally
+To run a build of your own checkout instead, use [docker-compose.dev.yml](docker-compose.dev.yml): `docker compose -f docker-compose.dev.yml up -d --build`. It takes every setting from `docker-compose.yml` and changes only where the image comes from.
 
-1. Copy `.env.example` to `.env` and fill in your `TOKEN` and any settings you want to change.
-2. Build and run: `docker-compose up --build`
-3. **After changing `.env`** (e.g. `MAX_CHALLENGES_PER_HOUR`): just `docker-compose up -d` — **no rebuild needed**. `env_file` is read fresh on every container start.
-4. To rebuild the image (only needed after code changes): `docker-compose up --build`.
+What the image is and how it is meant to run:
 
+- **Nothing but the bot.** The runtime is a [distroless](https://github.com/GoogleContainerTools/distroless) Python base: no shell, no package manager, no `curl`. `/app` holds the bot's four modules and its libraries.
+- **An unprivileged user.** The bot runs as uid 65532. Its code and the engine belong to root and it cannot change them.
+- **A read-only root filesystem.** The bot writes in two places: `/app/logs`, the volume above, for its log and for `state.json` (what it [remembers across restarts](#challenging-other-bots)), and a heartbeat stamp in `/tmp`.
+- **A pinned engine.** The image carries one named Stockfish release, checked against its SHA-256 when the image is built. The bot's self-updater is not in the image.
+- **A bounded log.** `logs/axiom_bot.log` records everything from DEBUG up and is rotated, 60 MB in all by default (`LOG_FILE_MAX_MB`, `LOG_FILE_BACKUPS`). What the bot prints (INFO and up) goes to `docker logs`, capped by the `logging` options above.
+- **Memory is yours to limit.** Each game runs an engine of its own, with `SF_HASH` MB of hash on top of the engine's own networks. Add a `mem_limit` that fits `SF_HASH × MAX_CONCURRENT_GAMES` with room to spare.
 
-### Modifying Playstyle
+`scripts/check_image.sh <image>` tries each of these from inside a container, and CI runs it on every push.
 
-Most settings can be changed via a `.env` file (copy `.env.example` to `.env`) **without editing any code**. A few options that require a list (e.g. `TIME_CONTROL`, `CHALLENGE_TIME_CONTROLS`) still need to be set in `config.py`.
+**Health.** Lichess sends a line on the bot's event stream at least every 7 seconds, an empty one when nothing is happening. The bot stamps a file each time one arrives, and the image's health check passes while the stamp is younger than a minute. So `healthy` means "Lichess has been heard from in the last minute", whether or not a game is on. Docker does not restart an unhealthy container, and the bot does not wait for it to: a connection that goes silent is noticed after 30 seconds and reopened, and if the bot's event loop stops moving for five minutes the process exits with an error so that `restart: unless-stopped` starts a new one.
 
-**Available via `.env` or environment variable:**
+**Alerts.** Docker tells nobody that a container is unhealthy. To be told, create a monitor of the type *Push* in [Uptime Kuma](https://github.com/louislam/uptime-kuma) and put the address it shows in `KUMA_PUSH_URL`. The bot then reports to it every `KUMA_PUSH_INTERVAL` seconds (60): `up` while Lichess has been heard from within the last minute, `down` with the length of the silence otherwise, and nothing at all once it has stopped, which Kuma notices by itself. In Kuma, set the monitor's *Heartbeat Interval* to twice the bot's interval plus 10 seconds (130 for the default) and leave *Retries* at 0: one lost report or a restart of the bot then raises no alarm, and a `down` report raises one at once. The address contains the monitor's token, so the bot never writes it to its log. None of this needs Docker; it works the same under systemd.
 
-- `STOCKFISH_TIME`: Base thinking time per move in ms (default: `3000`). Higher = stronger play.
-- `SF_THREADS`: CPU threads for Stockfish (default: `4`).
-- `SF_HASH`: Hash table size in MB (default: `2048`).
-- `SF_MOVE_OVERHEAD`: Network latency compensation in ms (default: `30`).
-- `ENABLE_MOVE_PREDICTION`: Show predicted continuation in logs (default: `true`).
-- `PREDICTION_DEPTH`: Half-moves to show in predicted line (default: `10`).
-- `DYNAMIC_STRENGTH` / `LIMIT_STRENGTH_THRESHOLD` / `FULL_STRENGTH_THRESHOLD` / `STRENGTH_ADVANTAGE`: see *Dynamic Strength* section below.
-- `MOVETIME_CLOCK_SAFETY`: Safety multiplier applied to the per-move clock budget (default: `0.8`). The bot will use at most `(remaining / moves_left + increment) × MOVETIME_CLOCK_SAFETY` ms per move, preventing outoftime losses.
-- `MOVETIME_MIN_MS`: Hard floor for any calculated movetime in ms (default: `50`). Even with seconds on the clock the bot will always think at least this long.
-- `MOVETIME_ESTIMATED_MOVES`: Baseline moves-to-go estimate used in the clock budget formula (default: `40`). Reduced dynamically as the game progresses.
-- `MOVETIME_MIN_MOVES_LEFT`: Minimum moves-to-go value in the clock budget denominator (default: `10`). Prevents over-spending in very long endgames.
-- `GAME_WATCHDOG_INTERVAL`: How often (in seconds) the game watchdog polls the Lichess API when the game stream is idle (default: `60`). Lower values detect stuck games faster; higher values reduce API usage.
-- `GAME_WATCHDOG_ABORT_TIMEOUT`: Maximum seconds a game can stay in `started` status (no moves made) before the watchdog forcefully aborts it (default: `600` = 10 min). Prevents the bot from being stuck indefinitely when an opponent goes offline before making any move.
-- `MAX_CONCURRENT_GAMES`: Maximum number of games the bot plays simultaneously (default: `2`).
+To play with tablebases or change `config.py`, add a read-only mount: `./syzygy:/app/syzygy:ro` or `./config.py:/app/config.py:ro`.
 
-**Requires editing `config.py`:**
+### systemd
 
-- `TIME_CONTROL`: List of accepted time control categories. Options: `bullet`, `blitz`, `rapid`, `classical`.
-- `CHALLENGE_TIME_CONTROLS`: List of time controls used when auto-challenging bots.
-- `UCI_OPTIONS`: Any extra Stockfish UCI options not covered above.
+1. Run `./scripts/setup_venv.sh`.
+2. Copy `scripts/axiom-bot.service` to `/etc/systemd/system/` and adjust `User`, `Group`, `WorkingDirectory`, `ExecStart`, `EnvironmentFile` and `ReadWritePaths` to your user and directory.
+3. `sudo systemctl daemon-reload && sudo systemctl enable --now axiom-bot`
+4. Status: `sudo systemctl status axiom-bot`. Log: `tail -f logs/axiom_bot.log`.
 
-For full Stockfish UCI options, run `/usr/local/bin/stockfish` and type `uci`.
+The unit restarts the bot when it exits with an error, which is what the bot does when its event loop is stuck.
 
-### Dynamic Strength Based on Opponent Rating
+## Configuration
 
-The bot uses a **HYBRID APPROACH** that combines the best of both worlds for fair, competitive games at all levels. This feature is **enabled by default**.
+Settings come from the environment or from a `.env` file. [.env.example](.env.example) lists every one of them with its default, and a test keeps that file in step with the code. The ones most often changed:
 
-**How the Hybrid System Works:**
+| Variable | Default | What it sets |
+| --- | --- | --- |
+| `SF_THREADS` | `4` | Engine threads, per game |
+| `SF_HASH` | `2048` | Engine hash in MB, per game |
+| `MAX_CONCURRENT_GAMES` | `2` | Games played at the same time |
+| `MIN_RATING` / `MAX_RATING` | `1320` / `2800` | Rating range of the challengers it accepts |
+| `TIME_CONTROL` | `bullet,blitz,rapid,classical` | Speeds it accepts challenges at |
+| `STOCKFISH_TIME` | `3000` | Base thinking time per move in ms against a limited opponent |
+| `STRENGTH_ADVANTAGE` | `100` | How far above the opponent's rating the engine's limit is set |
+| `FULL_STRENGTH_THRESHOLD` | `2800` | Opponent rating from which the bot plays at full strength |
+| `ENABLE_AUTO_CHALLENGE` | `true` | Challenge other bots when a game slot is free |
+| `MAX_CHALLENGES_PER_HOUR` | `5` | Challenges created per hour |
+| `MAX_CHALLENGES_PER_DAY` | `180` | Challenges created in any 24 hours |
+| `CHALLENGE_MIN_RATING` / `CHALLENGE_MAX_RATING` | `1500` / `2900` | Rating range of the bots it challenges |
+| `AUTO_UPDATE_STOCKFISH` | `false` | Install and update the engine at startup; see [Stockfish](#stockfish) |
+| `KUMA_PUSH_URL` | empty | Uptime Kuma push monitor to report to; see [Docker](#docker), *Alerts* |
 
-**Two key rules drive all tiers:**
-1. **`UCI_LimitStrength`** (engine quality cap) — active for ALL opponents below `FULL_STRENGTH_THRESHOLD`. The engine plays at `opponent_rating + STRENGTH_ADVANTAGE` ELO, choosing high-quality moves without deliberate blunders.
-2. **`go movetime`** (time per move) — fixed budget for all capped opponents. Native clock mode (`go wtime`) **cannot** be used together with `UCI_LimitStrength` (Stockfish would time-manage like a limited human and could hang 30+ seconds on move 1). Native clocks are reserved for full-strength mode only.
+A few settings are lists or fixed values and live in `config.py`:
 
----
+- `CHALLENGE_TIME_CONTROLS`: the clocks the bot offers when it challenges, from 1+0 to 30+0.
+- `UCI_OPTIONS`: any further Stockfish option. `stockfish` followed by `uci` lists what the engine has.
 
-👶 **Beginners & Intermediates (< 1800 ELO):**
-- `UCI_LimitStrength` at opponent+100 ELO
-- Minimal `go movetime` (40 % of base, ~1200 ms) — fast moves that don’t intimidate
-- Example: 1500-rated player faces a ~1600 strength bot with quick, natural play
-- **Result: Fair, winnable games** ✅
+## How it plays
 
-🎯 **Advanced Players (1800–2799 ELO):**
-- `UCI_LimitStrength` at opponent+100 ELO (same cap, same rule — **no intentional blunders**)
-- Scaled `go movetime` (40–95 % of base, proportional to rating)
-- More thinking time = plays closer to its ELO ceiling
-- Example: 2000-rated player faces a ~2100 strength bot
-- **Result: Challenging but humanly beatable chess** ✅
+### Strength
 
-👑 **Elite & Super-GM (2800+ ELO):**
-- **No `UCI_LimitStrength`** — full engine quality, maximum depth
-- **Native clocks** (`go wtime btime winc binc`) — Stockfish manages time optimally
-- Effective strength: ~3200–3500 ELO
-- **Result: Ultimate challenge** 🔥
+Stockfish has a strength limit of its own, `UCI_LimitStrength`, which makes the engine choose weaker moves on purpose to play at a given rating. The bot sets it per opponent:
 
-**Why this approach is better:**
-- ✅ Fair, winnable games for beginners (ELO-capped at opponent+100, quick moves)
-- ✅ Competitive but beatable for advanced players (same ELO cap, more thinking time)
-- ✅ Maximum challenge for elite players (full power + native clocks at 2800+)
-- ✅ No game aborts — `go movetime` guarantees a reply within the budget
+| Opponent's rating | Engine | Thinking time |
+| --- | --- | --- |
+| below `LIMIT_STRENGTH_THRESHOLD` (1800) | limited to the opponent's rating + `STRENGTH_ADVANTAGE` | 40 % of `STOCKFISH_TIME` per move |
+| from there to `FULL_STRENGTH_THRESHOLD` (2800) | limited the same way | 40 % rising to 95 % of `STOCKFISH_TIME` |
+| at or above `FULL_STRENGTH_THRESHOLD`, or no rating | full strength | the game clock, managed by Stockfish |
 
-**Configuration options — all settable via `.env` file:**
-- `DYNAMIC_STRENGTH`: Enable/disable feature (default: `true`)
-- `LIMIT_STRENGTH_THRESHOLD`: Divides minimal-time and scaled-time movetime zones (default: `1800`). Below: 40 % movetime. Above (up to `FULL_STRENGTH_THRESHOLD`): 40–95 % scaled.
-- `FULL_STRENGTH_THRESHOLD`: At or above, `UCI_LimitStrength` is disabled and native clocks are used (default: `2800`)
-- `STRENGTH_ADVANTAGE`: ELO bonus bot plays above opponent for all below `FULL_STRENGTH_THRESHOLD` (default: `100`)
-- `STOCKFISH_TIME`: Base thinking time in ms — movetime budget is a fraction of this (default: `3000`)
+The limit is never set below 1320, the lowest Stockfish accepts, nor above 2850. With the defaults a 1500-rated opponent meets an engine limited to 1600 that answers within 1.2 seconds, and a 2500-rated one an engine limited to 2600 that takes up to 2.4 seconds. An opponent without a rating, such as an anonymous player or Lichess's own AI, gets full strength.
 
-**Move timing by tier:**
+`DYNAMIC_STRENGTH=false` switches the whole scheme off: full strength against everyone.
 
-| Opponent Rating | UCI_LimitStrength | Movetime | Effective Strength |
-|----------------|-------------------|----------|--------------------|
-| **1200 ELO** | ✅ at ~1300 ELO | 40 % (~1200 ms) ¹ | ~1300 ELO ✅ |
-| **1500 ELO** | ✅ at ~1600 ELO | 40 % (~1200 ms) ¹ | ~1600 ELO ✅ |
-| **1800 ELO** | ✅ at ~1900 ELO | 40 % (~1200 ms) ¹ | ~1900 ELO ✅ |
-| **2000 ELO** | ✅ at ~2100 ELO | 51 % (~1530 ms) ¹ | ~2100 ELO ✅ |
-| **2500 ELO** | ✅ at ~2600 ELO | 79 % (~2360 ms) ¹ | ~2600 ELO ✅ |
-| **2800 ELO** | ❌ FULL POWER | native clocks | **~3200 ELO** 🔥 |
-| **3000 ELO** | ❌ FULL POWER | native clocks | **~3400 ELO** 🔥 |
+Limited games are searched with a fixed time per move so that the bot answers quickly. Left to manage the clock itself, Stockfish 19 spends 20 to 30 seconds on the first move of a 5+3 game, with the limit or without it.
 
-¹ *Maximum budget — the clock-aware cap may reduce this further in short time controls (see Clock-Aware Movetime Cap below).*
+### Thinking time and the clock
 
-**To customize (`.env` file — no code changes needed):**
-```bash
-# Adjust thresholds
-LIMIT_STRENGTH_THRESHOLD=1600   # UCI_LimitStrength below 1600
-FULL_STRENGTH_THRESHOLD=2600    # Full power at 2600+
+The rating-based time is a ceiling. It is cut down whenever the bot's remaining clock calls for less:
 
-# Adjust ELO bonus
-STRENGTH_ADVANTAGE=150          # Play 150 ELO above opponent
-
-# Increase base thinking time for stronger play
-STOCKFISH_TIME=5000             # 5 seconds (very strong)
-
-# Or disable dynamic strength for consistent maximum power
-DYNAMIC_STRENGTH=false
+```
+moves_left = max(MOVETIME_MIN_MOVES_LEFT, MOVETIME_ESTIMATED_MOVES − fullmove_number // 2)
+clock_cap  = (remaining_ms / moves_left + increment_ms) × MOVETIME_CLOCK_SAFETY
+move_time  = min(rating_based_time, max(MOVETIME_MIN_MS, clock_cap))
 ```
 
-### Automatic Bot Challenging
+With the defaults (40 moves estimated, never fewer than 10, safety 0.8):
 
-The bot can automatically challenge other bots on Lichess when it has no active games. This feature **runs in a separate background thread** and operates independently of the main event stream.
+| Game | Rating-based time | Clock cap | Time used |
+| --- | --- | --- | --- |
+| 1+0, move 32, 8 s left, opponent 1500 | 1200 ms | (8000 / 24) × 0.8 = 266 ms | 266 ms |
+| 5+3, move 10, 60 s left, opponent 1500 | 1200 ms | (60000 / 35 + 3000) × 0.8 = 3771 ms | 1200 ms |
+| 5+3, move 10, 60 s left, opponent 2200 | 1860 ms | 3771 ms | 1860 ms |
 
-**How it works:**
-- ✅ Runs in background thread — doesn't block event processing
-- ✅ Automatically challenges online bots when idle (no active games)
-- ✅ Respects rate limits (max **5** challenges per hour by default)
-- ✅ Only challenges bots within specified ELO range (1500–2900 by default)
-- ✅ Uses a variety of time controls (bullet, blitz, rapid, and classical)
-- ✅ Also accepts challenges from other bots and human players
-- ✅ **Event-driven retry** — reacts immediately to declined/canceled challenges instead of waiting
-- ✅ **Decline reason logged** — shows Lichess's reason (e.g. `tooFast`, `later`, `noBot`)
-- ✅ **90-second acceptance timeout** — if the opponent never responds, moves on after 90 s
-- ✅ **30-second back-off** after a decline before trying a different bot
-- ✅ **Instant retry after game ends** — looks for the next challenge the moment a game finishes
+At full strength the bot hands Stockfish the real clock, with one exception: for its very first move it reports at most 15 seconds, so that the game gets going.
 
-**Configuration options in `config.py`:**
-- `ENABLE_AUTO_CHALLENGE`: Enable/disable auto-challenge feature (default: `True`)
-- `MAX_CHALLENGES_PER_HOUR`: Maximum challenges to send per hour (default: `5`)
-- `CHALLENGE_MIN_RATING`: Minimum ELO to challenge (default: `1500`)
-- `CHALLENGE_MAX_RATING`: Maximum ELO to challenge (default: `2900`)
-- `CHALLENGE_CHECK_INTERVAL`: Idle poll interval when no challenge is pending (default: `60` seconds)
-- `CHALLENGE_TIME_CONTROLS`: List of time controls to use when challenging
+### Second searches
 
-**Environment variables** (can be set in `.env` file):
-```bash
-ENABLE_AUTO_CHALLENGE=true
-MAX_CHALLENGES_PER_HOUR=5
-CHALLENGE_MIN_RATING=1500
-CHALLENGE_MAX_RATING=2900
-CHALLENGE_CHECK_INTERVAL=60
-```
+In a limited game the first search of a move can lead to a second one:
 
-**To customize time controls:**
-```python
-# In config.py
-CHALLENGE_TIME_CONTROLS = [
-    {"limit": 60, "increment": 0},    # 1+0 bullet (NEW!)
-    {"limit": 60, "increment": 1},    # 1+1 bullet (NEW!)
-    {"limit": 120, "increment": 1},   # 2+1 bullet (NEW!)
-    {"limit": 180, "increment": 0},   # 3+0 blitz
-    {"limit": 300, "increment": 3},   # 5+3 blitz
-    {"limit": 600, "increment": 5},   # 10+5 rapid
-    {"limit": 900, "increment": 10},  # 15+10 rapid
-    {"limit": 1800, "increment": 0},  # 30+0 classical
-]
-```
+| What the first search found | Second search |
+| --- | --- |
+| a forced mate for the bot | at full strength, to play the mate out correctly |
+| a forced mate against the bot | at full strength, for the best defence |
+| the bot is worse by `PREDICTION_RECOVER_THRESHOLD` (400 cp) or more | 1.5 times as long, with the limit raised by `PREDICTION_RECOVER_ELO_BOOST` (200); at full strength if that reaches `FULL_STRENGTH_THRESHOLD` |
+| anything else | none |
 
-**Features:**
-- 🤖 **Handles manual invitations**: If you log into the bot account on Lichess and manually invite a bot to play, the bot will accept it (if within rating/time control criteria)
-- 🎯 **Smart targeting**: Only challenges bots within your specified ELO range
-- ⏱️ **Rate limiting**: Respects Lichess API limits with configurable hourly cap
-- 🎲 **Variety**: Randomly selects bots and time controls for diverse games
-- ⚡ **Event-driven**: Reacts instantly to declines, cancels, and game-end events — no unnecessary waiting
-- 📝 **Decline reason**: Logs the Lichess decline reason (e.g. `tooFast`, `later`, `noBot`) for every outgoing challenge that is declined
+The second search is budgeted from the clock left after the first, and the opponent's limit is put back afterwards.
 
-**To disable auto-challenging:**
-```python
-# In config.py
-ENABLE_AUTO_CHALLENGE = False
-```
+### Draw offers
 
-Or set environment variable:
-```bash
-export ENABLE_AUTO_CHALLENGE=false
-```
+The bot accepts a draw when the position is within 200 centipawns of level, by the evaluation of its last search. It declines when it is clearly better, when it is clearly worse, and whenever a mate is on the board. It never offers a draw, and it does not resign a game it is playing.
 
-### Move Prediction & Analysis
+### Predicted line
 
-The bot can display Stockfish's predicted continuation (Principal Variation) - showing the best sequence of moves from the current position. This is enabled by default and provides valuable insight into the engine's strategic thinking.
+With `ENABLE_MOVE_PREDICTION=true` the log shows the line the engine expects, taken from the search that chose the move:
 
-**Example Log Output:**
 ```
 [game123] 🔮 Predicted line (+125 cp): e2e4 e7e5 g1f3 b8c6 f1c4 f8c5
-[game456] 🔮 Predicted line (Mate in 3): d1d8 g8h7 d8h8 h7g8 h8g7
 ```
 
-**What it shows:**
-- 🎯 **Move sequence**: The best continuation according to Stockfish
-- 📊 **Evaluation**: Position score in centipawns (cp) or mate announcement
-- 🧠 **Strategic plan**: Understanding of the engine's multi-move strategy
+The score is from the side to move, which is the bot. `PREDICTION_DEPTH` sets how many half-moves are shown. It costs no extra search.
 
-**Configuration (`.env` file — no code changes needed):**
-```bash
-ENABLE_MOVE_PREDICTION=true   # Enable/disable prediction display
-PREDICTION_DEPTH=10           # Number of half-moves to predict ahead
-```
+## Challenging other bots
 
-**Behaviour detail:**
-- The bot **logs** Stockfish's predicted continuation (PV) when `ENABLE_MOVE_PREDICTION` is true.
-- The predicted move (from the first step of the PV) is always used to decide the actual played move, regardless of opponent rating.
-- The evaluation (`score cp`) returned by UCI is always from the **side-to-move** perspective. Since the prediction is run on the bot's turn, the score is already the bot's score regardless of colour — no colour flip is applied.
+While a game slot is free and `ENABLE_AUTO_CHALLENGE` is on, a background thread looks for an opponent:
 
-**Special branches (fire for every opponent regardless of rating):**
+1. It draws a clock from `CHALLENGE_TIME_CONTROLS`.
+2. From the bots online it keeps those whose rating **at that speed** is within `CHALLENGE_MIN_RATING`–`CHALLENGE_MAX_RATING`, leaves out the ones it is leaving alone (below), and challenges one of the rest at random, rated.
+3. It waits up to 90 seconds for an answer. After a decline it tries another bot 30 seconds later; with no answer at all it withdraws the challenge first.
 
-| Situation | Engine used | Time budget |
-|---|---|---|
-| Mate in N for us (`mate_val > 0`) | **Full power** (UCI_LimitStrength off) | `move_time` |
-| Forced mate against us (`mate_val < 0`) | **Full power** (UCI_LimitStrength off) | `move_time` |
-| Eval ≤ −`PREDICTION_RECOVER_THRESHOLD` cp | **ELO boost** (+`PREDICTION_RECOVER_ELO_BOOST`); **full power** if boosted ELO ≥ `FULL_STRENGTH_THRESHOLD` | 1.5× `move_time` |
-| Normal position | Normal UCI_LimitStrength cap | `move_time` |
+Lichess allows an account 200 challenges a day and counts every request, including the ones it refuses. The bot counts the same way and stops at `MAX_CHALLENGES_PER_HOUR` and `MAX_CHALLENGES_PER_DAY`. If Lichess answers HTTP 429 anyway, the bot waits for as long as the answer says, or for 5 minutes doubling up to an hour when it does not say.
 
-Mate branches use full-power Stockfish to guarantee correct execution or the best defensive resource. Recovery keeps `UCI_LimitStrength` active but raises the ELO cap by `PREDICTION_RECOVER_ELO_BOOST` (default: 200) and thinks 1.5× longer — this gives meaningfully stronger defensive play while keeping the game winnable for the opponent. After each special search the original ELO cap is always restored.
+The bot does not challenge while its event stream is down, because it could not see the challenge being accepted and the game would start without it.
 
-You can override the thresholds in your `.env`:
+A challenge spent on a bot that will not play is one fewer for a bot that would. So a bot that did not play is left alone for a while, and for how long depends on what it did:
 
-```bash
-# Trigger recovery when predicted eval is worse than -400 cp for the bot
-PREDICTION_RECOVER_THRESHOLD=400
+| What the other bot did | Left alone for |
+| --- | --- |
+| Answered "later" | 15 minutes |
+| Did not answer within the 90 seconds, or declined without a reason | 1 hour, then 2, 4, 8 and 16, then a day each time, until it plays |
+| Declined the speed: too fast, too slow, or not this time control | a day, at that speed only |
+| Declined because it takes no bots, no rated games or no standard chess | a week |
+| Lichess would not create the challenge: the other bot takes none, or has played its 100 games against bots for the day | as long as Lichess says, 6 hours when it does not say |
 
-# ELO added to UCI_LimitStrength cap during recovery (e.g. 1600 → 1800)
-PREDICTION_RECOVER_ELO_BOOST=200
-```
+A bot that starts a game with this one is cleared at once, whichever of the two sent the challenge.
 
-**Use cases:**
-- 📚 **Learning**: Understand what the engine is planning
-- 🐛 **Debugging**: See if engine is calculating correctly
-- 📈 **Analysis**: Review games to understand strategic decisions
-- 🎓 **Education**: Study engine's long-term plans
+The challenges of the last 24 hours and the bots being left alone are written to `logs/state.json` and read again at startup. Lichess goes on counting while the bot restarts, so the bot has to as well: without the file a restart would hand it a full allowance that Lichess does not share, and send it straight back to the bots that just said no. Deleting the file makes the bot start from nothing.
 
-**Note:** The prediction is extracted for free from the info line Stockfish already produces during the move search — no second engine call is made. It does not affect move quality, playing strength, or time usage.
+## Staying connected
 
-### Supported Time Controls
+- **Event stream.** Every request has a 10-second connect and a 30-second read timeout. A stream on which nothing arrives for 30 seconds, not even a keep-alive, is closed and reopened.
+- **Games after a reconnect.** Lichess announces every game in progress again when the event stream reopens. The bot recognises the games it is already playing and leaves them alone.
+- **Game stream.** A game stream that drops, or answers 502, 503 or 504, is reopened after 5 seconds; a 429 after 60. Lichess sends the whole game again, and play continues from the position on the board with a fresh engine.
+- **A move Lichess refuses, an engine that dies.** The bot rereads the game from Lichess and carries on from what it finds: the game over, the move already made, or a position to move in. After three rereads in a row without a move it gives up on the game.
+- **A game with no events.** When a game stream is silent for `GAME_WATCHDOG_INTERVAL` seconds (60), the bot asks Lichess about the game. A game that has ended closes its thread. A game in which a side has still not made its first move after `GAME_WATCHDOG_ABORT_TIMEOUT` seconds (600) is aborted, which costs neither side anything. A game under way is never ended from the bot's side, however long the opponent thinks.
+- **An opponent who never starts.** If the opponent has the first move and does not make it within 120 seconds, the bot aborts the game.
+- **An opponent who leaves.** When Lichess reports the opponent gone, the bot claims the win as soon as Lichess allows it, unless the opponent comes back first.
+- **A game beyond the limit.** If a game starts although every slot is taken, the bot aborts it, and resigns it only if Lichess refuses the abort.
+- **Games left over from the last run.** On startup the bot aborts its games in which fewer than two moves were played. The others resume when the event stream announces them.
+- **Shutdown.** `SIGTERM` and `SIGINT` end the bot within 15 seconds.
 
-The bot supports all major real-time Lichess time control modes:
+## Syzygy tablebases
 
-- **Bullet**: ⚡ Ultra-fast games (typically < 3 minutes total)
-- **Blitz**: Fast games (typically 3-8 minutes total)
-- **Rapid**: Medium-paced games (typically 10-25 minutes total)
-- **Classical**: Slow games (typically 30+ minutes per side)
-
-**Move Search** ⏱️
-
-`UCI_LimitStrength` is active for all opponents below `FULL_STRENGTH_THRESHOLD` (2800). Because native clock mode (`go wtime`) combined with `UCI_LimitStrength` causes Stockfish to time-manage like a limited human (potentially hanging 30+ seconds on move 1 and triggering Lichess abort), all capped opponents use **`go movetime`** with a rating-proportional budget instead.
-
-- ✅ All capped opponents (< 2800): `UCI_LimitStrength` at opponent+100 + `go movetime` (40–95 % of base)
-- ✅ Full-strength opponents (2800+): no cap, native clocks (`go wtime btime winc binc`)
-- ✅ No-clock fallback: `go movetime` used when game has no clock data
-
-**Clock-Aware Movetime Cap** 🕑
-
-When `UCI_LimitStrength` is active, the bot calculates a movetime budget from the opponent's rating (40–95 % of `STOCKFISH_TIME`). However, this ideal budget is also hard-capped by the bot's *actual remaining clock* to prevent outoftime losses in short time controls.
-
-Formula applied every move:
-```
-moves_left  = max(MOVETIME_MIN_MOVES_LEFT, MOVETIME_ESTIMATED_MOVES − fullmove_number // 2)
-clock_cap   = (remaining_ms / moves_left + increment_ms) × MOVETIME_CLOCK_SAFETY
-move_time   = min(rating_based_budget, clock_cap)
-```
-
-This means the bot automatically plays faster when the clock is tight, and uses its full rating-based budget when time allows — without any manual tuning per time control.
-
-**Example — 1+0 Bullet, move 32, 8 s remaining:**
-
-| Opponent ELO | Rating budget | Clock cap | Actual movetime |
-|---|---|---|---|
-| 1500 | 1200 ms | (8000 / 10) × 0.8 = **640 ms** | **640 ms** |
-| 2200 | 1860 ms | (8000 / 10) × 0.8 = **640 ms** | **640 ms** |
-
-**Example — 5+3 Blitz, move 10, 60 s remaining:**
-
-| Opponent ELO | Rating budget | Clock cap | Actual movetime |
-|---|---|---|---|
-| 1500 | 1200 ms | (60000 / 35 + 3000) × 0.8 = **3771 ms** | **1200 ms** |
-| 2200 | 1860 ms | (60000 / 35 + 3000) × 0.8 = **3771 ms** | **1860 ms** |
-
-The recovery search (triggered when the bot is losing by > `PREDICTION_RECOVER_THRESHOLD` cp) uses a clock-aware budget of up to 1.5× the base rating budget, but never exceeds the clock-safe limit. The elapsed time of the prediction search is subtracted from the remaining clock before computing the recovery budget, so the total thinking time stays within the original clock window.
-
-**Configuration (`.env` file):**
-```bash
-MOVETIME_CLOCK_SAFETY=0.8    # Fraction of clock budget to use (lower = more conservative)
-MOVETIME_MIN_MS=50            # Never think less than 50 ms
-MOVETIME_ESTIMATED_MOVES=40   # Assumed remaining game length
-MOVETIME_MIN_MOVES_LEFT=10    # Floor for moves-left denominator
-```
-
-**Automatically rejected:**
-- ❌ **Correspondence**: Games with days per move (limit ≥ 259200 seconds)
-- ❌ **Unlimited**: Games with no time control (0+0)
-
-You can customize which real-time time controls the bot accepts by editing `TIME_CONTROL` in `config.py`. For example:
-
-```python
-TIME_CONTROL = ["classical"]  # Only accept classical games
-TIME_CONTROL = ["blitz", "rapid"]  # Accept blitz and rapid only
-TIME_CONTROL = ["bullet", "blitz"]  # Fast games only
-TIME_CONTROL = ["blitz", "rapid", "classical"]  # Accept all (default)
-```
-
-## Connection Resilience & Game Recovery
-
-The bot includes multiple layers of protection against network issues, stuck games, and unexpected restarts:
-
-### Game Stream Watchdog
-When no events arrive on the game stream for `GAME_WATCHDOG_INTERVAL` seconds (default: 60), the watchdog polls the Lichess API (`games.export`) to check whether the game has actually ended. This handles cases where the stream silently drops or the opponent abandons the game without triggering a `gameFinish` event — without prematurely killing classical games where the opponent is thinking. If the API check itself fails repeatedly (10 consecutive failures, ~10 minutes), the watchdog force-ends the game thread to prevent indefinite blocking.
-
-**Stuck-game abort**: if the game stays in `started` status (no moves played by either side) for longer than `GAME_WATCHDOG_ABORT_TIMEOUT` seconds (default: 600 = 10 min), the watchdog sends an abort request and terminates the game thread. This prevents the bot from being permanently blocked by an opponent who goes offline immediately after the game is created, before making any move.
-
-### No-First-Move Abort
-When the bot plays as black and the opponent never makes their first move, a 120-second safety timer automatically aborts the game. This is a client-side backup — Lichess normally handles this with `noStart`, but if the stream event is missed, this timer ensures the bot doesn't get stuck forever.
-
-### Opponent Disconnect Handling
-When Lichess reports `opponentGone`, the bot starts a timer and automatically claims victory after the allowed delay. If the opponent reconnects before the timer fires, the claim is cancelled.
-
-### Startup Stuck Game Cleanup
-On startup the bot checks for any ongoing games left over from a previous session. Games with fewer than 2 moves are aborted (no rating impact); games further along are left to be picked up naturally via the event stream.
-
-### Gateway Error Recovery (502/503/504)
-Transient Lichess gateway errors in the game stream trigger an automatic 5-second reconnect instead of killing the game thread.
-
-### Concurrent Game Limit — Abort Before Resign
-If a new `gameStart` event arrives while the concurrent limit is reached, the bot tries to abort the game first (no rating loss) and only falls back to resign if the abort fails.
-
-**Configuration (`.env` file):**
-```bash
-GAME_WATCHDOG_INTERVAL=60   # Watchdog polling interval in seconds (default: 60)
-```
-
-## Using Syzygy Tablebases
-
-Syzygy tablebases provide perfect play in endgames with up to 7 pieces. To use them:
-
-1. Download tablebases from https://syzygy-tables.info/downloads/
-2. Extract files to `./syzygy/` directory in the project root
-3. The bot **auto-detects** tablebases — if `./syzygy/` contains `.rtbw`/`.rtbz` files, `SyzygyPath` is configured automatically. Use `SF_SYZYGY_PATH` env var for a custom path.
-4. Restart the bot to apply changes
-
-Note: Tablebases are large; start with 3-5 piece files (~10 GB).
-
-## Current Playstyle and Difficulty
-
-Based on the current configuration in `config.py`, the bot is configured as follows:
-
-- **Difficulty**: Hybrid dynamic system - adapts method to opponent level
-  - **Beginners (< 1800)**: UCI_LimitStrength at opponent+100 ELO (fair games)
-  - **Advanced (1800-2799)**: UCI_LimitStrength at opponent+100 with scaled movetime (challenging but beatable)
-  - **Elite (2800+)**: **MAXIMUM POWER** - full strength + full time
-- **Playstyle**: 
-  - Fair and balanced for learning players
-  - Aggressive and precise for strong opponents
-  - Never "gives up" - fights in all positions
-- **Endgame**: Uses Syzygy tablebases for perfect play in endgames with up to 7 pieces (if configured)
-- **Draw Offers**: Intelligent evaluation system
-  - **Accepts** draws only in balanced positions (±200 centipawns)
-  - **Declines** draws when winning or losing significantly
-  - **Declines** all mate positions - trusts engine calculation
-  - Philosophy: Utilize calculation advantage, especially against strong opponents
-- **Game Handling**: Properly detects and handles all game endings (resignation, timeout, mate, etc.)
-
-**Effective Strength by Opponent Level:**
-- **Beginners to Intermediate** (< 1800): Plays at opponent's level + 100 ELO
-- **Advanced** (1800-2799): ~1900-2900 ELO (opponent+100 via UCI_LimitStrength)
-- **Elite and Super-GM** (2800+): **~3200-3500 ELO** (Maximum power)
-
-This makes the bot suitable and fair for players of all levels!
+With tablebases Stockfish plays endgames of up to 7 pieces perfectly. If `./syzygy` (or the directory in `SF_SYZYGY_PATH`) holds `.rtbw` or `.rtbz` files, the bot passes it to the engine. See [syzygy/README.md](syzygy/README.md) for where to get the files and how large they are; the 3-, 4- and 5-piece tables together are about 1 GB.
 
 ## Updating Stockfish
 
-Stockfish is updated regularly in its [official repository](https://github.com/official-stockfish/Stockfish).
+The container image installs the Stockfish release named in the [Dockerfile](Dockerfile), checked against the SHA-256 written beside it. The [Update Stockfish](.github/workflows/update_stockfish.yml) workflow looks for a new release every day and, when there is one, moves both values on `dev` and runs CI on the result. The new engine reaches `ghcr.io/pavlojs/axiom-chess-bot:latest` with the next promotion to `main`.
 
-### Automated Update
-The bot includes a GitHub Actions workflow that automatically checks for new Stockfish releases daily and updates the binary. The workflow downloads the latest Linux x64 binary, places it in `./stockfish/`, and updates `config.py` to use it. Commits are made automatically if an update is found.
-
-To enable this, ensure the repository has GitHub Actions enabled (default for public repos).
-
-### Manual Update
-If you prefer to update manually:
-
-1. Download the latest Stockfish binary from the [releases page](https://github.com/official-stockfish/Stockfish/releases).
-2. Place the binary in a directory (e.g., `./stockfish/`).
-3. In `config.py`, set `STOCKFISH_PATH` to the path of the binary, e.g., `"./stockfish/stockfish"`.
-4. Alternatively, update the `stockfish` Python package: `pip install --upgrade stockfish` (this may download a newer version automatically).
-
-Note: Ensure the binary is executable and compatible with your system.
+Outside the container, run `./scripts/install_stockfish.sh` again, or set `AUTO_UPDATE_STOCKFISH=true` to have the bot do it each time it starts; see [Stockfish](#stockfish).
 
 ## Development
 
@@ -514,8 +268,8 @@ and local setup, and [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
 ## Credits
 
-This bot is powered by [Stockfish](https://stockfishchess.org/), the strongest open-source chess engine in the world.
+The bot plays with [Stockfish](https://stockfishchess.org/), which is developed by the Stockfish community and released under the GNU General Public License v3.0. It talks to Lichess through [berserk](https://github.com/lichess-org/berserk) and keeps its board with [python-chess](https://github.com/niklasf/python-chess).
 
-**Stockfish License:** Stockfish is released under the GNU General Public License v3.0 (GPL-3.0). You can find the full license text at [https://www.gnu.org/licenses/gpl-3.0.html](https://www.gnu.org/licenses/gpl-3.0.html).
+## License
 
-Stockfish is a product of the Stockfish community, with contributions from many developers worldwide. For more information, visit the [official Stockfish website](https://stockfishchess.org/) or the [GitHub repository](https://github.com/official-stockfish/Stockfish).
+Axiom Chess Bot is released under the [GNU General Public License v3.0](LICENSE).
