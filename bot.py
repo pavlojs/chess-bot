@@ -1136,7 +1136,7 @@ def _stream_with_watchdog(stream, client, game_id, check_interval):
             status = game.get("status")
             if status in _TERMINAL_STATUSES:
                 logger.info(f"[{game_id}] Watchdog: game ended via API ({status})")
-                raise _GameStuck(f"Game {game_id} ended ({status}) but stream did not report it")
+                raise _GameStuck(f"Game {game_id} ended ({status}) but stream did not report it") from None
 
             moves_played = len((game.get("moves") or "").split())
             if moves_played >= 2:
@@ -1162,7 +1162,7 @@ def _stream_with_watchdog(stream, client, game_id, check_interval):
                 logger.info(f"[{game_id}] Watchdog: abort refused ({e})")
                 unstarted_since = None
                 continue
-            raise _GameStuck(f"Game {game_id} was not under way after {waited:.0f}s and was aborted")
+            raise _GameStuck(f"Game {game_id} was not under way after {waited:.0f}s and was aborted") from None
         if item is _sentinel:
             return
         if isinstance(item, BaseException):
