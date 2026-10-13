@@ -1817,6 +1817,7 @@ def challenge_loop(state: BotState):
     RATE_LIMIT_BASE  = 300   # initial backoff: 5 minutes
     RATE_LIMIT_MAX   = 3600  # maximum backoff: 60 minutes
     rate_limit_backoff = RATE_LIMIT_BASE  # current backoff duration (reset after success)
+    rate_limited_until = 0.0  # monotonic time before which Lichess is not asked again
     stream_down = False  # so the outage is logged once, not on every pass
 
     pending_challenge = state.pending_challenge
@@ -1855,6 +1856,16 @@ def challenge_loop(state: BotState):
                     cancel_pending_challenge(state, f"no answer after {elapsed:.0f}s")
                     retry_event.wait(timeout=RETRY_DELAY)
                     retry_event.clear()
+
+            # ── Lichess has refused a challenge: wait the refusal out ────────
+            # A game starting or ending wakes this loop, and must not turn
+            # into another request while Lichess has asked for silence.
+            limited_for = rate_limited_until - time.monotonic()
+            if limited_for > 0:
+                retry_event.clear()
+                retry_event.wait(timeout=limited_for)
+                retry_event.clear()
+                continue
 
             # ── Without the event stream a challenge would go unanswered ─────
             if not state.stream.alive():
@@ -1899,9 +1910,7 @@ def challenge_loop(state: BotState):
                     f"Rate limited by Lichess API (HTTP 429) — backing off for "
                     f"{wait // 60}m {wait % 60}s before next attempt"
                 )
-                retry_event.clear()
-                retry_event.wait(timeout=wait)
-                retry_event.clear()
+                rate_limited_until = time.monotonic() + wait
                 continue
 
             # Successful challenge attempt — reset backoff

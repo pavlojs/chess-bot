@@ -323,15 +323,33 @@ class TestOutgoingChallenge(EventTestCase):
         self.client.challenges.cancel.assert_not_called()
 
 
-class StoppingEvent:
-    """Stands in for the challenge loop's wake-up event: records every wait and ends the loop after a set number."""
+class LoopClock:
+    """The clock the challenge loop reads, moved by the waits it makes."""
 
-    def __init__(self, waits):
+    def __init__(self):
+        self.now = bot.time.monotonic()
+
+    def __call__(self):
+        return self.now
+
+
+class StoppingEvent:
+    """Stands in for the challenge loop's wake-up event: records every wait and ends the loop after a set number.
+
+    With a clock, each wait takes the time it asked for, or ``woken_after``
+    seconds when something is to wake the loop early.
+    """
+
+    def __init__(self, waits, clock=None, woken_after=None):
         self.timeouts = []
         self._waits = waits
+        self._clock = clock
+        self._woken_after = woken_after
 
     def wait(self, timeout=None):
         self.timeouts.append(timeout)
+        if self._clock is not None:
+            self._clock.now += timeout if self._woken_after is None else min(timeout, self._woken_after)
         if len(self.timeouts) >= self._waits:
             bot.shutdown_requested = True
         return False
@@ -366,13 +384,22 @@ class ChallengeLoopTestCase(EventTestCase):
         self.online = [online_bot("OtherBot", blitz=2000)]
         self.client.bots.get_online_bots.side_effect = lambda limit=None: iter(self.online)
         self.client.challenges.create.return_value = {"id": "chal0001"}
-        self.state.stream.line_received()      # Lichess is being heard from
+        self.stream_connected = True           # Lichess is being heard from
 
-    def run_loop(self, waits):
-        """Run the challenge loop until it has waited ``waits`` times; return the waits it asked for."""
-        self.state.retry_event = StoppingEvent(waits)
-        bot.challenge_loop(self.state)
-        return self.state.retry_event.timeouts
+    def run_loop(self, waits, woken_after=None):
+        """Run the challenge loop until it has waited ``waits`` times; return the waits it asked for.
+
+        Time passes as the loop waits. ``woken_after`` cuts every wait short,
+        the way a game starting or ending does.
+        """
+        clock = LoopClock()
+        self.state.retry_event = StoppingEvent(waits, clock, woken_after)
+        self.state.stream = bot.StreamMonitor(clock) if self.stream_connected else bot.StreamMonitor()
+        if self.stream_connected:
+            self.state.stream._last_line = float("inf")      # heard from, however long the loop waits
+        with patch("bot.time.monotonic", clock):
+            bot.challenge_loop(self.state)
+        return [round(t) for t in self.state.retry_event.timeouts]
 
 
 class TestChallengeLoop(ChallengeLoopTestCase):
@@ -389,7 +416,7 @@ class TestChallengeLoop(ChallengeLoopTestCase):
 
     def test_nothing_is_sent_while_the_event_stream_is_down(self):
         """With the stream down an accepted challenge would start a game nobody plays."""
-        self.state.stream = bot.StreamMonitor()     # never heard from Lichess
+        self.stream_connected = False
 
         waits = self.run_loop(3)
 
@@ -399,18 +426,22 @@ class TestChallengeLoop(ChallengeLoopTestCase):
         self.assertEqual(self.state.tracker.counts(), (0, 0))
 
     def test_challenging_resumes_when_the_stream_is_back(self):
-        self.state.stream = bot.StreamMonitor()
-        self.state.retry_event = StoppingEvent(2)
-        original_wait = self.state.retry_event.wait
+        clock = LoopClock()
+        self.state.stream = bot.StreamMonitor(clock)            # not heard from yet
+        event = StoppingEvent(2, clock)
+        waited = event.wait
 
         def wait_then_reconnect(timeout=None):
-            self.state.stream.line_received()
-            return original_wait(timeout)
+            result = waited(timeout)
+            self.state.stream._last_line = float("inf")         # the stream is back
+            return result
 
-        self.state.retry_event.wait = wait_then_reconnect
-        bot.challenge_loop(self.state)
+        event.wait = wait_then_reconnect
+        self.state.retry_event = event
+        with patch("bot.time.monotonic", clock):
+            bot.challenge_loop(self.state)
 
-        self.assertEqual(self.state.retry_event.timeouts, [5, 90])
+        self.assertEqual(event.timeouts, [5, 90])
         self.client.challenges.create.assert_called_once()
 
     def test_nothing_is_sent_once_the_hourly_limit_is_used_up(self):
@@ -472,21 +503,32 @@ class TestChallengeLoop(ChallengeLoopTestCase):
         self.assertEqual(waits, [5060, 5060])
 
     def test_backoff_starts_over_after_a_challenge_that_worked(self):
-        self.state.retry_event = StoppingEvent(4)
-        original_wait = self.state.retry_event.wait
-
-        def wait_and_decline(timeout=None):
-            # the challenge that worked is declined, so the loop goes on to the next
-            self.state.pending_challenge.clear()
-            return original_wait(timeout)
-
-        self.state.retry_event.wait = wait_and_decline
         self.client.challenges.create.side_effect = [
             http_error(429), http_error(429), {"id": "chal0001"}, http_error(429),
         ]
-        bot.challenge_loop(self.state)
 
-        self.assertEqual(self.state.retry_event.timeouts, [300, 600, 90, 300])
+        waits = self.run_loop(5)
+
+        # two refusals, then a challenge nobody answers (90s, withdrawn, 30s), then a refusal again
+        self.assertEqual(waits, [300, 600, 90, 30, 300])
+
+    def test_a_refusal_is_waited_out_however_often_the_loop_is_woken(self):
+        """Games starting and ending wake the loop; none of that may reach Lichess before the wait is over."""
+        self.client.challenges.create.side_effect = http_error(429, {"error": "Too many requests. Try again later."})
+
+        waits = self.run_loop(10, woken_after=30)       # woken every 30 seconds
+
+        self.assertEqual(self.client.challenges.create.call_count, 1)
+        self.assertEqual(waits, [300, 270, 240, 210, 180, 150, 120, 90, 60, 30])
+
+    def test_the_next_attempt_comes_when_the_wait_is_over(self):
+        self.client.challenges.create.side_effect = http_error(429)
+
+        waits = self.run_loop(12, woken_after=100)
+
+        # 300s in three waits, then the second attempt; its 600s in six; then the third
+        self.assertEqual(waits, [300, 200, 100, 600, 500, 400, 300, 200, 100, 1200, 1100, 1000])
+        self.assertEqual(self.client.challenges.create.call_count, 3)
 
     def test_nothing_is_sent_while_every_slot_is_playing(self):
         self.start_game("game0001")
@@ -511,7 +553,7 @@ class TestChallengeLoop(ChallengeLoopTestCase):
 
         waits = self.run_loop(1)
 
-        self.assertAlmostEqual(waits[0], 80, delta=2)
+        self.assertEqual(waits[0], 80)
         self.client.challenges.create.assert_not_called()
         self.client.challenges.cancel.assert_not_called()
 
