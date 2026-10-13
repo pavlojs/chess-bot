@@ -1120,6 +1120,106 @@ class TestClockAdjustedSecondarySearch(unittest.TestCase):
                         "Adjusted-clock budget must be smaller than original-clock budget")
 
 
+class TestAbortStaleGames(unittest.TestCase):
+    """What the bot does on startup with games left over from its previous run."""
+
+    STARTED = {"id": 20, "name": "started"}
+
+    def client(self, ongoing, exports=None):
+        """Games as Lichess lists them; each gets the status of a game in progress unless it has one."""
+        client = Mock()
+        client.games.get_ongoing.return_value = [{"status": self.STARTED, **game} for game in ongoing]
+        client.games.export.side_effect = lambda gid: (exports or {})[gid]
+        return client
+
+    def run_cleanup(self, client):
+        from bot import abort_stale_games
+        abort_stale_games(client)
+
+    def test_nothing_ongoing_asks_nothing_more(self):
+        client = self.client([])
+
+        self.run_cleanup(client)
+
+        client.games.export.assert_not_called()
+        client.bots.abort_game.assert_not_called()
+
+    def test_a_game_nobody_has_moved_in_is_aborted(self):
+        client = self.client([{"gameId": "stuck001", "opponent": {"username": "gone"}}],
+                             {"stuck001": {"moves": ""}})
+
+        self.run_cleanup(client)
+
+        client.bots.abort_game.assert_called_once_with("stuck001")
+
+    def test_a_game_with_one_move_can_still_be_aborted(self):
+        client = self.client([{"gameId": "stuck001", "opponent": {"username": "gone"}}],
+                             {"stuck001": {"moves": "e2e4"}})
+
+        self.run_cleanup(client)
+
+        client.bots.abort_game.assert_called_once_with("stuck001")
+
+    def test_a_listing_without_a_status_is_treated_as_a_game_in_progress(self):
+        client = Mock()
+        client.games.get_ongoing.return_value = [{"gameId": "stuck001", "opponent": {"username": "gone"}}]
+        client.games.export.return_value = {"moves": ""}
+
+        self.run_cleanup(client)
+
+        client.bots.abort_game.assert_called_once_with("stuck001")
+
+    def test_a_game_under_way_is_left_for_the_event_stream(self):
+        client = self.client([{"gameId": "live0001", "opponent": {"username": "rival"}}],
+                             {"live0001": {"moves": "e2e4 e7e5 g1f3"}})
+
+        self.run_cleanup(client)
+
+        client.bots.abort_game.assert_not_called()
+        client.bots.resign_game.assert_not_called()
+
+    def test_a_game_that_is_already_over_is_not_looked_up(self):
+        for status in ({"name": "aborted"}, "mate"):
+            with self.subTest(status=status):
+                client = self.client([{"gameId": "done0001", "status": status, "opponent": {"username": "x"}}])
+
+                self.run_cleanup(client)
+
+                client.games.export.assert_not_called()
+                client.bots.abort_game.assert_not_called()
+
+    def test_each_game_is_judged_on_its_own(self):
+        client = self.client(
+            [{"gameId": "stuck001", "opponent": {"username": "a"}},
+             {"gameId": "live0001", "opponent": {"username": "b"}},
+             {"id": "stuck002", "opponent": {"username": "c"}}],
+            {"stuck001": {"moves": ""}, "live0001": {"moves": "d2d4 d7d5"}, "stuck002": {"moves": "c2c4"}},
+        )
+
+        self.run_cleanup(client)
+
+        self.assertEqual([c.args[0] for c in client.bots.abort_game.call_args_list], ["stuck001", "stuck002"])
+
+    def test_a_refused_abort_does_not_stop_the_cleanup(self):
+        client = self.client(
+            [{"gameId": "stuck001", "opponent": {"username": "a"}}, {"gameId": "stuck002", "opponent": {"username": "b"}}],
+            {"stuck001": {"moves": ""}, "stuck002": {"moves": ""}},
+        )
+        client.bots.abort_game.side_effect = [RuntimeError("too late"), None]
+
+        self.run_cleanup(client)
+
+        self.assertEqual(client.bots.abort_game.call_count, 2)
+
+    def test_lichess_being_unreachable_does_not_stop_the_start(self):
+        client = Mock()
+        client.games.get_ongoing.side_effect = RuntimeError("no network")
+
+        self.run_cleanup(client)      # must not raise
+
+        client.bots.abort_game.assert_not_called()
+
+
 class TestStreamWithWatchdog(unittest.TestCase):
     """Test _stream_with_watchdog handles idle streams and terminal games."""
 

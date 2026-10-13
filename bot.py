@@ -2026,8 +2026,8 @@ def abort_stale_games(client: berserk.Client):
             logger.info(f"Found {len(ongoing)} ongoing game(s) from previous session")
             for game in ongoing:
                 gid = game.get("gameId") or game.get("id", "")
-                status = game.get("status", {})
-                status_name = status.get("name", status) if isinstance(status, dict) else str(status)
+                status = game.get("status")
+                status_name = status.get("name") if isinstance(status, dict) else status
                 opponent = game.get("opponent", {})
                 opp_name = opponent.get("username", "?")
 
