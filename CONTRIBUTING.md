@@ -27,13 +27,13 @@ Never commit to `main` directly, and never force-push either branch.
 ## Getting set up
 
 ```bash
-./scripts/setup_venv.sh          # creates venv/ and installs requirements
+./scripts/setup_venv.sh          # creates venv/ and installs requirements-dev.txt
 source venv/bin/activate
 cp .env.example .env             # then put your Lichess token in it
 ```
 
-You need a [Lichess BOT account](https://lichess.org/api#tag/Bot) and a token
-with the `board:play` and `bot:play` scopes.
+To run the bot you need a [Lichess BOT account](https://lichess.org/api#tag/Bot)
+and a token with the `bot:play` scope. The tests need neither.
 
 ## Before you push
 
@@ -41,8 +41,12 @@ with the `board:play` and `bot:play` scopes.
 pytest
 ```
 
-The suite must be green. CI runs it on Python 3.11, 3.12 and 3.13, so avoid
-syntax that only works on the newest of those.
+The suite must be green. CI runs it on Python 3.11 to 3.14, so avoid syntax
+that only works on the newest of those. [TESTING.md](TESTING.md) describes how
+the tests are built; a fix comes with the scenario that failed before it.
+
+A change to the `Dockerfile` or to how the container runs is checked by
+`scripts/check_image.sh <image>`, which CI runs on every push.
 
 Never commit `.env`, a token, or anything else secret. If you do, revoke the
 token immediately — see [SECURITY.md](SECURITY.md).

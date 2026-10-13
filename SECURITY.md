@@ -28,14 +28,30 @@ Please include:
 
 ## Scope
 
-The bot holds a **Lichess API token** with `board:play` and `bot:play` scopes.
-Anything that can read that token, or make the bot act outside a game it is
-playing, is in scope. So is anything that causes the bot to fetch and execute
-untrusted code — the engine self-updater downloads and runs a binary.
+The bot holds a **Lichess API token** with the `bot:play` scope. Anything that
+can read that token, or make the bot act outside a game it is playing, is in
+scope. So is anything that causes the bot to fetch and execute untrusted code:
+outside the container the engine self-updater downloads and runs a binary. It
+takes the binary only from the Stockfish project's GitHub releases and installs
+it only if it matches the SHA-256 the release publishes.
+
+The container image does not contain the self-updater. Its engine is one named
+release, checked against its SHA-256 when the image is built. The image has no
+shell and no package manager, and the bot runs in it as an unprivileged user
+that owns nothing but its log directory. A way around any of that is in scope.
 
 Out of scope: the strength of the bot's chess, rate limits imposed by Lichess,
 and vulnerabilities in Stockfish itself (report those to
 [official-stockfish/Stockfish](https://github.com/official-stockfish/Stockfish)).
+
+## What the scans report
+
+Every push and a weekly run scan the Python dependencies (pip-audit), the
+repository and the built image (Trivy), and the code (CodeQL). The image scan
+files an alert for a HIGH or CRITICAL vulnerability once a fixed package
+exists, since that is when an update of the base image can close it. What
+Debian has not fixed yet is listed in the log of the scan job, not filed as an
+alert.
 
 ## Handling the token
 
