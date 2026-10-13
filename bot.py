@@ -1630,6 +1630,44 @@ class BotState:
     pending_challenge: Dict[str, Any] = field(default_factory=dict)
     # Set to wake the challenge loop before its current wait runs out.
     retry_event: threading.Event = field(default_factory=threading.Event)
+    # Incoming challenges the bot has accepted whose game has not started yet,
+    # by challenge id with the time of acceptance. Each one holds a game slot.
+    accepted_challenges: Dict[str, float] = field(default_factory=dict)
+
+
+# How long an accepted challenge may take to show up as a game before its slot
+# is given back. Lichess starts the game at once; this only covers an accept
+# that was lost on the way.
+ACCEPTED_CHALLENGE_TTL = 30
+
+
+def free_game_slots(state: BotState) -> int:
+    """Game slots not taken by a running game or by an accepted challenge."""
+    now = time.monotonic()
+    with state.games_lock:
+        for cid in [c for c, at in state.accepted_challenges.items() if now - at > ACCEPTED_CHALLENGE_TTL]:
+            del state.accepted_challenges[cid]
+        running = sum(1 for t in state.active_games.values() if t.is_alive())
+        return MAX_CONCURRENT_GAMES - running - len(state.accepted_challenges)
+
+
+def cancel_pending_challenge(state: BotState, why: str):
+    """Withdraw the outgoing challenge, so that it cannot turn into a game later.
+
+    Lichess stops showing a real-time challenge after 20 seconds, but a bot
+    that queued its id can still accept it much later, when this bot may have
+    no slot left for the game.
+    """
+    challenge_id = state.pending_challenge.get("id")
+    if not challenge_id:
+        return
+    opponent = state.pending_challenge.get("opponent", "unknown")
+    state.pending_challenge.clear()
+    try:
+        state.client.challenges.cancel(challenge_id)
+        logger.info(f"Canceled challenge {challenge_id} to {opponent}: {why}")
+    except Exception as e:
+        logger.debug(f"Could not cancel challenge {challenge_id}: {e}")
 
 
 def challenge_loop(state: BotState):
@@ -1652,12 +1690,11 @@ def challenge_loop(state: BotState):
 
     while not shutdown_requested:
         try:
-            with state.games_lock:
-                active_count = sum(1 for t in state.active_games.values() if t.is_alive())
+            free_slots = free_game_slots(state)
 
-            if not ENABLE_AUTO_CHALLENGE or active_count >= MAX_CONCURRENT_GAMES:
-                if active_count >= MAX_CONCURRENT_GAMES:
-                    logger.debug(f"Skipping challenge: {active_count}/{MAX_CONCURRENT_GAMES} active game(s)")
+            if not ENABLE_AUTO_CHALLENGE or free_slots <= 0:
+                if free_slots <= 0:
+                    logger.debug(f"Skipping challenge: all {MAX_CONCURRENT_GAMES} game slot(s) are taken")
                 retry_event.clear()
                 retry_event.wait(timeout=CHALLENGE_CHECK_INTERVAL)
                 retry_event.clear()
@@ -1681,7 +1718,7 @@ def challenge_loop(state: BotState):
                         f"No response from {pending_challenge['opponent']} after "
                         f"{elapsed:.0f}s — they may be offline. Trying another bot in {RETRY_DELAY}s..."
                     )
-                    pending_challenge.clear()
+                    cancel_pending_challenge(state, f"no answer after {elapsed:.0f}s")
                     retry_event.wait(timeout=RETRY_DELAY)
                     retry_event.clear()
 
@@ -1809,6 +1846,21 @@ def abort_stale_games(client: berserk.Client):
         logger.warning(f"Could not check ongoing games: {e}")
 
 
+def _answer_challenge(answer, challenge_id: str, **kwargs) -> bool:
+    """Accept or decline a challenge; False when Lichess did not take the answer."""
+    try:
+        answer(challenge_id, **kwargs)
+        return True
+    except ResponseError as e:
+        if _http_status(e) == 404:
+            logger.debug(f"Challenge {challenge_id} no longer exists")
+        else:
+            logger.warning(f"Could not answer challenge {challenge_id}: {e}")
+    except ApiError as e:
+        logger.warning(f"Could not answer challenge {challenge_id}: {e}")
+    return False
+
+
 def handle_event(event: Dict[str, Any], state: BotState):
     """Act on one event from the account's event stream."""
     client = state.client
@@ -1825,22 +1877,17 @@ def handle_event(event: Dict[str, Any], state: BotState):
 
         # Only incoming challenges (where we are the destination) need an answer
         if dest_username == state.username.lower():
-            if should_accept_challenge(challenge):
-                try:
-                    client.bots.accept_challenge(cid)
-                except berserk.exceptions.ResponseError as e:
-                    if "404" in str(e):
-                        logger.debug(f"Challenge {cid} no longer exists")
-                    else:
-                        logger.warning(f"Failed to accept challenge: {e}")
-            else:
-                try:
-                    client.bots.decline_challenge(cid)
-                except berserk.exceptions.ResponseError as e:
-                    if "404" in str(e):
-                        logger.debug(f"Challenge {cid} no longer exists")
-                    else:
-                        logger.warning(f"Failed to decline challenge: {e}")
+            if not should_accept_challenge(challenge):
+                _answer_challenge(client.bots.decline_challenge, cid)
+            elif free_game_slots(state) <= 0:
+                # Accepting would start a game that has to be aborted at once.
+                logger.info(f"Declining challenge {cid}: all {MAX_CONCURRENT_GAMES} game slot(s) are taken")
+                _answer_challenge(client.bots.decline_challenge, cid, reason="later")
+            elif _answer_challenge(client.bots.accept_challenge, cid):
+                with state.games_lock:
+                    state.accepted_challenges[cid] = time.monotonic()
+                if pending_challenge and free_game_slots(state) <= 0:
+                    cancel_pending_challenge(state, "the last game slot went to an incoming challenge")
         else:
             # Outgoing challenge — update opponent name in pending tracker
             logger.debug(f"Outgoing challenge to {dest_username}: {cid}")
@@ -1860,7 +1907,9 @@ def handle_event(event: Dict[str, Any], state: BotState):
         if is_ours:
             pending_challenge.clear()
         # Always signal retry so challenge loop can pick the next bot
-        threading.Timer(30, retry_event.set).start()
+        retry_timer = threading.Timer(30, retry_event.set)
+        retry_timer.daemon = True
+        retry_timer.start()
 
     elif kind == "challengeCanceled":
         challenge = event.get("challenge", {})
@@ -1883,6 +1932,9 @@ def handle_event(event: Dict[str, Any], state: BotState):
             dead = [gid for gid, t in state.active_games.items() if not t.is_alive()]
             for gid in dead:
                 del state.active_games[gid]
+
+            # A game carries the id of the challenge it came from.
+            state.accepted_challenges.pop(game_id, None)
 
             if game_id in state.active_games:
                 # Lichess announces every game in progress each time the event
