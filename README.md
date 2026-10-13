@@ -209,12 +209,24 @@ The score is from the side to move, which is the bot. `PREDICTION_DEPTH` sets ho
 While a game slot is free and `ENABLE_AUTO_CHALLENGE` is on, a background thread looks for an opponent:
 
 1. It draws a clock from `CHALLENGE_TIME_CONTROLS`.
-2. From the bots online it keeps those whose rating **at that speed** is within `CHALLENGE_MIN_RATING`–`CHALLENGE_MAX_RATING`, and challenges one at random, rated.
+2. From the bots online it keeps those whose rating **at that speed** is within `CHALLENGE_MIN_RATING`–`CHALLENGE_MAX_RATING`, leaves out the ones it is leaving alone (below), and challenges one of the rest at random, rated.
 3. It waits up to 90 seconds for an answer. After a decline it tries another bot 30 seconds later; with no answer at all it withdraws the challenge first.
 
 Lichess allows an account 200 challenges a day and counts every request, including the ones it refuses. The bot counts the same way and stops at `MAX_CHALLENGES_PER_HOUR` and `MAX_CHALLENGES_PER_DAY`. If Lichess answers HTTP 429 anyway, the bot waits for as long as the answer says, or for 5 minutes doubling up to an hour when it does not say.
 
 The bot does not challenge while its event stream is down, because it could not see the challenge being accepted and the game would start without it.
+
+A challenge spent on a bot that will not play is one fewer for a bot that would. So a bot that did not play is left alone for a while, and for how long depends on what it did:
+
+| What the other bot did | Left alone for |
+| --- | --- |
+| Answered "later" | 15 minutes |
+| Did not answer within the 90 seconds, or declined without a reason | 1 hour, then 2, 4, 8 and 16, then a day each time, until it plays |
+| Declined the speed: too fast, too slow, or not this time control | a day, at that speed only |
+| Declined because it takes no bots, no rated games or no standard chess | a week |
+| Lichess would not create the challenge: the other bot takes none, or has played its 100 games against bots for the day | as long as Lichess says, 6 hours when it does not say |
+
+A bot that starts a game with this one is cleared at once, whichever of the two sent the challenge.
 
 ## Staying connected
 

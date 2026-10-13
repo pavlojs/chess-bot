@@ -146,6 +146,135 @@ class ChallengeTracker:
             return wait
 
 
+def _span(seconds: float) -> str:
+    """A duration the way one would say it: 15 minutes, 6 hours, 7 days."""
+    for unit, size in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        if seconds >= size:
+            count = round(seconds / size)
+            return f"{count} {unit}{'s' if count != 1 else ''}"
+    return f"{round(seconds)} seconds"
+
+
+class OpponentRests:
+    """Bots the bot leaves alone for a while, because challenging them now leads nowhere.
+
+    Lichess allows an account 200 challenges a day. Each one sent to a bot
+    that never accepts, or that is away, is one fewer for a bot that would
+    have played. How long a bot is left alone depends on what it did:
+
+    - it answered "later": 15 minutes;
+    - it did not answer, or declined without a reason: an hour, and twice as
+      long each further time, up to a day, until it plays;
+    - it does not want this speed: a day, for that speed only;
+    - it does not take rated standard challenges from bots at all: a week;
+    - Lichess would not create the challenge: as long as Lichess says, or
+      6 hours.
+
+    A bot that starts a game with this one is cleared at once.
+    """
+
+    LATER = 15 * 60
+    UNANSWERED = 60 * 60
+    DAY = 24 * 3600
+    SPEED_UNWANTED = DAY
+    NEVER = 7 * DAY
+    REFUSED = 6 * 3600
+
+    # What Lichess's decline reasons say about a rated standard challenge from
+    # a bot. An event carries them in lower case ("toofast", "nobot").
+    SPEED_REASONS = frozenset({"toofast", "tooslow", "timecontrol"})
+    NEVER_REASONS = frozenset({"nobot", "casual", "variant"})
+
+    def __init__(self, clock=time.time):
+        self._clock = clock
+        # name, or name|speed  ->  [until, times without an answer]
+        self._rests: Dict[str, List[float]] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key(username: str, speed: Optional[str] = None) -> str:
+        return username.lower() if speed is None else f"{username.lower()}|{speed}"
+
+    def _prune(self, now: float):
+        # A bot that was not asked again within a day of its rest starts afresh.
+        for key in [k for k, (until, _) in self._rests.items() if until + self.DAY < now]:
+            del self._rests[key]
+
+    def _rest(self, key: str, seconds: float, doubling: bool = False) -> float:
+        """Leave ``key`` alone for ``seconds`` from now; returns how long that is in the end."""
+        with self._lock:
+            now = self._clock()
+            self._prune(now)
+            until, unanswered = self._rests.get(key, [0, 0])
+            if doubling:
+                seconds = min(seconds * 2 ** unanswered, self.DAY)
+                unanswered += 1
+            if until > now + seconds:
+                # A rest already running is never cut short by a shorter one.
+                seconds = until - now
+            self._rests[key] = [now + seconds, unanswered]
+            return seconds
+
+    def resting(self, username: str, speed: str) -> bool:
+        """True while this bot is being left alone, at any speed or at this one."""
+        with self._lock:
+            now = self._clock()
+            return any(
+                self._rests.get(key, [0, 0])[0] > now
+                for key in (self._key(username), self._key(username, speed))
+            )
+
+    def declined(self, username: str, speed: Optional[str], reason: str) -> float:
+        """The bot declined; returns for how many seconds it is left alone."""
+        reason = reason.lower()
+        if reason == "later":
+            return self._rest(self._key(username), self.LATER)
+        if reason in self.SPEED_REASONS and speed:
+            return self._rest(self._key(username, speed), self.SPEED_UNWANTED)
+        if reason in self.NEVER_REASONS:
+            return self._rest(self._key(username), self.NEVER)
+        return self._rest(self._key(username), self.UNANSWERED, doubling=True)
+
+    def unanswered(self, username: str) -> float:
+        """The bot let the challenge lapse."""
+        return self._rest(self._key(username), self.UNANSWERED, doubling=True)
+
+    def refused(self, username: str, seconds: Optional[float] = None) -> float:
+        """Lichess would not create the challenge, for ``seconds`` if it said how long."""
+        return self._rest(self._key(username), seconds if seconds else self.REFUSED)
+
+    def played(self, username: str, speed: Optional[str] = None):
+        """The bot started a game at this speed: forget what was held against it.
+
+        A speed it declined stays declined: a game of blitz says nothing about bullet.
+        """
+        with self._lock:
+            self._rests.pop(self._key(username), None)
+            if speed:
+                self._rests.pop(self._key(username, speed), None)
+
+    def count(self) -> int:
+        """How many bots are being left alone right now, at any speed."""
+        with self._lock:
+            now = self._clock()
+            return len({key.split("|", 1)[0] for key, (until, _) in self._rests.items() if until > now})
+
+    def export(self) -> Dict[str, List[float]]:
+        with self._lock:
+            self._prune(self._clock())
+            return {key: [round(until, 3), unanswered] for key, (until, unanswered) in self._rests.items()}
+
+    def restore(self, rests: Any):
+        if not isinstance(rests, dict):
+            return
+        with self._lock:
+            for key, value in rests.items():
+                if (isinstance(key, str) and isinstance(value, list) and len(value) == 2
+                        and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)):
+                    self._rests[key] = [float(value[0]), max(int(value[1]), 0)]
+            self._prune(self._clock())
+
+
 # ─────────────────────────────────────────────
 # CUSTOM EXCEPTIONS
 # ─────────────────────────────────────────────
@@ -156,6 +285,15 @@ class RateLimitError(Exception):
     def __init__(self, message: str, retry_after: Optional[int] = None):
         super().__init__(message)
         # Seconds until the limit is lifted, when the answer says so.
+        self.retry_after = retry_after
+
+
+class ChallengeRefused(Exception):
+    """Lichess would not create a challenge to this opponent."""
+
+    def __init__(self, message: str, retry_after: Optional[int] = None):
+        super().__init__(message)
+        # Seconds until it would, when the answer says so.
         self.retry_after = retry_after
 
 
@@ -922,20 +1060,25 @@ def challenge_bot(client: berserk.Client, opponent_username: str,
     except berserk.exceptions.ResponseError as e:
         logger.warning(f"Failed to challenge {opponent_username}: {e}")
         # Propagate rate-limit errors so callers can apply backoff
-        if _http_status(e) == 429:
+        status = _http_status(e)
+        if status == 429:
             raise RateLimitError(str(e), _retry_after(e)) from e
+        if status in (400, 404):
+            # About this opponent: it takes no challenges, has played its 100
+            # games against bots for today, or is gone.
+            raise ChallengeRefused(str(e), _retry_after(e)) from e
         return None
     except Exception as e:
         logger.error(f"Error challenging {opponent_username}: {e}")
         return None
 
 
-def try_challenge_random_bot(client: berserk.Client, bot_username: str,
-                             tracker: ChallengeTracker) -> Optional[tuple[str, str]]:
+def try_challenge_random_bot(client: berserk.Client, bot_username: str, tracker: ChallengeTracker,
+                             rests: Optional[OpponentRests] = None) -> Optional[tuple[str, str, str]]:
     """Challenge one random suitable bot.
 
     Returns:
-        (challenge id, opponent name) if a challenge was created, None otherwise
+        (challenge id, opponent name, speed) if a challenge was created, None otherwise
     """
     if not ENABLE_AUTO_CHALLENGE:
         return None
@@ -974,18 +1117,26 @@ def try_challenge_random_bot(client: berserk.Client, bot_username: str,
         )
         return None
 
-    target_bot = random.choice(suitable_bots)
+    if rests is not None:
+        rested = [bot for bot in suitable_bots if not rests.resting(bot["username"], speed)]
+        if not rested:
+            logger.info(f"All {len(suitable_bots)} suitable bots for {speed} are being left alone for now")
+            return None
+        suitable_bots = rested
+
+    opponent = random.choice(suitable_bots)["username"]
 
     # Counted before the outcome is known: Lichess counts the request too.
     tracker.record_challenge()
-    challenge_id = challenge_bot(
-        client,
-        target_bot["username"],
-        time_control,
-        color="random"
-    )
+    try:
+        challenge_id = challenge_bot(client, opponent, time_control, color="random")
+    except ChallengeRefused as e:
+        if rests is not None:
+            rest = rests.refused(opponent, e.retry_after)
+            logger.info(f"Lichess would not create a challenge to {opponent} — leaving it alone for {_span(rest)}")
+        return None
 
-    return (challenge_id, target_bot["username"]) if challenge_id else None
+    return (challenge_id, opponent, speed) if challenge_id else None
 
 
 # ─────────────────────────────────────────────
@@ -1775,6 +1926,8 @@ class BotState:
     # by challenge id with the time of acceptance. Each one holds a game slot.
     accepted_challenges: Dict[str, float] = field(default_factory=dict)
     stream: StreamMonitor = field(default_factory=StreamMonitor)
+    # Bots that are being left alone for a while
+    rests: OpponentRests = field(default_factory=OpponentRests)
 
 
 # How long an accepted challenge may take to show up as a game before its slot
@@ -1859,10 +2012,16 @@ def challenge_loop(state: BotState):
                     retry_event.clear()
                     continue
                 else:
-                    logger.info(
-                        f"No response from {pending_challenge['opponent']} after "
-                        f"{elapsed:.0f}s — they may be offline. Trying another bot in {RETRY_DELAY}s..."
-                    )
+                    opponent = pending_challenge["opponent"]
+                    if state.stream.alive():
+                        rest = state.rests.unanswered(opponent)
+                        logger.info(
+                            f"No response from {opponent} after {elapsed:.0f}s — leaving it alone for "
+                            f"{_span(rest)}. Trying another bot in {RETRY_DELAY}s..."
+                        )
+                    else:
+                        # Its answer would have come over the event stream.
+                        logger.info(f"No response from {opponent} after {elapsed:.0f}s, with the event stream down")
                     cancel_pending_challenge(state, f"no answer after {elapsed:.0f}s")
                     retry_event.wait(timeout=RETRY_DELAY)
                     retry_event.clear()
@@ -1908,7 +2067,7 @@ def challenge_loop(state: BotState):
             # ── Send a new challenge ─────────────────────────────────────────
             logger.info("Looking for a bot to challenge...")
             try:
-                challenge = try_challenge_random_bot(state.client, state.username, state.tracker)
+                challenge = try_challenge_random_bot(state.client, state.username, state.tracker, state.rests)
             except RateLimitError as e:
                 if e.retry_after:
                     # Lichess said when the limit ends; asking sooner is pointless.
@@ -1927,7 +2086,7 @@ def challenge_loop(state: BotState):
             rate_limit_backoff = RATE_LIMIT_BASE
 
             if challenge:
-                challenge_id, opponent = challenge
+                challenge_id, opponent, speed = challenge
                 with state.games_lock:
                     already_playing = challenge_id in state.active_games
                 if already_playing:
@@ -1935,6 +2094,7 @@ def challenge_loop(state: BotState):
                     continue
                 pending_challenge["id"] = challenge_id
                 pending_challenge["opponent"] = opponent
+                pending_challenge["speed"] = speed
                 pending_challenge["sent_at"] = time.monotonic()
                 # Wait up to ACCEPT_TIMEOUT; fires early on decline/cancel
                 retry_event.clear()
@@ -2089,13 +2249,23 @@ def handle_event(event: Dict[str, Any], state: BotState):
 
     elif kind == "challengeDeclined":
         challenge = event.get("challenge", {})
-        decliner = challenge.get("destUser", {}).get("name", "Unknown")
-        reason = challenge.get("declineReason", challenge.get("declineReasonKey", "no reason given"))
         cid = challenge.get("id", "")
+        decliner = (challenge.get("destUser") or {}).get("name", "")
+        if not decliner or decliner.lower() == state.username.lower():
+            # Lichess reports a decline to both sides, so every challenge the
+            # bot turns down comes back here.
+            logger.debug(f"Lichess confirmed that challenge {cid} was declined")
+            return
+
+        reason_key = (challenge.get("declineReasonKey") or "generic").lower()
+        reason = challenge.get("declineReason") or reason_key
         is_ours = pending_challenge.get("id") == cid
+        speed = challenge.get("speed") if challenge.get("speed") in SPEEDS else pending_challenge.get("speed")
+        rest = state.rests.declined(decliner, speed, reason_key)
         logger.info(
             f"Challenge {'(ours) ' if is_ours else ''}declined by {decliner}"
-            f" — reason: {reason}"
+            f" — reason: {reason}. Leaving it alone for {_span(rest)}"
+            f"{f' at {speed}' if reason_key in OpponentRests.SPEED_REASONS and speed else ''}"
         )
         if is_ours:
             pending_challenge.clear()
@@ -2169,6 +2339,10 @@ def handle_event(event: Dict[str, Any], state: BotState):
         if pending_challenge.get("id") == game_id:
             logger.info(f"Challenge to {pending_challenge.get('opponent', 'unknown')} accepted — game {game_id} started")
             pending_challenge.clear()
+        # Whoever plays is no longer left alone, whichever side sent the challenge.
+        opponent = (event["game"].get("opponent") or {}).get("username")
+        if opponent:
+            state.rests.played(opponent, event["game"].get("speed"))
         retry_event.set()
 
         logger.info(f"Game {game_id} started")

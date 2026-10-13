@@ -65,8 +65,8 @@ class EventTestCase(unittest.TestCase):
     def send(self, kind, **payload):
         bot.handle_event({"type": kind, **payload}, self.state)
 
-    def start_game(self, game_id):
-        self.send("gameStart", game={"id": game_id})
+    def start_game(self, game_id, **game):
+        self.send("gameStart", game={"id": game_id, **game})
         thread = self.state.active_games[game_id]
         self.wait_until(lambda: game_id in self.games.started)
         return thread
@@ -403,6 +403,7 @@ class ChallengeLoopTestCase(EventTestCase):
             "bot.CHALLENGE_MIN_RATING": 1500,
             "bot.CHALLENGE_MAX_RATING": 2900,
             "bot.CHALLENGE_TIME_CONTROLS": [{"limit": 300, "increment": 3}],
+            "bot.random.choice": lambda options: options[0],      # the first suitable bot, every time
         }.items():
             patcher = patch(name, value)
             patcher.start()
@@ -530,6 +531,7 @@ class TestChallengeLoop(ChallengeLoopTestCase):
         self.assertEqual(waits, [5060, 5060])
 
     def test_backoff_starts_over_after_a_challenge_that_worked(self):
+        self.online = [online_bot("OtherBot", blitz=2000), online_bot("NextBot", blitz=2000)]
         self.client.challenges.create.side_effect = [
             http_error(429), http_error(429), {"id": "chal0001"}, http_error(429),
         ]
@@ -585,7 +587,8 @@ class TestChallengeLoop(ChallengeLoopTestCase):
         self.client.challenges.cancel.assert_not_called()
 
     def test_an_unanswered_challenge_is_withdrawn_before_the_next_one(self):
-        self.state.pending_challenge.update(id="mine0001", opponent="SlowBot", sent_at=bot.time.monotonic() - 100)
+        self.state.pending_challenge.update(id="mine0001", opponent="SlowBot", speed="blitz",
+                                            sent_at=bot.time.monotonic() - 100)
 
         waits = self.run_loop(2)
 
@@ -635,6 +638,163 @@ class TestChallengeLoop(ChallengeLoopTestCase):
 
         self.assertEqual(self.client.challenges.create.call_count, 1)
         self.assertEqual(waits[-1], 90)
+
+
+def declined(challenge_id, by, reason, speed="blitz", challenger="Axiom_BOT"):
+    """The challenge of a challengeDeclined event. Lichess writes the reason's key in lower case."""
+    return {
+        "id": challenge_id,
+        "status": "declined",
+        "challenger": {"id": challenger.lower(), "name": challenger, "title": "BOT"},
+        "destUser": {"id": by.lower(), "name": by, "title": "BOT"},
+        "speed": speed,
+        "declineReasonKey": reason,
+        "declineReason": f"text Lichess shows for {reason}",
+    }
+
+
+class TestLeavingBotsAlone(ChallengeLoopTestCase):
+    """A challenge is not spent on a bot that just showed it will not play."""
+
+    def challenged(self):
+        return [call.args[0] for call in self.client.challenges.create.call_args_list]
+
+    def test_a_bot_that_does_not_answer_is_passed_over_next_time(self):
+        self.online = [online_bot("AwayBot", blitz=2000), online_bot("NextBot", blitz=2000)]
+
+        waits = self.run_loop(3)
+
+        self.assertEqual(waits, [90, 30, 90])
+        self.assertEqual(self.challenged(), ["AwayBot", "NextBot"])
+        self.assertTrue(self.state.rests.resting("AwayBot", "blitz"))
+
+    def test_with_every_suitable_bot_resting_nothing_is_sent_or_counted(self):
+        self.state.rests.declined("OtherBot", "blitz", "nobot")
+
+        waits = self.run_loop(2)
+
+        self.assertEqual(waits, [60, 60])
+        self.client.challenges.create.assert_not_called()
+        self.assertEqual(self.state.tracker.counts(), (0, 0))
+
+    def test_a_bot_that_asks_for_later_is_asked_again_after_a_quarter_of_an_hour(self):
+        with patch("bot.threading.Timer"):
+            self.send("challengeDeclined", challenge=declined("old00001", "OtherBot", "later"))
+        self.assertTrue(self.state.rests.resting("OtherBot", "blitz"))
+
+        clock = [bot.time.time()]
+        self.state.rests._clock = lambda: clock[0]
+        clock[0] += 15 * 60 + 1
+
+        self.run_loop(1)
+
+        self.assertEqual(self.challenged(), ["OtherBot"])
+
+    def test_a_bot_that_takes_no_bots_is_left_alone_for_a_week(self):
+        with patch("bot.threading.Timer"):
+            self.send("challengeDeclined", challenge=declined("old00001", "LeelaQueenOdds", "nobot"))
+
+        until, _ = self.state.rests.export()["leelaqueenodds"]
+        self.assertAlmostEqual(until - bot.time.time(), 7 * 86400, delta=5)
+
+    def test_a_decline_of_one_speed_leaves_the_other_speeds_open(self):
+        with patch("bot.threading.Timer"):
+            self.send("challengeDeclined", challenge=declined("old00001", "OtherBot", "toofast", speed="bullet"))
+
+        self.assertTrue(self.state.rests.resting("OtherBot", "bullet"))
+        self.run_loop(1)                        # the loop offers 5+3, which is blitz
+
+        self.assertEqual(self.challenged(), ["OtherBot"])
+
+    def test_a_decline_is_recorded_even_after_the_bot_has_moved_on(self):
+        """The answer can come after the 90 seconds; it still says something about that bot."""
+        self.state.pending_challenge.update(id="newer001", opponent="NextBot", speed="blitz", sent_at=0.0)
+
+        with patch("bot.threading.Timer"):
+            self.send("challengeDeclined", challenge=declined("old00001", "OtherBot", "nobot"))
+
+        self.assertTrue(self.state.rests.resting("OtherBot", "blitz"))
+        self.assertEqual(self.state.pending_challenge["id"], "newer001")
+
+    def test_a_bot_that_accepts_is_cleared(self):
+        self.state.rests.unanswered("OtherBot")
+        self.state.pending_challenge.update(id="chal0001", opponent="OtherBot", speed="blitz", sent_at=0.0)
+
+        self.start_game("chal0001", speed="blitz", opponent={"id": "otherbot", "username": "OtherBot", "rating": 2000})
+
+        self.assertFalse(self.state.rests.resting("OtherBot", "blitz"))
+
+    def test_a_bot_that_comes_with_a_challenge_of_its_own_is_cleared_too(self):
+        self.state.rests.unanswered("OtherBot")
+
+        self.start_game("theirs01", speed="rapid", opponent={"id": "otherbot", "username": "OtherBot", "rating": 2000})
+
+        self.assertFalse(self.state.rests.resting("OtherBot", "blitz"))
+
+    def test_a_game_against_the_lichess_computer_changes_nothing(self):
+        self.state.rests.unanswered("OtherBot")
+
+        self.start_game("ai000001", speed="blitz", opponent={"id": None, "username": "Stockfish level 3", "ai": 3})
+
+        self.assertTrue(self.state.rests.resting("OtherBot", "blitz"))
+
+    def test_the_bots_own_decline_coming_back_is_held_against_nobody(self):
+        """Lichess reports a decline to both sides: this is the bot's own answer to a challenge it got."""
+        with patch("bot.threading.Timer") as timer:
+            self.send("challengeDeclined",
+                      challenge=declined("theirs01", "Axiom_BOT", "later", challenger="OtherBot"))
+
+        self.assertEqual(self.state.rests.export(), {})
+        timer.assert_not_called()                # and the challenge loop is not woken for it
+
+    def test_silence_while_the_event_stream_is_down_is_held_against_nobody(self):
+        """The answer comes over the event stream, so without it there is nothing to conclude."""
+        self.state.pending_challenge.update(id="mine0001", opponent="OtherBot", speed="blitz",
+                                            sent_at=bot.time.monotonic() - 100)
+        self.stream_connected = False
+
+        self.run_loop(1)
+
+        self.client.challenges.cancel.assert_called_once_with("mine0001")
+        self.assertFalse(self.state.rests.resting("OtherBot", "blitz"))
+
+    def test_a_bot_at_its_daily_limit_is_left_alone_until_lichess_says(self):
+        """Lichess refuses to create the challenge and says for how long."""
+        self.client.challenges.create.side_effect = http_error(400, {
+            "error": "OtherBot played 100 games against other bots today, please wait until tomorrow to challenge them.",
+            "ratelimit": {"key": "bot.vsBot.day", "seconds": 5000},
+        })
+
+        waits = self.run_loop(1)
+
+        self.assertEqual(waits, [60])
+        until, _ = self.state.rests.export()["otherbot"]
+        self.assertAlmostEqual(until - bot.time.time(), 5000, delta=5)
+        self.assertEqual(self.state.tracker.counts(), (1, 1))        # Lichess counted the request
+
+    def test_a_bot_that_takes_no_challenges_is_left_alone_for_six_hours(self):
+        self.client.challenges.create.side_effect = http_error(400, {"error": "OtherBot does not accept challenges."})
+
+        self.run_loop(1)
+
+        until, _ = self.state.rests.export()["otherbot"]
+        self.assertAlmostEqual(until - bot.time.time(), 6 * 3600, delta=5)
+
+    def test_a_bot_that_is_gone_is_left_alone_as_well(self):
+        self.client.challenges.create.side_effect = http_error(404, {"error": "Not found"})
+
+        self.run_loop(1)
+
+        self.assertTrue(self.state.rests.resting("OtherBot", "blitz"))
+
+    def test_a_refusal_that_is_about_this_account_is_not_held_against_the_bot_that_was_asked(self):
+        for status in (401, 403, 429):
+            with self.subTest(status=status):
+                self.client.challenges.create.side_effect = http_error(status)
+
+                self.run_loop(1)
+
+                self.assertFalse(self.state.rests.resting("OtherBot", "blitz"))
 
 
 class TestRetryAfter(unittest.TestCase):

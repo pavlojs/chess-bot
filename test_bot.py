@@ -492,6 +492,194 @@ class TestChallengeTracker(unittest.TestCase):
         self.assertGreater(tracker.seconds_until_free(), 0)
 
 
+class Clock:
+    """A clock the test moves by hand."""
+
+    def __init__(self, now=1_000_000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def forward(self, seconds):
+        self.now += seconds
+
+
+class TestOpponentRests(unittest.TestCase):
+    """How long a bot is left alone depends on what it did with the last challenge."""
+
+    MINUTE, HOUR, DAY = 60, 3600, 86400
+
+    def setUp(self):
+        from bot import OpponentRests
+        self.clock = Clock()
+        self.rests = OpponentRests(self.clock)
+
+    def test_a_bot_nothing_is_held_against_is_not_resting(self):
+        self.assertFalse(self.rests.resting("SomeBot", "blitz"))
+
+    def test_later_means_a_quarter_of_an_hour(self):
+        self.assertEqual(self.rests.declined("BusyBot", "blitz", "later"), 15 * self.MINUTE)
+
+        self.assertTrue(self.rests.resting("BusyBot", "blitz"))
+        self.assertTrue(self.rests.resting("BusyBot", "rapid"))      # busy is busy at any speed
+        self.clock.forward(15 * self.MINUTE)
+        self.assertFalse(self.rests.resting("BusyBot", "blitz"))
+
+    def test_later_stays_a_quarter_of_an_hour_however_often(self):
+        for _ in range(4):
+            self.assertEqual(self.rests.declined("BusyBot", "blitz", "later"), 15 * self.MINUTE)
+
+    def test_an_unwanted_speed_rests_that_speed_only_for_a_day(self):
+        for reason in ("toofast", "tooslow", "timecontrol"):         # as an event spells them
+            with self.subTest(reason=reason):
+                self.assertEqual(self.rests.declined(f"Picky{reason}", "bullet", reason), self.DAY)
+                self.assertTrue(self.rests.resting(f"Picky{reason}", "bullet"))
+                self.assertFalse(self.rests.resting(f"Picky{reason}", "rapid"))
+
+    def test_a_bot_that_takes_no_such_challenge_at_all_rests_a_week(self):
+        for reason in ("nobot", "casual", "variant"):
+            with self.subTest(reason=reason):
+                self.assertEqual(self.rests.declined(f"Never{reason}", "blitz", reason), 7 * self.DAY)
+                self.assertTrue(self.rests.resting(f"Never{reason}", "classical"))
+
+    def test_a_reason_is_understood_in_the_spelling_of_the_api_documentation_too(self):
+        self.assertEqual(self.rests.declined("NeverBot", "blitz", "noBot"), 7 * self.DAY)
+        self.assertEqual(self.rests.declined("PickyBot", "bullet", "tooFast"), self.DAY)
+
+    def test_the_other_reasons_say_nothing_lasting_about_a_rated_standard_challenge_from_a_bot(self):
+        for reason in ("generic", "rated", "standard", "onlybot", "something lichess adds later"):
+            with self.subTest(reason=reason):
+                self.assertEqual(self.rests.declined(f"Odd{reason}", "blitz", reason), self.HOUR)
+
+    def test_a_speed_reason_without_a_known_speed_counts_like_no_reason(self):
+        self.assertEqual(self.rests.declined("PickyBot", None, "toofast"), self.HOUR)
+
+    def test_no_answer_rests_an_hour_then_twice_as_long_each_time_in_a_row(self):
+        spans = []
+        for _ in range(7):
+            spans.append(self.rests.unanswered("AwayBot"))
+            self.clock.forward(spans[-1] + 1)       # challenged again as soon as the rest is over
+
+        hours = [span / self.HOUR for span in spans]
+        self.assertEqual(hours, [1, 2, 4, 8, 16, 24, 24])       # and never more than a day
+
+    def test_a_decline_without_a_reason_counts_like_no_answer(self):
+        self.assertEqual(self.rests.declined("VagueBot", "blitz", "generic"), self.HOUR)
+        self.clock.forward(self.HOUR + 1)
+        self.assertEqual(self.rests.unanswered("VagueBot"), 2 * self.HOUR)
+
+    def test_in_a_row_ends_after_a_day_of_peace(self):
+        self.rests.unanswered("AwayBot")
+        self.clock.forward(self.HOUR + self.DAY + 1)             # the rest ended more than a day ago
+
+        self.assertEqual(self.rests.unanswered("AwayBot"), self.HOUR)
+
+    def test_a_refusal_by_lichess_lasts_as_long_as_lichess_says(self):
+        self.assertEqual(self.rests.refused("TiredBot", 5000), 5000)
+        self.clock.forward(4999)
+        self.assertTrue(self.rests.resting("TiredBot", "blitz"))
+        self.clock.forward(2)
+        self.assertFalse(self.rests.resting("TiredBot", "blitz"))
+
+    def test_a_refusal_without_a_time_lasts_six_hours(self):
+        self.assertEqual(self.rests.refused("ClosedBot"), 6 * self.HOUR)
+
+    def test_later_does_not_count_towards_the_doubling(self):
+        for _ in range(3):
+            self.rests.declined("BusyBot", "blitz", "later")
+            self.clock.forward(15 * self.MINUTE + 1)
+
+        self.assertEqual(self.rests.unanswered("BusyBot"), self.HOUR)
+
+    def test_a_rest_is_never_cut_short_by_a_shorter_one(self):
+        self.rests.declined("NeverBot", "blitz", "nobot")
+        self.clock.forward(self.HOUR)
+
+        left = self.rests.declined("NeverBot", "blitz", "later")       # a late answer to an older challenge
+
+        self.assertEqual(left, 7 * self.DAY - self.HOUR)
+        self.clock.forward(6 * self.DAY)
+        self.assertTrue(self.rests.resting("NeverBot", "blitz"))
+
+    def test_a_bot_that_plays_is_cleared(self):
+        self.rests.unanswered("ComeBackBot")
+
+        self.rests.played("ComeBackBot", "blitz")
+
+        self.assertFalse(self.rests.resting("ComeBackBot", "blitz"))
+        self.assertEqual(self.rests.unanswered("ComeBackBot"), self.HOUR)     # and counts from one again
+
+    def test_a_game_at_one_speed_does_not_undo_the_decline_of_another(self):
+        self.rests.declined("PickyBot", "bullet", "toofast")
+        self.rests.declined("PickyBot", "blitz", "timecontrol")
+
+        self.rests.played("PickyBot", "blitz")
+
+        self.assertTrue(self.rests.resting("PickyBot", "bullet"))
+        self.assertFalse(self.rests.resting("PickyBot", "blitz"))
+
+    def test_names_are_matched_whatever_their_case(self):
+        self.rests.declined("LeelaQueenOdds", "blitz", "nobot")
+
+        self.assertTrue(self.rests.resting("leelaqueenodds", "blitz"))
+        self.rests.played("LEELAQUEENODDS")
+        self.assertFalse(self.rests.resting("LeelaQueenOdds", "blitz"))
+
+    def test_clearing_one_bot_leaves_a_bot_with_a_longer_name_alone(self):
+        self.rests.declined("Bot", "blitz", "nobot")
+        self.rests.declined("Bot2", "blitz", "nobot")
+
+        self.rests.played("Bot", "blitz")
+
+        self.assertTrue(self.rests.resting("Bot2", "blitz"))
+
+    def test_bots_are_counted_once_and_only_while_they_rest(self):
+        self.rests.declined("PickyBot", "bullet", "toofast")
+        self.rests.declined("PickyBot", "rapid", "tooslow")
+        self.rests.declined("BusyBot", "blitz", "later")
+        self.assertEqual(self.rests.count(), 2)
+
+        self.clock.forward(self.HOUR)                    # BusyBot's quarter of an hour is over
+
+        self.assertEqual(self.rests.count(), 1)
+
+    def test_what_is_written_down_is_taken_over_by_the_next_run(self):
+        from bot import OpponentRests
+        self.rests.declined("NeverBot", "blitz", "nobot")
+        self.rests.declined("PickyBot", "bullet", "toofast")
+        self.rests.unanswered("AwayBot")
+        self.clock.forward(self.HOUR + 1)
+        self.rests.unanswered("AwayBot")                                   # second time in a row
+        written = self.rests.export()
+
+        self.clock.forward(30 * self.MINUTE)                               # the bot was down for a while
+        after_restart = OpponentRests(self.clock)
+        after_restart.restore(written)
+
+        self.assertTrue(after_restart.resting("NeverBot", "rapid"))
+        self.assertTrue(after_restart.resting("PickyBot", "bullet"))
+        self.assertFalse(after_restart.resting("PickyBot", "blitz"))
+        self.assertTrue(after_restart.resting("AwayBot", "blitz"))
+        self.clock.forward(2 * self.HOUR)
+        self.assertEqual(after_restart.unanswered("AwayBot"), 4 * self.HOUR)  # the count came along
+
+    def test_rests_that_are_long_over_are_not_written_down(self):
+        self.rests.declined("BusyBot", "blitz", "later")
+        self.clock.forward(2 * self.DAY)
+
+        self.assertEqual(self.rests.export(), {})
+
+    def test_a_damaged_record_is_ignored(self):
+        from bot import OpponentRests
+        for damaged in (None, "text", [1, 2], {"bot": "soon"}, {"bot": [1]}, {"bot": ["a", "b"]}, {5: [1, 2]},
+                        {"bot": [True, False]}):
+            with self.subTest(damaged=damaged):
+                rests = OpponentRests(self.clock)
+                rests.restore(damaged)
+                self.assertEqual(rests.export(), {})
+
+
 class TestFilterSuitableBots(unittest.TestCase):
     """Opponents are chosen by their rating in the kind of game being offered."""
 
@@ -547,7 +735,7 @@ class TestFilterSuitableBots(unittest.TestCase):
              patch("bot.CHALLENGE_MIN_RATING", 1500), patch("bot.CHALLENGE_MAX_RATING", 2900):
             result = try_challenge_random_bot(client, "Axiom_BOT", tracker)
 
-        self.assertEqual(result, ("chal0001", "BulletFine"))
+        self.assertEqual(result, ("chal0001", "BulletFine", "bullet"))
         self.assertEqual(client.challenges.create.call_args.args[0], "BulletFine")
 
 
