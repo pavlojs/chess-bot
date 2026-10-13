@@ -389,16 +389,15 @@ def retry_with_backoff(func, max_retries=5, base_delay=1, max_delay=60, descript
 # ─────────────────────────────────────────────
 
 def determine_time_category(limit: int, increment: int) -> str | None:
-    # Reject unlimited time games (limit = 0 and increment = 0)
+    """Speed of a clock game the way Lichess names it, from the clock in seconds.
+
+    Lichess estimates a game's length as the initial time plus 40 increments.
+    Returns None for a game without a clock: a correspondence or unlimited
+    challenge carries no ``limit``, so both arrive here as 0 + 0.
+    """
     if limit == 0 and increment == 0:
         return None
-    
-    # Reject correspondence games (days per move > 0)
-    # In Lichess API, correspondence games have very large limits
-    # or are marked differently in variant/speed fields
-    if limit >= 259200:  # 3+ days in seconds = correspondence
-        return None
-    
+
     total = limit + increment * 40
     if total < 180:
         return "bullet"
@@ -439,7 +438,7 @@ def should_accept_challenge(challenge: Dict[str, Any]) -> bool:
     
     # Reject if category is None (unlimited or correspondence)
     if category is None:
-        logger.info(f"Rejecting challenge with no valid time category")
+        logger.info("Rejecting challenge with no valid time category")
         return False
 
     if not (MIN_RATING <= rating <= MAX_RATING):
@@ -492,46 +491,33 @@ def get_game_end_reason(board: chess.Board) -> str:
 
 
 def init_stockfish(opponent_rating: int | None = None) -> Stockfish:
-    """Initialize Stockfish engine with hybrid strength system.
-    
-    Three-tier hybrid approach:
-    - Beginners/Intermediates (< LIMIT_STRENGTH_THRESHOLD=1800):
-        UCI_LimitStrength at opponent+100 + go movetime (fair, winnable games)
-    - Advanced (LIMIT_STRENGTH_THRESHOLD–FULL_STRENGTH_THRESHOLD = 1800–2799):
-        UCI_LimitStrength at opponent+100 + go movetime (scaled time).
-        NO native clocks — UCI_LimitStrength + go wtime causes Stockfish to
-        time-manage as a limited player, potentially hanging 30+ seconds.
-    - Elite (>= FULL_STRENGTH_THRESHOLD=2800): Full power + native clocks
+    """Start an engine set up for one opponent.
+
+    Below FULL_STRENGTH_THRESHOLD the engine's own strength limit is switched
+    on at the opponent's rating plus STRENGTH_ADVANTAGE, kept within what
+    Stockfish accepts for UCI_Elo (1320 at the low end) and at most 2850.
+    At or above the threshold, and against an opponent without a rating, the
+    engine plays at full strength.
+
+    How long it thinks is decided per move in play_game: a fixed move time
+    while the limit is on, the game clock at full strength.
     """
     sf = Stockfish(
         path=STOCKFISH_PATH,
         parameters=UCI_OPTIONS.copy(),
     )
-    
+
     if DYNAMIC_STRENGTH and opponent_rating:
         if opponent_rating < FULL_STRENGTH_THRESHOLD:
-            # Apply UCI_LimitStrength for ALL opponents below the full-power threshold.
-            # < 1800: movetime mode (extra cap, see play_game use_weak_mode branch)
-            # 1800–2799: native clocks — quality capped by UCI_Elo, no intentional blunders
             target_elo = min(max(opponent_rating + STRENGTH_ADVANTAGE, 1320), 2850)
             sf.update_engine_parameters({
                 "UCI_LimitStrength": True,
                 "UCI_Elo": target_elo,
             })
-            if opponent_rating < LIMIT_STRENGTH_THRESHOLD:
-                logger.info(
-                    f"Opponent {opponent_rating} ELO: UCI_LimitStrength = {target_elo} "
-                    f"(fair play mode, movetime cap)"
-                )
-            else:
-                logger.info(
-                    f"Opponent {opponent_rating} ELO: UCI_LimitStrength = {target_elo} "
-                    f"(intermediate mode, movetime cap)"
-                )
+            logger.info(f"Opponent {opponent_rating} ELO: UCI_LimitStrength = {target_elo}")
         else:
-            # Full power for elite opponents — no handicaps whatsoever
-            logger.info(f"Opponent {opponent_rating} ELO: Full strength engine (MAXIMUM POWER)")
-    
+            logger.info(f"Opponent {opponent_rating} ELO: full strength")
+
     return sf
 
 
@@ -616,7 +602,7 @@ def _extract_cp_from_info(info_line: str) -> Optional[int]:
     work uniformly without special-casing the caller.
 
     Returns:
-        cp value from white's perspective, or None if unavailable.
+        cp value from the side to move, as UCI reports it, or None if unavailable.
     """
     try:
         if ' score cp ' in info_line:
@@ -698,8 +684,7 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
     - movetime: supply move_time_ms for a fixed per-move budget
       (weak opponents / no clock data).
     - native clocks: supply wtime/btime/winc/binc so Stockfish manages its own
-      time. Stockfish\'s internal algorithm accounts for game phase, position
-      complexity, and increment — far superior to any manual formula.
+      time.
 
     The PV is extracted at zero cost from the info line already stored after the
     search, so no second engine call is involved.
@@ -708,10 +693,10 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
         stockfish: Initialized Stockfish instance (position already set)
         game_id: Game ID for logging
         move_time_ms: Fixed time budget in ms (movetime mode)
-        wtime: White\'s remaining clock in ms (native clock mode)
-        btime: Black\'s remaining clock in ms (native clock mode)
-        winc: White\'s increment in ms
-        binc: Black\'s increment in ms
+        wtime: White's remaining clock in ms (native clock mode)
+        btime: Black's remaining clock in ms (native clock mode)
+        winc: White's increment in ms
+        binc: Black's increment in ms
         prediction_depth: Number of PV half-moves to display in log
 
     Returns:
@@ -751,20 +736,18 @@ def get_move_prediction(stockfish: Stockfish, game_id: str,
 
 def calculate_move_time(opponent_rating: int | None,
                         base_time: int = STOCKFISH_TIME) -> int:
-    """Calculate movetime budget based on opponent strength.
+    """Move time for one move against an opponent of this rating.
 
-    Used for ALL opponents with UCI_LimitStrength active (< FULL_STRENGTH_THRESHOLD),
-    and as a fallback when the game has no clock data.
+    Used whenever the strength limit is on (opponents below
+    FULL_STRENGTH_THRESHOLD) and when a game gives no clock to search on.
 
-    IMPORTANT: native clocks (go wtime) cannot be used with UCI_LimitStrength —
-    Stockfish time-manages like a limited human and may hang 30+ seconds on move 1.
+    Limited games are searched with a fixed move time and not on the game
+    clock so that the bot answers quickly: left to manage a 5+3 clock itself,
+    Stockfish spends 20 to 30 seconds on the first move, limit or no limit.
 
-    Strategy:
-    - Below LIMIT_STRENGTH_THRESHOLD (1800): 40 % of base_time (1200ms default)
-      UCI_LimitStrength already handles fairness, minimal time keeps things lively.
-    - Between thresholds (1800–2799): 40–95 % linear scaling
-      More time = plays closer to its capped ELO ceiling.
-    - At or above FULL_STRENGTH_THRESHOLD (2800): 100 % (full power, native clocks)
+    - Below LIMIT_STRENGTH_THRESHOLD: 40 % of base_time.
+    - Between the two thresholds: 40 % rising linearly to 95 %.
+    - At or above FULL_STRENGTH_THRESHOLD, or with DYNAMIC_STRENGTH off: base_time.
 
     Returns:
         Thinking time in milliseconds
@@ -1215,7 +1198,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
     btime_ms: int | None = None  # Black's remaining clock in milliseconds
     winc_ms: int = 0             # White's increment per move in milliseconds
     binc_ms: int = 0             # Black's increment per move in milliseconds
-    last_eval_cp: int | None = None  # Cached eval from last move search (white's perspective)
+    last_eval_cp: int | None = None  # Eval from the bot's last search, so from the bot's side
     last_opponent_draw: bool = False  # Tracks opponent draw flag from previous event (rising-edge detection)
     _claim_victory_timer: threading.Timer | None = None  # Timer for claiming win after opponentGone
     _no_first_move_timer: threading.Timer | None = None  # Abort game if opponent never plays first move
@@ -1414,13 +1397,9 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         logger.info(f"[{game_id}] Calculating move (move {board.fullmove_number})...")
                         stockfish.set_fen_position(board.fen())
 
-                        # Decide search mode:
-                        # - UCI_LimitStrength active (< FULL_STRENGTH_THRESHOLD):
-                        #   MUST use go movetime. Native clocks + UCI_LimitStrength causes
-                        #   Stockfish to time-manage as a limited player would, potentially
-                        #   thinking 30+ seconds on the first move → Lichess abort.
-                        # - Full strength (>= FULL_STRENGTH_THRESHOLD):
-                        #   Native clocks — Stockfish manages time optimally.
+                        # With the strength limit on, search for a fixed move time, so
+                        # that the reply comes quickly. At full strength, and against an
+                        # opponent without a rating, let Stockfish manage the game clock.
                         use_movetime_mode = (
                             DYNAMIC_STRENGTH
                             and opponent_rating is not None

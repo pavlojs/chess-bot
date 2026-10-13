@@ -1550,10 +1550,25 @@ class TestTimeCategoryClassification(unittest.TestCase):
         from bot import determine_time_category
         self.assertIsNone(determine_time_category(0, 0))
 
-    def test_correspondence_returns_none(self):
-        """Very large limits (correspondence) should return None."""
+    def test_speed_boundaries_follow_lichess(self):
+        """Estimated length is the initial time plus 40 increments."""
         from bot import determine_time_category
-        self.assertIsNone(determine_time_category(259200, 0))
+        cases = {
+            (60, 0): "bullet", (120, 1): "bullet", (179, 0): "bullet",
+            (180, 0): "blitz", (180, 2): "blitz", (300, 3): "blitz", (479, 0): "blitz",
+            (480, 0): "rapid", (600, 5): "rapid", (900, 10): "rapid", (1499, 0): "rapid",
+            (1500, 0): "classical", (1800, 0): "classical", (0, 40): "classical",
+        }
+        for (limit, increment), speed in cases.items():
+            self.assertEqual(determine_time_category(limit, increment), speed, f"{limit}+{increment}")
+
+    def test_a_challenge_without_a_clock_has_no_speed(self):
+        """Correspondence and unlimited challenges carry no limit and no increment."""
+        with patch('bot.ACCEPT_CHALLENGES', True), patch('bot.MIN_RATING', 1000), patch('bot.MAX_RATING', 3000):
+            for time_control in ({"type": "correspondence", "daysPerTurn": 3}, {"type": "unlimited"}):
+                challenge = {"id": "c", "challenger": {"rating": 1800}, "variant": {"key": "standard"},
+                             "timeControl": time_control}
+                self.assertFalse(should_accept_challenge(challenge), time_control)
 
 
 if __name__ == '__main__':
