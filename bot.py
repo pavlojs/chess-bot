@@ -17,6 +17,7 @@ from collections import deque
 from datetime import datetime, timedelta
 
 from stockfish import Stockfish, StockfishException
+from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 import requests
 from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout, RequestException
@@ -1616,19 +1617,26 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 # MAIN LOOP
 # ─────────────────────────────────────────────
 
-def challenge_loop(client: berserk.Client, bot_username: str,
-                   active_games: Dict[str, threading.Thread],
-                   active_games_lock: threading.Lock,
-                   challenge_tracker: ChallengeTracker,
-                   retry_event: threading.Event,
-                   pending_challenge: Dict):
+@dataclass
+class BotState:
+    """What the event loop, the challenge loop and the game threads share."""
+    client: berserk.Client
+    username: str
+    tracker: ChallengeTracker
+    # One thread per game being played, keyed by game id.
+    active_games: Dict[str, threading.Thread] = field(default_factory=dict)
+    games_lock: threading.Lock = field(default_factory=threading.Lock)
+    # The outgoing challenge still waiting for an answer: {id, opponent, sent_at}, or empty.
+    pending_challenge: Dict[str, Any] = field(default_factory=dict)
+    # Set to wake the challenge loop before its current wait runs out.
+    retry_event: threading.Event = field(default_factory=threading.Event)
+
+
+def challenge_loop(state: BotState):
     """Background thread that challenges bots whenever the bot is idle.
 
     Uses an event-based wait so the loop reacts immediately when a challenge
     is declined or canceled instead of sleeping through the full interval.
-
-    pending_challenge is a shared dict written here and read by the main event
-    loop: {'id': str, 'opponent': str, 'sent_at': float} or empty {}.
     """
     logger.info("Challenge loop started")
     ACCEPT_TIMEOUT = 90   # seconds to wait for opponent to accept
@@ -1639,10 +1647,13 @@ def challenge_loop(client: berserk.Client, bot_username: str,
     RATE_LIMIT_MAX   = 3600  # maximum backoff: 60 minutes
     rate_limit_backoff = RATE_LIMIT_BASE  # current backoff duration (reset after success)
 
+    pending_challenge = state.pending_challenge
+    retry_event = state.retry_event
+
     while not shutdown_requested:
         try:
-            with active_games_lock:
-                active_count = sum(1 for t in active_games.values() if t.is_alive())
+            with state.games_lock:
+                active_count = sum(1 for t in state.active_games.values() if t.is_alive())
 
             if not ENABLE_AUTO_CHALLENGE or active_count >= MAX_CONCURRENT_GAMES:
                 if active_count >= MAX_CONCURRENT_GAMES:
@@ -1677,7 +1688,7 @@ def challenge_loop(client: berserk.Client, bot_username: str,
             # ── Send a new challenge ─────────────────────────────────────────
             logger.info("Looking for a bot to challenge...")
             try:
-                challenge_id = try_challenge_random_bot(client, bot_username, challenge_tracker)
+                challenge_id = try_challenge_random_bot(state.client, state.username, state.tracker)
             except RateLimitError:
                 logger.warning(
                     f"Rate limited by Lichess API (HTTP 429) — backing off for "
@@ -1757,29 +1768,13 @@ class TimeoutHTTPAdapter(requests.adapters.HTTPAdapter):
 HTTP_TIMEOUT = (10, 30)
 
 
-def main():
-    session = berserk.TokenSession(TOKEN)
-    adapter = TimeoutHTTPAdapter(timeout=HTTP_TIMEOUT)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    client = berserk.Client(session)
+def abort_stale_games(client: berserk.Client):
+    """Abort games left over from a previous run that never got going.
 
-    # Get account with retry logic
-    account = retry_with_backoff(
-        lambda: client.account.get(),
-        max_retries=10,
-        base_delay=2,
-        description="Get account info"
-    )
-    
-    is_bot = account.get("title") == "BOT"
-    if not is_bot:
-        raise RuntimeError("This account is NOT a BOT account")
-
-    bot_username = account.get("username")
-    logger.info("Bot account verified: %s", bot_username)
-
-    # ── Clean up stuck games from previous session ──
+    A game with fewer than two moves can still be aborted at no cost. Anything
+    further along is left alone: Lichess announces every game in progress when
+    the event stream opens, and the game is picked up from there.
+    """
     try:
         ongoing = client.games.get_ongoing()
         if ongoing:
@@ -1795,8 +1790,6 @@ def main():
                     logger.info(f"  [{gid}] Already finished ({status_name}), skipping")
                     continue
 
-                # Check if it's a game vs an offline/gone opponent that has been
-                # idle for a long time — try to abort (< 2 moves) or resign.
                 try:
                     full = client.games.export(gid)
                     moves = full.get("moves", "")
@@ -1815,22 +1808,162 @@ def main():
     except Exception as e:
         logger.warning(f"Could not check ongoing games: {e}")
 
+
+def handle_event(event: Dict[str, Any], state: BotState):
+    """Act on one event from the account's event stream."""
+    client = state.client
+    pending_challenge = state.pending_challenge
+    retry_event = state.retry_event
+    kind = event["type"]
+
+    if kind == "challenge":
+        challenge = event["challenge"]
+        cid = challenge["id"]
+
+        dest_user = challenge.get("destUser", {})
+        dest_username = dest_user.get("name", dest_user.get("id", "")).lower()
+
+        # Only incoming challenges (where we are the destination) need an answer
+        if dest_username == state.username.lower():
+            if should_accept_challenge(challenge):
+                try:
+                    client.bots.accept_challenge(cid)
+                except berserk.exceptions.ResponseError as e:
+                    if "404" in str(e):
+                        logger.debug(f"Challenge {cid} no longer exists")
+                    else:
+                        logger.warning(f"Failed to accept challenge: {e}")
+            else:
+                try:
+                    client.bots.decline_challenge(cid)
+                except berserk.exceptions.ResponseError as e:
+                    if "404" in str(e):
+                        logger.debug(f"Challenge {cid} no longer exists")
+                    else:
+                        logger.warning(f"Failed to decline challenge: {e}")
+        else:
+            # Outgoing challenge — update opponent name in pending tracker
+            logger.debug(f"Outgoing challenge to {dest_username}: {cid}")
+            if pending_challenge.get("id") == cid:
+                pending_challenge["opponent"] = dest_username
+
+    elif kind == "challengeDeclined":
+        challenge = event.get("challenge", {})
+        decliner = challenge.get("destUser", {}).get("name", "Unknown")
+        reason = challenge.get("declineReason", challenge.get("declineReasonKey", "no reason given"))
+        cid = challenge.get("id", "")
+        is_ours = pending_challenge.get("id") == cid
+        logger.info(
+            f"Challenge {'(ours) ' if is_ours else ''}declined by {decliner}"
+            f" — reason: {reason}"
+        )
+        if is_ours:
+            pending_challenge.clear()
+        # Always signal retry so challenge loop can pick the next bot
+        threading.Timer(30, retry_event.set).start()
+
+    elif kind == "challengeCanceled":
+        challenge = event.get("challenge", {})
+        challenger = challenge.get("challenger", {}).get("name", "Unknown")
+        cid = challenge.get("id", "")
+        is_ours = pending_challenge.get("id") == cid
+        logger.info(
+            f"Challenge {'(ours) ' if is_ours else ''}canceled by {challenger}"
+        )
+        if is_ours:
+            pending_challenge.clear()
+            retry_event.set()
+
+    elif kind == "gameStart":
+        game_id = event["game"]["id"]
+
+        # Clean up dead threads before checking limits
+        with state.games_lock:
+            dead = [gid for gid, t in state.active_games.items() if not t.is_alive()]
+            for gid in dead:
+                del state.active_games[gid]
+
+            if len(state.active_games) >= MAX_CONCURRENT_GAMES:
+                logger.warning(f"Concurrent game limit ({MAX_CONCURRENT_GAMES}) reached, cannot start game {game_id}")
+                try:
+                    client.bots.abort_game(game_id)
+                except Exception:
+                    try:
+                        client.bots.resign_game(game_id)
+                    except Exception as e:
+                        logger.debug(f"Could not abort or resign {game_id}: {e}")
+                return
+
+        # Start game thread and register in active_games FIRST —
+        # before clearing pending_challenge or waking the challenge loop.
+        # This ensures the loop's active_count check sees the new game
+        # and won't send a second challenge.
+        thread = threading.Thread(
+            target=play_game,
+            args=(client, game_id, state.username),
+            daemon=True,
+        )
+        with state.games_lock:
+            state.active_games[game_id] = thread
+        thread.start()
+
+        # Now safe to clear pending challenge and wake the loop
+        if pending_challenge:
+            logger.info(
+                f"Challenge accepted — game {game_id} started "
+                f"(challenge id: {pending_challenge.get('id', '?')})"
+            )
+            pending_challenge.clear()
+            retry_event.set()
+
+        logger.info(f"Game {game_id} started")
+
+    elif kind == "gameFinish":
+        game_id = event["game"]["id"]
+        with state.games_lock:
+            if game_id in state.active_games:
+                # Clean up finished game thread
+                state.active_games[game_id].join(timeout=1)
+                del state.active_games[game_id]
+        logger.info(f"Game {game_id} finished — looking for next challenge...")
+        retry_event.set()  # wake challenge loop immediately when game ends
+
+
+def main():
+    session = berserk.TokenSession(TOKEN)
+    adapter = TimeoutHTTPAdapter(timeout=HTTP_TIMEOUT)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    client = berserk.Client(session)
+
+    # Get account with retry logic
+    account = retry_with_backoff(
+        lambda: client.account.get(),
+        max_retries=10,
+        base_delay=2,
+        description="Get account info"
+    )
+
+    is_bot = account.get("title") == "BOT"
+    if not is_bot:
+        raise RuntimeError("This account is NOT a BOT account")
+
+    bot_username = account.get("username")
+    logger.info("Bot account verified: %s", bot_username)
+
+    abort_stale_games(client)
+
+    state = BotState(
+        client=client,
+        username=bot_username,
+        tracker=ChallengeTracker(MAX_CHALLENGES_PER_HOUR),
+    )
     global _active_games, _active_games_lock
-    active_games: Dict[str, threading.Thread] = {}
-    active_games_lock = threading.Lock()
-    _active_games = active_games
-    _active_games_lock = active_games_lock
-    challenge_tracker = ChallengeTracker(MAX_CHALLENGES_PER_HOUR)
-    retry_event = threading.Event()   # signals challenge loop to wake up immediately
-    pending_challenge: Dict = {}      # shared state: {id, opponent, sent_at}
+    _active_games = state.active_games
+    _active_games_lock = state.games_lock
 
     # Start challenge loop in background thread
-    challenge_thread = threading.Thread(
-        target=challenge_loop,
-        args=(client, bot_username, active_games, active_games_lock,
-              challenge_tracker, retry_event, pending_challenge),
-        daemon=True
-    )
+    challenge_thread = threading.Thread(target=challenge_loop, args=(state,), daemon=True)
     challenge_thread.start()
     logger.info("Background challenge thread started")
 
@@ -1855,128 +1988,15 @@ def main():
                     break
 
                 try:
-                    if event["type"] == "challenge":
-                        challenge = event["challenge"]
-                        cid = challenge["id"]
-                        
-                        # Check if this is an incoming challenge (destUser is us)
-                        dest_user = challenge.get("destUser", {})
-
-                        dest_username = dest_user.get("name", dest_user.get("id", "")).lower()
-                        
-                        # Only process incoming challenges (where we are the destination)
-                        if dest_username == bot_username.lower():
-                            if should_accept_challenge(challenge):
-                                try:
-                                    client.bots.accept_challenge(cid)
-                                except berserk.exceptions.ResponseError as e:
-                                    if "404" in str(e):
-                                        logger.debug(f"Challenge {cid} no longer exists")
-                                    else:
-                                        logger.warning(f"Failed to accept challenge: {e}")
-                            else:
-                                try:
-                                    client.bots.decline_challenge(cid)
-                                except berserk.exceptions.ResponseError as e:
-                                    if "404" in str(e):
-                                        logger.debug(f"Challenge {cid} no longer exists")
-                                    else:
-                                        logger.warning(f"Failed to decline challenge: {e}")
-                        else:
-                            # Outgoing challenge — update opponent name in pending tracker
-                            logger.debug(f"Outgoing challenge to {dest_username}: {cid}")
-                            if pending_challenge.get("id") == cid:
-                                pending_challenge["opponent"] = dest_username
-                    
-                    elif event["type"] == "challengeDeclined":
-                        challenge = event.get("challenge", {})
-                        decliner = challenge.get("destUser", {}).get("name", "Unknown")
-                        reason = challenge.get("declineReason", challenge.get("declineReasonKey", "no reason given"))
-                        cid = challenge.get("id", "")
-                        is_ours = pending_challenge.get("id") == cid
-                        logger.info(
-                            f"Challenge {'(ours) ' if is_ours else ''}declined by {decliner}"
-                            f" — reason: {reason}"
-                        )
-                        if is_ours:
-                            pending_challenge.clear()
-                        # Always signal retry so challenge loop can pick the next bot
-                        threading.Timer(30, retry_event.set).start()
-
-                    elif event["type"] == "challengeCanceled":
-                        challenge = event.get("challenge", {})
-                        challenger = challenge.get("challenger", {}).get("name", "Unknown")
-                        cid = challenge.get("id", "")
-                        is_ours = pending_challenge.get("id") == cid
-                        logger.info(
-                            f"Challenge {'(ours) ' if is_ours else ''}canceled by {challenger}"
-                        )
-                        if is_ours:
-                            pending_challenge.clear()
-                            retry_event.set()
-
-                    elif event["type"] == "gameStart":
-                        game_id = event["game"]["id"]
-
-                        # Clean up dead threads before checking limits
-                        with active_games_lock:
-                            dead = [gid for gid, t in active_games.items() if not t.is_alive()]
-                            for gid in dead:
-                                del active_games[gid]
-
-                            if len(active_games) >= MAX_CONCURRENT_GAMES:
-                                logger.warning(f"Concurrent game limit ({MAX_CONCURRENT_GAMES}) reached, cannot start game {game_id}")
-                                try:
-                                    client.bots.abort_game(game_id)
-                                except Exception:
-                                    try:
-                                        client.bots.resign_game(game_id)
-                                    except Exception as e:
-                                        logger.debug(f"Could not abort or resign {game_id}: {e}")
-                                continue
-
-                        # Start game thread and register in active_games FIRST —
-                        # before clearing pending_challenge or waking the challenge loop.
-                        # This ensures the loop's active_count check sees the new game
-                        # and won't send a second challenge.
-                        thread = threading.Thread(
-                            target=play_game,
-                            args=(client, game_id, bot_username),
-                            daemon=True,
-                        )
-                        with active_games_lock:
-                            active_games[game_id] = thread
-                        thread.start()
-
-                        # Now safe to clear pending challenge and wake the loop
-                        if pending_challenge:
-                            logger.info(
-                                f"Challenge accepted — game {game_id} started "
-                                f"(challenge id: {pending_challenge.get('id', '?')})"
-                            )
-                            pending_challenge.clear()
-                            retry_event.set()
-
-                        logger.info(f"Game {game_id} started")
-
-                    elif event["type"] == "gameFinish":
-                        game_id = event["game"]["id"]
-                        with active_games_lock:
-                            if game_id in active_games:
-                                # Clean up finished game thread
-                                active_games[game_id].join(timeout=1)
-                                del active_games[game_id]
-                        logger.info(f"Game {game_id} finished — looking for next challenge...")
-                        retry_event.set()  # wake challenge loop immediately when game ends
-
+                    handle_event(event, state)
                 except Exception as e:
                     logger.error(f"Event processing error: {e}", exc_info=True)
-            
+
             # Stream ended normally — reconnect
             logger.warning("Event stream ended unexpectedly. Reconnecting in 10s...")
             time.sleep(10)
             continue
-            
+
         except Exception as e:
             time.sleep(_event_stream_retry_delay(e))
             continue
