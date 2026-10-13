@@ -75,15 +75,30 @@ jobs:
       - name: Build image
         run: docker build -t chess-bot:ci .
 
+      # Filed as alerts: HIGH and CRITICAL vulnerabilities that a newer package
+      # fixes. Those are the ones an update of the base image can close, and
+      # Dependabot proposes that update.
       - name: Scan image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: chess-bot:ci
           severity: HIGH,CRITICAL
+          ignore-unfixed: true
           format: sarif
           output: trivy-image.sarif
           limit-severities-for-sarif: true
+
+      # For the record, in this job's log only: everything the scanner knows
+      # of in the image, including what Debian has not released a fix for.
+      - name: List vulnerabilities that have no fix yet
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: chess-bot:ci
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: '0'
 
       - name: Upload SARIF
         uses: github/codeql-action/upload-sarif@v4
