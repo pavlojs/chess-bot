@@ -610,6 +610,106 @@ class TestReconnectDuringGames(EventLoopTestCase):
         self.state.client.bots.resign_game.assert_not_called()
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+class TestStallWatchdog(EventLoopTestCase):
+    """The last resort: an event loop that has stopped moving ends the process."""
+
+    def setUp(self):
+        super().setUp()
+        self.exits = []
+
+    def watch(self, monitor, limit):
+        """Run the watchdog until it exits the "process" or the test shuts it down."""
+        return within(5, lambda: bot.watch_event_loop(monitor, limit=limit, interval=0.02, exit_process=self.exits.append))
+
+    def test_monitor_measures_time_since_the_loop_last_moved(self):
+        clock = FakeClock()
+        monitor = bot.StreamMonitor(clock)
+
+        clock.now += 40
+        self.assertEqual(monitor.stalled_for(), 40)
+        self.assertFalse(monitor.alive())
+
+        monitor.progress()          # a reconnect attempt: moving, but nothing heard
+        self.assertEqual(monitor.stalled_for(), 0)
+        self.assertFalse(monitor.alive())
+
+        monitor.line_received()     # a line from Lichess
+        clock.now += 20
+        self.assertEqual(monitor.stalled_for(), 20)
+        self.assertTrue(monitor.alive())
+
+        clock.now += 20
+        self.assertFalse(monitor.alive())
+
+    def test_a_loop_that_stops_moving_ends_the_process_with_a_failure_status(self):
+        clock = FakeClock()
+        monitor = bot.StreamMonitor(clock)
+        clock.now += 301
+
+        finished, _ = self.watch(monitor, limit=300)
+
+        self.assertTrue(finished)
+        self.assertEqual(self.exits, [1])
+
+    def test_a_loop_that_keeps_reconnecting_is_left_alone(self):
+        """Lichess unreachable for most of an hour: the loop is busy, not stuck."""
+        clock = FakeClock()
+        monitor = bot.StreamMonitor(clock)
+        rounds = []
+
+        def pause(seconds):
+            clock.now += 40         # a connection attempt that fails...
+            monitor.progress()      # ...and the loop comes round to try again
+            clock.now += 20
+            rounds.append(seconds)
+            if len(rounds) == 50:
+                bot.shutdown_requested = True
+
+        self.patch("bot._pause", pause)
+        bot.watch_event_loop(monitor, limit=300, interval=15, exit_process=self.exits.append)
+
+        self.assertEqual(len(rounds), 50)
+        self.assertEqual(self.exits, [])
+
+    def test_shutdown_stops_the_watchdog_without_an_exit(self):
+        clock = FakeClock()
+        monitor = bot.StreamMonitor(clock)
+        bot.shutdown_requested = True
+        clock.now += 1000
+
+        finished, _ = self.watch(monitor, limit=300)
+
+        self.assertTrue(finished)
+        self.assertEqual(self.exits, [])
+
+    def test_a_handler_that_never_returns_is_caught(self):
+        """The event loop is alive but stuck inside one event."""
+        stuck = threading.Event()
+        self.addCleanup(stuck.set)
+        self.patch("bot.handle_event", lambda event, state: stuck.wait(30))
+        self.lichess.stream("/api/stream/event", [event_line("gameStart", game={"id": "game0001"}), KEEP_ALIVE, STALL])
+
+        threading.Thread(target=bot.run_event_loop, args=(self.session, self.state, self.lichess.url), daemon=True).start()
+        finished, _ = self.watch(self.state.stream, limit=0.3)
+        bot.shutdown_requested = True
+
+        self.assertTrue(finished)
+        self.assertEqual(self.exits, [1])
+
+    def test_the_limit_is_far_above_any_wait_of_a_healthy_loop(self):
+        connect, read = bot.HTTP_TIMEOUT
+        longest_healthy_gap = max(read, 60)   # a silent read, or the pause after a 429
+        self.assertGreater(bot.STALL_EXIT_AFTER, 3 * longest_healthy_gap)
+
+
 class TestShutdown(unittest.TestCase):
     """Signals sent to a real process whose main thread is blocked, as it is on the event stream."""
 

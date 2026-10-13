@@ -1628,20 +1628,53 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 # MAIN LOOP
 # ─────────────────────────────────────────────
 
+# Seconds the event loop may go without reading a line or trying to reconnect
+# before the process gives up and exits. The loop does one or the other at
+# least once a minute even while Lichess is unreachable, so this much silence
+# means the loop itself is stuck.
+STALL_EXIT_AFTER = 300
+
+
 class StreamMonitor:
-    """Remembers when Lichess last sent a line on the event stream."""
+    """Remembers when Lichess last sent a line and when the event loop last moved."""
 
     def __init__(self, clock=time.monotonic):
         self._clock = clock
         self._last_line: Optional[float] = None
+        self._last_progress = clock()
 
     def line_received(self):
-        self._last_line = self._clock()
+        self._last_line = self._last_progress = self._clock()
         healthcheck.beat()
+
+    def progress(self):
+        """The event loop is running, whether or not Lichess can be reached."""
+        self._last_progress = self._clock()
 
     def alive(self, max_silence: float = 30) -> bool:
         """True while lines keep arriving; Lichess sends one at least every 7 seconds."""
         return self._last_line is not None and self._clock() - self._last_line <= max_silence
+
+    def stalled_for(self) -> float:
+        return self._clock() - self._last_progress
+
+
+def watch_event_loop(monitor: StreamMonitor, limit: float = STALL_EXIT_AFTER,
+                     interval: float = 15, exit_process=os._exit):
+    """End the process when the event loop stops moving, so its supervisor starts a fresh one.
+
+    A lost connection is not a stall: the loop notices it through the read
+    timeout and reconnects by itself. This is for the cases it cannot get out
+    of, a handler that never returns or a read that hangs despite the timeout.
+    """
+    while not shutdown_requested:
+        _pause(interval)
+        stalled = monitor.stalled_for()
+        if stalled > limit and not shutdown_requested:
+            logger.critical(f"The event loop has not moved for {stalled:.0f}s, exiting to be restarted")
+            logging.shutdown()
+            exit_process(1)
+            return
 
 
 def stream_events(session: requests.Session, base_url: str = LICHESS_URL):
@@ -1675,6 +1708,7 @@ def _pause(seconds: float):
 def run_event_loop(session: requests.Session, state: "BotState", base_url: str = LICHESS_URL):
     """Follow the event stream until shutdown, reopening it whenever it ends or fails."""
     while not shutdown_requested:
+        state.stream.progress()
         try:
             logger.info("Connecting to event stream...")
             for event in stream_events(session, base_url):
@@ -2112,6 +2146,8 @@ def main():
     challenge_thread = threading.Thread(target=challenge_loop, args=(state,), daemon=True)
     challenge_thread.start()
     logger.info("Background challenge thread started")
+
+    threading.Thread(target=watch_event_loop, args=(state.stream,), daemon=True).start()
 
     run_event_loop(session, state)
 
