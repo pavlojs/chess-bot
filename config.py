@@ -140,8 +140,13 @@ STRENGTH_ADVANTAGE = int(os.getenv("STRENGTH_ADVANTAGE", "100"))  # e.g. 1500 â†
 # Enable automatic challenging of other bots
 ENABLE_AUTO_CHALLENGE = os.getenv("ENABLE_AUTO_CHALLENGE", "true").lower() in ("true", "1", "yes")
 
-# Maximum number of games to challenge per hour
+# Maximum number of challenges to create per hour
 MAX_CHALLENGES_PER_HOUR = int(os.getenv("MAX_CHALLENGES_PER_HOUR", "5"))
+
+# Maximum number of challenges to create in any 24 hours. Lichess allows an
+# account 200 a day and answers the rest with HTTP 429 until its window ends,
+# so this has to stay below 200.
+MAX_CHALLENGES_PER_DAY = int(os.getenv("MAX_CHALLENGES_PER_DAY", "180"))
 
 # ELO limits for challenging bots
 CHALLENGE_MIN_RATING = int(os.getenv("CHALLENGE_MIN_RATING", "1500"))

@@ -475,44 +475,89 @@ class TestLogging(unittest.TestCase):
 class TestChallengeTracker(unittest.TestCase):
     """Test challenge tracker functionality."""
     
+    def setUp(self):
+        self.now = 10_000.0
+
+    def tracker(self, per_hour=3, per_day=100):
+        from bot import ChallengeTracker
+        return ChallengeTracker(max_per_hour=per_hour, max_per_day=per_day, clock=lambda: self.now)
+
     def test_initial_state(self):
-        """Test that tracker starts with no challenges."""
-        from bot import ChallengeTracker
-        
-        tracker = ChallengeTracker(max_per_hour=3)
+        tracker = self.tracker()
+
         self.assertTrue(tracker.can_challenge())
         self.assertEqual(tracker.get_remaining_challenges(), 3)
-    
-    def test_record_challenge(self):
-        """Test recording challenges."""
-        from bot import ChallengeTracker
-        
-        tracker = ChallengeTracker(max_per_hour=3)
-        
-        tracker.record_challenge()
-        self.assertEqual(tracker.get_remaining_challenges(), 2)
-        
-        tracker.record_challenge()
-        self.assertEqual(tracker.get_remaining_challenges(), 1)
-        
-        tracker.record_challenge()
-        self.assertEqual(tracker.get_remaining_challenges(), 0)
+        self.assertEqual(tracker.seconds_until_free(), 0)
+        self.assertEqual(tracker.counts(), (0, 0))
+
+    def test_hourly_limit(self):
+        tracker = self.tracker(per_hour=3)
+        for expected_left in (2, 1, 0):
+            tracker.record_challenge()
+            self.assertEqual(tracker.get_remaining_challenges(), expected_left)
+            self.now += 60
+
         self.assertFalse(tracker.can_challenge())
-    
-    def test_hourly_reset(self):
-        """Test that challenges older than 1 hour are removed."""
-        from bot import ChallengeTracker
-        
-        tracker = ChallengeTracker(max_per_hour=3)
-        
-        # Manually add old challenge
-        old_time = datetime.now() - timedelta(hours=2)
-        tracker.challenge_times.append(old_time)
-        
-        # Should still have capacity
+        # Three attempts at t, t+60, t+120; now t+180. The first leaves the hour at t+3600.
+        self.assertEqual(tracker.seconds_until_free(), 3600 - 180)
+
+    def test_an_attempt_leaves_the_hour_after_sixty_minutes(self):
+        tracker = self.tracker(per_hour=1)
+        tracker.record_challenge()
+
+        self.now += 3599
+        self.assertFalse(tracker.can_challenge())
+        self.now += 1
         self.assertTrue(tracker.can_challenge())
-        self.assertEqual(tracker.get_remaining_challenges(), 3)
-    
+        self.assertEqual(tracker.counts(), (0, 1))
+
+    def test_daily_limit_holds_when_the_hourly_one_does_not(self):
+        """10 an hour is 240 a day: the daily limit has to stop it at its own number."""
+        tracker = self.tracker(per_hour=10, per_day=180)
+        sent = 0
+        for minute in range(24 * 60):      # one day, minute by minute
+            if tracker.can_challenge():
+                tracker.record_challenge()
+                sent += 1
+            if minute < 24 * 60 - 1:
+                self.now += 60
+
+        # 23h59 after the first attempt: all 180 are still inside the day.
+        self.assertEqual(sent, 180)
+        self.assertFalse(tracker.can_challenge())
+        self.assertEqual(tracker.seconds_until_free(), 60)
+
+    def test_no_window_of_a_day_ever_exceeds_the_daily_limit(self):
+        tracker = self.tracker(per_hour=10, per_day=180)
+        times = []
+        for _ in range(3 * 24 * 60):       # three days
+            if tracker.can_challenge():
+                tracker.record_challenge()
+                times.append(self.now)
+            self.now += 60
+
+        worst = max(sum(1 for t in times if start <= t < start + 86400) for start in times)
+        self.assertLessEqual(worst, 180)
+        self.assertGreater(len(times), 360)    # and it does keep going on later days
+
+    def test_wait_time_is_exact_for_the_daily_limit(self):
+        tracker = self.tracker(per_hour=100, per_day=2)
+        tracker.record_challenge()
+        self.now += 100
+        tracker.record_challenge()
+        self.now += 100
+
+        # Two attempts at t and t+100; now t+200. The first leaves the day at t+86400.
+        self.assertEqual(tracker.seconds_until_free(), 86400 - 200)
+        self.now += 86400 - 200
+        self.assertTrue(tracker.can_challenge())
+
+    def test_a_limit_of_zero_never_allows_a_challenge(self):
+        tracker = self.tracker(per_hour=0)
+
+        self.assertFalse(tracker.can_challenge())
+        self.assertGreater(tracker.seconds_until_free(), 0)
+
     def test_filter_suitable_bots(self):
         """Test filtering bots by rating."""
         from bot import filter_suitable_bots

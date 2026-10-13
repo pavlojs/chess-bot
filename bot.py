@@ -15,7 +15,7 @@ from berserk.exceptions import ResponseError, ApiError
 import time
 import random
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from stockfish import Stockfish, StockfishException
 from dataclasses import dataclass, field
@@ -39,6 +39,7 @@ from config import (
     FULL_STRENGTH_THRESHOLD,
     ENABLE_AUTO_CHALLENGE,
     MAX_CHALLENGES_PER_HOUR,
+    MAX_CHALLENGES_PER_DAY,
     CHALLENGE_MIN_RATING,
     CHALLENGE_MAX_RATING,
     CHALLENGE_TIME_CONTROLS,
@@ -84,37 +85,64 @@ SHUTDOWN_TIMEOUT = 15
 # ─────────────────────────────────────────────
 
 class ChallengeTracker:
-    """Track challenges sent to enforce rate limits."""
-    
-    def __init__(self, max_per_hour: int = MAX_CHALLENGES_PER_HOUR):
+    """Counts the challenges the bot creates, against an hourly and a daily limit.
+
+    Lichess counts every request to create a challenge, including the ones it
+    then refuses, so every attempt is recorded here and not only the ones that
+    produced a challenge.
+    """
+
+    HOUR = 3600
+    DAY = 86400
+
+    def __init__(self, max_per_hour: int = MAX_CHALLENGES_PER_HOUR,
+                 max_per_day: int = MAX_CHALLENGES_PER_DAY, clock=time.monotonic):
         self.max_per_hour = max_per_hour
-        self.challenge_times: deque = deque()
+        self.max_per_day = max_per_day
+        self._clock = clock
+        self._attempts: deque = deque()  # times of the attempts of the last day, oldest first
         self.lock = threading.Lock()
-    
-    def can_challenge(self) -> bool:
-        """Check if we can send another challenge within the hourly limit."""
-        with self.lock:
-            now = datetime.now()
-            # Remove challenges older than 1 hour
-            while self.challenge_times and self.challenge_times[0] < now - timedelta(hours=1):
-                self.challenge_times.popleft()
-            
-            return len(self.challenge_times) < self.max_per_hour
-    
+
+    def _recent(self, now: float) -> List[float]:
+        """Forget attempts older than a day and return those of the last hour."""
+        while self._attempts and self._attempts[0] <= now - self.DAY:
+            self._attempts.popleft()
+        return [t for t in self._attempts if t > now - self.HOUR]
+
     def record_challenge(self):
-        """Record a new challenge."""
+        """Record an attempt to create a challenge, whatever came of it."""
         with self.lock:
-            self.challenge_times.append(datetime.now())
-    
+            self._attempts.append(self._clock())
+
+    def can_challenge(self) -> bool:
+        return self.get_remaining_challenges() > 0
+
     def get_remaining_challenges(self) -> int:
-        """Get number of challenges remaining in current hour."""
+        """Challenges that may still be created right now, under both limits."""
         with self.lock:
-            now = datetime.now()
-            # Remove old challenges
-            while self.challenge_times and self.challenge_times[0] < now - timedelta(hours=1):
-                self.challenge_times.popleft()
-            
-            return max(0, self.max_per_hour - len(self.challenge_times))
+            last_hour = self._recent(self._clock())
+            return max(0, min(self.max_per_hour - len(last_hour), self.max_per_day - len(self._attempts)))
+
+    def counts(self) -> tuple[int, int]:
+        """Attempts in the last hour and in the last 24 hours."""
+        with self.lock:
+            last_hour = self._recent(self._clock())
+            return len(last_hour), len(self._attempts)
+
+    def seconds_until_free(self) -> float:
+        """Seconds until another challenge may be created; 0 when one may be created now."""
+        with self.lock:
+            now = self._clock()
+            last_hour = self._recent(now)
+            wait = 0.0
+            if self.max_per_hour <= 0 or self.max_per_day <= 0:
+                return float(self.DAY)
+            if len(last_hour) >= self.max_per_hour:
+                # The attempt whose expiry brings the hour back under the limit.
+                wait = max(wait, last_hour[len(last_hour) - self.max_per_hour] + self.HOUR - now)
+            if len(self._attempts) >= self.max_per_day:
+                wait = max(wait, self._attempts[len(self._attempts) - self.max_per_day] + self.DAY - now)
+            return wait
 
 
 # ─────────────────────────────────────────────
@@ -122,8 +150,12 @@ class ChallengeTracker:
 # ─────────────────────────────────────────────
 
 class RateLimitError(Exception):
-    """Raised when the Lichess API returns HTTP 429 Too Many Requests."""
-    pass
+    """Lichess refused a request with HTTP 429 Too Many Requests."""
+
+    def __init__(self, message: str, retry_after: Optional[int] = None):
+        super().__init__(message)
+        # Seconds until the limit is lifted, when the answer says so.
+        self.retry_after = retry_after
 
 
 # Gateway answers that mean "Lichess is briefly unavailable": worth a retry.
@@ -140,6 +172,21 @@ def _http_status(exc: BaseException) -> Optional[int]:
     """
     if isinstance(exc, ResponseError):
         return exc.status_code
+    return None
+
+
+def _retry_after(exc: BaseException) -> Optional[int]:
+    """Seconds Lichess asks to wait, from a 429 answer that names the limit it applied.
+
+    The limit on games between bots answers
+    ``{"error": ..., "ratelimit": {"key": "bot.vsBot.day", "seconds": N}}``.
+    The general limiter only says "Too many requests", and then this is None.
+    """
+    cause = getattr(exc, "cause", None)
+    if isinstance(cause, dict) and isinstance(cause.get("ratelimit"), dict):
+        seconds = cause["ratelimit"].get("seconds")
+        if isinstance(seconds, int) and seconds > 0:
+            return seconds
     return None
 
 
@@ -893,7 +940,7 @@ def challenge_bot(client: berserk.Client, opponent_username: str,
         logger.warning(f"Failed to challenge {opponent_username}: {e}")
         # Propagate rate-limit errors so callers can apply backoff
         if _http_status(e) == 429:
-            raise RateLimitError(str(e))
+            raise RateLimitError(str(e), _retry_after(e)) from e
         return None
     except Exception as e:
         logger.error(f"Error challenging {opponent_username}: {e}")
@@ -901,18 +948,21 @@ def challenge_bot(client: berserk.Client, opponent_username: str,
 
 
 def try_challenge_random_bot(client: berserk.Client, bot_username: str,
-                             tracker: ChallengeTracker) -> Optional[str]:
-    """Attempt to challenge a random suitable bot.
+                             tracker: ChallengeTracker) -> Optional[tuple[str, str]]:
+    """Challenge one random suitable bot.
 
     Returns:
-        Challenge ID if a challenge was sent, None otherwise
+        (challenge id, opponent name) if a challenge was created, None otherwise
     """
     if not ENABLE_AUTO_CHALLENGE:
         return None
 
     if not tracker.can_challenge():
-        remaining = tracker.get_remaining_challenges()
-        logger.info(f"Challenge rate limit reached — {remaining} challenges left this hour")
+        last_hour, last_day = tracker.counts()
+        logger.info(
+            f"Challenge limit reached — {last_hour}/{tracker.max_per_hour} this hour, "
+            f"{last_day}/{tracker.max_per_day} in 24 hours"
+        )
         return None
 
     logger.debug("Fetching online bots...")
@@ -938,6 +988,8 @@ def try_challenge_random_bot(client: berserk.Client, bot_username: str,
     target_bot = random.choice(suitable_bots)
     time_control = random.choice(CHALLENGE_TIME_CONTROLS)
 
+    # Counted before the outcome is known: Lichess counts the request too.
+    tracker.record_challenge()
     challenge_id = challenge_bot(
         client,
         target_bot["username"],
@@ -945,10 +997,7 @@ def try_challenge_random_bot(client: berserk.Client, bot_username: str,
         color="random"
     )
 
-    if challenge_id:
-        tracker.record_challenge()
-
-    return challenge_id
+    return (challenge_id, target_bot["username"]) if challenge_id else None
 
 
 # ─────────────────────────────────────────────
@@ -1837,27 +1886,45 @@ def challenge_loop(state: BotState):
                     retry_event.wait(timeout=RETRY_DELAY)
                     retry_event.clear()
 
+            # ── The bot's own limits ─────────────────────────────────────────
+            limit_wait = state.tracker.seconds_until_free()
+            if limit_wait > 0:
+                last_hour, last_day = state.tracker.counts()
+                logger.info(
+                    f"Challenge limit reached ({last_hour}/{state.tracker.max_per_hour} this hour, "
+                    f"{last_day}/{state.tracker.max_per_day} in 24 hours) — "
+                    f"next challenge in {limit_wait / 60:.0f} min"
+                )
+                retry_event.clear()
+                retry_event.wait(timeout=limit_wait)
+                retry_event.clear()
+                continue
+
             # ── Send a new challenge ─────────────────────────────────────────
             logger.info("Looking for a bot to challenge...")
             try:
-                challenge_id = try_challenge_random_bot(state.client, state.username, state.tracker)
-            except RateLimitError:
+                challenge = try_challenge_random_bot(state.client, state.username, state.tracker)
+            except RateLimitError as e:
+                if e.retry_after:
+                    # Lichess said when the limit ends; asking sooner is pointless.
+                    wait = e.retry_after + 60
+                else:
+                    wait = rate_limit_backoff
+                    rate_limit_backoff = min(rate_limit_backoff * 2, RATE_LIMIT_MAX)
                 logger.warning(
                     f"Rate limited by Lichess API (HTTP 429) — backing off for "
-                    f"{rate_limit_backoff // 60}m {rate_limit_backoff % 60}s before next attempt"
+                    f"{wait // 60}m {wait % 60}s before next attempt"
                 )
                 retry_event.clear()
-                retry_event.wait(timeout=rate_limit_backoff)
+                retry_event.wait(timeout=wait)
                 retry_event.clear()
-                rate_limit_backoff = min(rate_limit_backoff * 2, RATE_LIMIT_MAX)
                 continue
 
             # Successful challenge attempt — reset backoff
             rate_limit_backoff = RATE_LIMIT_BASE
 
-            if challenge_id:
-                pending_challenge["id"] = challenge_id
-                pending_challenge["opponent"] = "unknown"
+            if challenge:
+                pending_challenge["id"], pending_challenge["opponent"] = challenge
                 pending_challenge["sent_at"] = time.monotonic()
                 # Wait up to ACCEPT_TIMEOUT; fires early on decline/cancel
                 retry_event.clear()
@@ -2137,7 +2204,7 @@ def main():
     state = BotState(
         client=client,
         username=bot_username,
-        tracker=ChallengeTracker(MAX_CHALLENGES_PER_HOUR),
+        tracker=ChallengeTracker(MAX_CHALLENGES_PER_HOUR, MAX_CHALLENGES_PER_DAY),
     )
     global _running_state
     _running_state = state

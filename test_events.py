@@ -50,6 +50,11 @@ class EventTestCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.addCleanup(self.games.finish_all)
 
+        # The heartbeat file belongs to a running bot, not to a test run.
+        beat = patch("healthcheck.beat")
+        beat.start()
+        self.addCleanup(beat.stop)
+
         self.client = MagicMock()
         self.state = bot.BotState(
             client=self.client,
@@ -172,13 +177,15 @@ def incoming(challenge_id, rating=1800, limit=300, increment=0, variant="standar
     }
 
 
-def http_error(status):
+def http_error(status, payload=None):
+    """The error berserk raises for an HTTP answer with this status and JSON body."""
+    import json
     import requests
     import berserk
     response = requests.Response()
     response.status_code = status
     response.reason = "error"
-    response._content = b'{"error":"x"}'
+    response._content = json.dumps(payload if payload is not None else {"error": "x"}).encode()
     return berserk.exceptions.ResponseError(response)
 
 
@@ -308,6 +315,238 @@ class TestOutgoingChallenge(EventTestCase):
         bot.cancel_pending_challenge(self.state, "test")
 
         self.client.challenges.cancel.assert_not_called()
+
+
+class StoppingEvent:
+    """Stands in for the challenge loop's wake-up event: records every wait and ends the loop after a set number."""
+
+    def __init__(self, waits):
+        self.timeouts = []
+        self._waits = waits
+
+    def wait(self, timeout=None):
+        self.timeouts.append(timeout)
+        if len(self.timeouts) >= self._waits:
+            bot.shutdown_requested = True
+        return False
+
+    def set(self):
+        pass
+
+    def clear(self):
+        pass
+
+
+def online_bot(name, **ratings):
+    return {"username": name, "perfs": {speed: {"rating": rating} for speed, rating in ratings.items()}}
+
+
+class ChallengeLoopTestCase(EventTestCase):
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, bot, "shutdown_requested", False)
+        for name, value in {
+            "bot.ENABLE_AUTO_CHALLENGE": True,
+            "bot.MAX_CONCURRENT_GAMES": 2,
+            "bot.CHALLENGE_CHECK_INTERVAL": 60,
+            "bot.CHALLENGE_MIN_RATING": 1500,
+            "bot.CHALLENGE_MAX_RATING": 2900,
+            "bot.CHALLENGE_TIME_CONTROLS": [{"limit": 300, "increment": 3}],
+        }.items():
+            patcher = patch(name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        self.online = [online_bot("OtherBot", blitz=2000)]
+        self.client.bots.get_online_bots.side_effect = lambda limit=None: iter(self.online)
+        self.client.challenges.create.return_value = {"id": "chal0001"}
+        self.state.stream.line_received()      # Lichess is being heard from
+
+    def run_loop(self, waits):
+        """Run the challenge loop until it has waited ``waits`` times; return the waits it asked for."""
+        self.state.retry_event = StoppingEvent(waits)
+        bot.challenge_loop(self.state)
+        return self.state.retry_event.timeouts
+
+
+class TestChallengeLoop(ChallengeLoopTestCase):
+    def test_an_idle_bot_challenges_a_suitable_bot_and_waits_for_the_answer(self):
+        waits = self.run_loop(1)
+
+        self.client.challenges.create.assert_called_once_with(
+            "OtherBot", rated=True, clock_limit=300, clock_increment=3, color="random", variant="standard",
+        )
+        self.assertEqual(waits, [90])
+        self.assertEqual(self.state.pending_challenge["id"], "chal0001")
+        self.assertEqual(self.state.pending_challenge["opponent"], "OtherBot")
+        self.assertEqual(self.state.tracker.counts(), (1, 1))
+
+    def test_nothing_is_sent_once_the_hourly_limit_is_used_up(self):
+        self.state.tracker = bot.ChallengeTracker(max_per_hour=2, max_per_day=100)
+        self.state.tracker.record_challenge()
+        self.state.tracker.record_challenge()
+
+        waits = self.run_loop(1)
+
+        self.assertAlmostEqual(waits[0], 3600, delta=5)
+        self.client.bots.get_online_bots.assert_not_called()
+        self.client.challenges.create.assert_not_called()
+
+    def test_nothing_is_sent_once_the_daily_limit_is_used_up(self):
+        self.state.tracker = bot.ChallengeTracker(max_per_hour=100, max_per_day=3)
+        for _ in range(3):
+            self.state.tracker.record_challenge()
+
+        waits = self.run_loop(1)
+
+        self.assertAlmostEqual(waits[0], 86400, delta=5)
+        self.client.challenges.create.assert_not_called()
+
+    def test_a_refused_attempt_still_counts_against_the_limits(self):
+        """Lichess counts the request whether or not a challenge comes of it."""
+        self.client.challenges.create.side_effect = http_error(400, {"error": "OtherBot does not accept challenges"})
+
+        waits = self.run_loop(1)
+
+        self.assertEqual(waits, [60])
+        self.assertEqual(self.state.pending_challenge, {})
+        self.assertEqual(self.state.tracker.counts(), (1, 1))
+
+    def test_a_429_backs_off_longer_each_time(self):
+        self.client.challenges.create.side_effect = http_error(429, {"error": "Too many requests. Try again later."})
+
+        waits = self.run_loop(4)
+
+        self.assertEqual(waits, [300, 600, 1200, 2400])
+        self.assertEqual(self.client.challenges.create.call_count, 4)
+
+    def test_backoff_stops_growing_at_an_hour(self):
+        self.client.challenges.create.side_effect = http_error(429, {"error": "Too many requests. Try again later."})
+        self.state.tracker = bot.ChallengeTracker(max_per_hour=100, max_per_day=100)
+
+        waits = self.run_loop(7)
+
+        self.assertEqual(waits, [300, 600, 1200, 2400, 3600, 3600, 3600])
+
+    def test_a_429_that_names_its_end_is_waited_out_exactly(self):
+        """The limit on games between bots says how many seconds are left."""
+        self.client.challenges.create.side_effect = http_error(429, {
+            "error": "You played 100 games against other bots today, please wait before challenging another bot.",
+            "ratelimit": {"key": "bot.vsBot.day", "seconds": 5000},
+        })
+
+        waits = self.run_loop(2)
+
+        self.assertEqual(waits, [5060, 5060])
+
+    def test_backoff_starts_over_after_a_challenge_that_worked(self):
+        self.state.retry_event = StoppingEvent(4)
+        original_wait = self.state.retry_event.wait
+
+        def wait_and_decline(timeout=None):
+            # the challenge that worked is declined, so the loop goes on to the next
+            self.state.pending_challenge.clear()
+            return original_wait(timeout)
+
+        self.state.retry_event.wait = wait_and_decline
+        self.client.challenges.create.side_effect = [
+            http_error(429), http_error(429), {"id": "chal0001"}, http_error(429),
+        ]
+        bot.challenge_loop(self.state)
+
+        self.assertEqual(self.state.retry_event.timeouts, [300, 600, 90, 300])
+
+    def test_nothing_is_sent_while_every_slot_is_playing(self):
+        self.start_game("game0001")
+        self.start_game("game0002")
+
+        waits = self.run_loop(2)
+
+        self.assertEqual(waits, [60, 60])
+        self.client.challenges.create.assert_not_called()
+
+    def test_a_slot_held_by_an_accepted_challenge_counts_as_taken(self):
+        self.start_game("game0001")
+        self.send("challenge", challenge=incoming("chal0009"))
+
+        waits = self.run_loop(1)
+
+        self.assertEqual(waits, [60])
+        self.client.challenges.create.assert_not_called()
+
+    def test_an_open_challenge_is_given_its_time(self):
+        self.state.pending_challenge.update(id="mine0001", opponent="SlowBot", sent_at=bot.time.monotonic() - 10)
+
+        waits = self.run_loop(1)
+
+        self.assertAlmostEqual(waits[0], 80, delta=2)
+        self.client.challenges.create.assert_not_called()
+        self.client.challenges.cancel.assert_not_called()
+
+    def test_an_unanswered_challenge_is_withdrawn_before_the_next_one(self):
+        self.state.pending_challenge.update(id="mine0001", opponent="SlowBot", sent_at=bot.time.monotonic() - 100)
+
+        waits = self.run_loop(2)
+
+        self.client.challenges.cancel.assert_called_once_with("mine0001")
+        self.assertEqual(waits, [30, 90])
+        self.assertEqual(self.state.pending_challenge["id"], "chal0001")
+
+    def test_no_bot_in_the_rating_range_means_no_challenge(self):
+        self.online = [online_bot("WeakBot", blitz=900), online_bot("Axiom_BOT", blitz=2000)]
+
+        waits = self.run_loop(1)
+
+        self.assertEqual(waits, [60])
+        self.client.challenges.create.assert_not_called()
+        self.assertEqual(self.state.tracker.counts(), (0, 0))
+
+    def test_switching_auto_challenge_off_sends_nothing(self):
+        with patch("bot.ENABLE_AUTO_CHALLENGE", False):
+            waits = self.run_loop(2)
+
+        self.assertEqual(waits, [60, 60])
+        self.client.bots.get_online_bots.assert_not_called()
+
+    def test_an_unexpected_error_does_not_end_the_loop(self):
+        calls = []
+
+        def boom(limit=None):
+            calls.append(limit)
+            if len(calls) == 1:
+                raise RuntimeError("bug")
+            return iter(self.online)
+
+        self.client.bots.get_online_bots.side_effect = boom
+        with patch("bot.time.sleep"):
+            waits = self.run_loop(2)
+
+        self.assertEqual(self.client.challenges.create.call_count, 1)
+        self.assertEqual(waits[-1], 90)
+
+
+class TestRetryAfter(unittest.TestCase):
+    def test_seconds_are_read_from_a_named_limit(self):
+        exc = http_error(429, {"error": "x", "ratelimit": {"key": "bot.vsBot.day", "seconds": 1234}})
+        self.assertEqual(bot._retry_after(exc), 1234)
+
+    def test_the_general_limiter_names_no_time(self):
+        self.assertIsNone(bot._retry_after(http_error(429, {"error": "Too many requests. Try again later."})))
+
+    def test_odd_answers_name_no_time(self):
+        self.assertIsNone(bot._retry_after(http_error(429, {"error": "x", "ratelimit": {"seconds": 0}})))
+        self.assertIsNone(bot._retry_after(http_error(429, {"error": "x", "ratelimit": "soon"})))
+        self.assertIsNone(bot._retry_after(http_error(429, ["not", "an", "object"])))
+        self.assertIsNone(bot._retry_after(ValueError("not an http answer")))
+
+    def test_challenge_bot_passes_the_time_on(self):
+        client = MagicMock()
+        client.challenges.create.side_effect = http_error(429, {"error": "x", "ratelimit": {"key": "bot.vsBot.day", "seconds": 77}})
+
+        with self.assertRaises(bot.RateLimitError) as caught:
+            bot.challenge_bot(client, "OtherBot", {"limit": 300, "increment": 0})
+
+        self.assertEqual(caught.exception.retry_after, 77)
 
 
 if __name__ == "__main__":
