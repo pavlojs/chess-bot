@@ -20,6 +20,13 @@ permissions:
   contents: write
   pull-requests: write
 
+# Two workflows often finish within the same second. Without this both runs
+# find every check passed and both try to merge; the loser fails on "merge
+# already in progress". One at a time, the second finds the PR merged and stops.
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
 jobs:
   auto-merge:
     if: >
