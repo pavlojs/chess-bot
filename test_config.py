@@ -170,13 +170,18 @@ class TestEnvironmentOverrides(unittest.TestCase):
         """The table of speeds in .env.example has to agree with how the bot classifies a clock."""
         os.environ.setdefault("TOKEN", "test_token_for_testing")
         from bot import determine_time_category
+        rows = []
         with open(os.path.join(ROOT, ".env.example")) as f:
-            rows = re.findall(r"^#\s+(bullet|blitz|rapid|classical)\s+.*?((?:\d+\+\d+(?:, )?)+)$", f.read(), re.M)
+            for line in f:
+                row = re.match(r"#\s+(bullet|blitz|rapid|classical)\s", line)
+                if row:
+                    rows.append((row.group(1), re.findall(r"(\d+)\+(\d+)", line)))
         self.assertEqual([speed for speed, _ in rows], ["bullet", "blitz", "rapid", "classical"])
-        for speed, examples in rows:
-            for clock in examples.split(", "):
-                minutes, increment = map(int, clock.split("+"))
-                self.assertEqual(determine_time_category(minutes * 60, increment), speed, clock)
+        for speed, clocks in rows:
+            self.assertTrue(clocks, f"no example clock for {speed}")
+            for minutes, increment in clocks:
+                self.assertEqual(determine_time_category(int(minutes) * 60, int(increment)), speed,
+                                 f"{minutes}+{increment}")
 
     def test_a_speed_that_does_not_exist_stops_the_import(self):
         with self.assertRaises(RuntimeError) as caught:
