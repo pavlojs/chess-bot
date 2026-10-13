@@ -24,6 +24,14 @@ services:
       - no-new-privileges:true
     pids_limit: 128
 
+    # What the bot prints is kept by Docker, which sets no limit of its own.
+    # The fuller log file on the volume is rotated by the bot (see .env.example).
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
     # The health check comes with the image: healthy while Lichess has been
     # heard from in the last minute.
 
