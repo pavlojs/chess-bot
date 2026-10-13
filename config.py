@@ -118,6 +118,14 @@ ACCEPT_CHALLENGES = True
 MIN_RATING = int(os.getenv("MIN_RATING", "1320"))
 MAX_RATING = int(os.getenv("MAX_RATING", "2800"))
 
+# Lichess ratings run from 400 to 4000.
+LOWEST_RATING, HIGHEST_RATING = 400, 4000
+if not LOWEST_RATING <= MIN_RATING <= MAX_RATING <= HIGHEST_RATING:
+    raise ValueError(
+        f"MIN_RATING={MIN_RATING} and MAX_RATING={MAX_RATING} do not make a range: "
+        f"they have to satisfy {LOWEST_RATING} <= MIN_RATING <= MAX_RATING <= {HIGHEST_RATING}"
+    )
+
 # Speeds the bot plays, fastest first, and the ones it accepts challenges at
 SPEEDS = ("bullet", "blitz", "rapid", "classical")
 TIME_CONTROL = [
@@ -200,3 +208,4 @@ GAME_WATCHDOG_ABORT_TIMEOUT = int(os.getenv("GAME_WATCHDOG_ABORT_TIMEOUT", "600"
 
 # Maximum number of concurrent games the bot will play simultaneously.
 MAX_CONCURRENT_GAMES = int(os.getenv("MAX_CONCURRENT_GAMES", "2"))
+

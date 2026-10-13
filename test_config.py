@@ -143,6 +143,41 @@ class TestEnvironmentOverrides(unittest.TestCase):
         self.assertEqual((config["MIN_RATING"], config["MAX_RATING"]), (1500, 2400))
         self.assertEqual(config["TIME_CONTROL"], ["blitz", "rapid"])
 
+    def test_the_whole_range_of_lichess_ratings_is_allowed(self):
+        config = load_config(MIN_RATING=400, MAX_RATING=4000)
+
+        self.assertEqual((config["MIN_RATING"], config["MAX_RATING"]), (400, 4000))
+
+    def test_a_single_rating_is_a_range(self):
+        config = load_config(MIN_RATING=2000, MAX_RATING=2000)
+
+        self.assertEqual((config["MIN_RATING"], config["MAX_RATING"]), (2000, 2000))
+
+    def test_a_rating_range_lichess_ratings_cannot_fall_in_stops_the_import(self):
+        for bad in ({"MIN_RATING": 399}, {"MAX_RATING": 4001}, {"MIN_RATING": 2500, "MAX_RATING": 2400}):
+            with self.subTest(**bad):
+                with self.assertRaises(RuntimeError) as caught:
+                    load_config(**bad)
+                self.assertIn("MIN_RATING", str(caught.exception))
+
+    def test_every_speed_and_none_at_all_are_both_allowed(self):
+        self.assertEqual(load_config(TIME_CONTROL="classical")["TIME_CONTROL"], ["classical"])
+        self.assertEqual(load_config(TIME_CONTROL="bullet,blitz,rapid,classical")["TIME_CONTROL"],
+                         ["bullet", "blitz", "rapid", "classical"])
+        self.assertEqual(load_config(TIME_CONTROL="")["TIME_CONTROL"], [])
+
+    def test_the_speeds_in_the_example_file_are_the_ones_the_bot_names(self):
+        """The table of speeds in .env.example has to agree with how the bot classifies a clock."""
+        os.environ.setdefault("TOKEN", "test_token_for_testing")
+        from bot import determine_time_category
+        with open(os.path.join(ROOT, ".env.example")) as f:
+            rows = re.findall(r"^#\s+(bullet|blitz|rapid|classical)\s+.*?((?:\d+\+\d+(?:, )?)+)$", f.read(), re.M)
+        self.assertEqual([speed for speed, _ in rows], ["bullet", "blitz", "rapid", "classical"])
+        for speed, examples in rows:
+            for clock in examples.split(", "):
+                minutes, increment = map(int, clock.split("+"))
+                self.assertEqual(determine_time_category(minutes * 60, increment), speed, clock)
+
     def test_a_speed_that_does_not_exist_stops_the_import(self):
         with self.assertRaises(RuntimeError) as caught:
             load_config(TIME_CONTROL="blitz,hyperbullet")
