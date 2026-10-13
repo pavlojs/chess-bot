@@ -1,8 +1,13 @@
 """
-Stockfish auto-updater - ensures latest version is installed
-Uses the same method as Dockerfile for consistency
+Installs the latest Stockfish release and keeps it current.
+
+Used when the bot runs outside a container. The container image carries an
+engine of its own, pinned and checked when the image is built, and never runs
+this.
 """
 
+import hashlib
+import hmac
 import os
 import sys
 import platform
@@ -12,7 +17,6 @@ import shutil
 import logging
 import json
 from urllib.request import urlopen, Request
-from urllib.parse import urlparse
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -20,10 +24,10 @@ logger = logging.getLogger(__name__)
 INSTALL_PATH = "/usr/local/bin/stockfish"
 GITHUB_API = "https://api.github.com/repos/official-stockfish/Stockfish/releases/latest"
 
-# Releases are only ever fetched from the project's own GitHub download hosts.
-# The URL comes out of an API response, so it is checked before anything is
-# downloaded and made executable.
-ALLOWED_DOWNLOAD_HOSTS = ("github.com", "objects.githubusercontent.com")
+# The only place an engine is ever downloaded from. The address comes out of an
+# API response and what it points at is made executable, so it is checked
+# against this prefix before anything is fetched.
+RELEASE_DOWNLOAD_PREFIX = "https://github.com/official-stockfish/Stockfish/releases/download/"
 
 # Archive extension used by the release assets.
 ARCHIVE_SUFFIX = ".tar.gz"
@@ -133,21 +137,25 @@ def get_latest_release_info() -> dict:
 
 
 def _check_download_url(url: str) -> str:
-    """Reject a download URL that does not point at a GitHub release host."""
-    host = urlparse(url).hostname or ""
-    if host not in ALLOWED_DOWNLOAD_HOSTS:
-        raise RuntimeError(f"Refusing to download Stockfish from unexpected host: {host}")
+    """Reject a download address outside the Stockfish project's own releases."""
+    if not url.startswith(RELEASE_DOWNLOAD_PREFIX):
+        raise RuntimeError(f"Refusing to download Stockfish from an unexpected address: {url}")
     return url
 
 
-def get_download_url(binary_name: str) -> str:
-    """Get download URL for the specified binary from latest release."""
-    release_info = get_latest_release_info()
+def find_release_asset(binary_name: str, release_info: Optional[dict] = None) -> tuple[str, str]:
+    """Download address and SHA-256 of this platform's archive in the latest release."""
+    if release_info is None:
+        release_info = get_latest_release_info()
     archive_name = f"{binary_name}{ARCHIVE_SUFFIX}"
 
     for asset in release_info.get("assets", []):
         if asset["name"] == archive_name:
-            return _check_download_url(asset["browser_download_url"])
+            digest = asset.get("digest") or ""
+            if not digest.startswith("sha256:"):
+                # Without a published checksum there is nothing to hold the download against.
+                raise RuntimeError(f"The release publishes no SHA-256 for {archive_name}; not installing it")
+            return _check_download_url(asset["browser_download_url"]), digest.removeprefix("sha256:")
 
     raise RuntimeError(
         f"Binary {archive_name} not found in latest release. "
@@ -155,10 +163,18 @@ def get_download_url(binary_name: str) -> str:
     )
 
 
-def download_and_install(url: str, binary_name: str) -> None:
-    """Download and install Stockfish."""
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download_and_install(url: str, sha256: str, binary_name: str) -> None:
+    """Download the archive, check it against the published SHA-256, and install the engine."""
     logger.info(f"Downloading Stockfish from {url}")
-    
+
     _check_download_url(url)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -168,6 +184,13 @@ def download_and_install(url: str, binary_name: str) -> None:
         with urlopen(url, timeout=300) as response:
             with open(tar_path, 'wb') as f:
                 shutil.copyfileobj(response, f)
+
+        actual = _sha256(tar_path)
+        if not hmac.compare_digest(actual, sha256.lower()):
+            raise RuntimeError(
+                f"The downloaded archive does not match the published SHA-256 "
+                f"(expected {sha256}, got {actual}); not installing it"
+            )
 
         logger.info("Extracting archive...")
 
@@ -182,7 +205,7 @@ def download_and_install(url: str, binary_name: str) -> None:
         # whose layout has changed between releases, so nothing here assumes a
         # fixed path — only the file name, which is the asset name.
         extracted_binary = None
-        for root, dirs, files in os.walk(tmpdir):
+        for root, _dirs, files in os.walk(tmpdir):
             if binary_name in files:
                 extracted_binary = os.path.join(root, binary_name)
                 break
@@ -192,26 +215,20 @@ def download_and_install(url: str, binary_name: str) -> None:
                 f"Could not find {binary_name} in the extracted archive. "
                 f"The release layout may have changed."
             )
-        
+
         logger.info(f"Installing to {INSTALL_PATH}")
-        
-        # Install
+
         try:
-            # Try to move with sudo if we don't have permissions
             shutil.copy(extracted_binary, INSTALL_PATH)
             os.chmod(INSTALL_PATH, 0o755)
         except PermissionError:
-            # Need sudo
+            # Root-owned and 755: every user can run the engine, only root can replace it.
             logger.info("Requesting sudo privileges for installation...")
             subprocess.run(
-                ["sudo", "cp", extracted_binary, INSTALL_PATH],
+                ["sudo", "install", "-o", "root", "-g", "root", "-m", "755", extracted_binary, INSTALL_PATH],
                 check=True
             )
-            subprocess.run(
-                ["sudo", "chmod", "755", INSTALL_PATH],
-                check=True
-            )
-        
+
         logger.info("Stockfish installed successfully!")
 
 
@@ -239,8 +256,7 @@ def ensure_stockfish_installed(auto_update: bool = True) -> str:
             
             if current_version == "unknown" or current_version != latest_tag:
                 logger.info(f"New version available: {latest_tag}")
-                download_url = get_download_url(binary_name)
-                download_and_install(download_url, binary_name)
+                download_and_install(*find_release_asset(binary_name, release_info), binary_name)
                 logger.info(f"Updated to Stockfish {latest_tag}")
             else:
                 logger.info("Stockfish is up to date")
@@ -249,8 +265,7 @@ def ensure_stockfish_installed(auto_update: bool = True) -> str:
     else:
         # Not installed, install it
         logger.info("Stockfish not found, installing...")
-        download_url = get_download_url(binary_name)
-        download_and_install(download_url, binary_name)
+        download_and_install(*find_release_asset(binary_name), binary_name)
     
     # Verify installation
     if not os.path.isfile(INSTALL_PATH):
@@ -265,17 +280,9 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     try:
         path = ensure_stockfish_installed(auto_update=True)
+        # A short search proves the binary runs on this CPU.
+        subprocess.run([path, "bench", "1"], capture_output=True, text=True, timeout=120, check=True)
         print(f"Stockfish ready at: {path}")
-        
-        # Quick test
-        subprocess.run(
-            [path, "bench", "1"],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        print("Stockfish test successful!")
-        
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

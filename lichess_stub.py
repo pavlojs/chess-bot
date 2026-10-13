@@ -114,9 +114,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(status, payload)
 
     def _json(self, status, payload):
-        body = json.dumps(payload).encode()
+        raw = isinstance(payload, bytes)     # bytes are served as a file, anything else as JSON
+        body = payload if raw else json.dumps(payload).encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "application/octet-stream" if raw else "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

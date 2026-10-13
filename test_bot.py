@@ -640,21 +640,6 @@ class TestStockfishUpdater(unittest.TestCase):
         if version is not None:
             self.assertIsInstance(version, str)
     
-    def test_get_latest_release_info(self):
-        """Test fetching latest release info from GitHub."""
-        from stockfish_updater import get_latest_release_info
-        
-        try:
-            info = get_latest_release_info()
-            
-            # Should have required fields
-            self.assertIn("tag_name", info)
-            self.assertIn("assets", info)
-            self.assertIsInstance(info["assets"], list)
-        except Exception as e:
-            # Network errors are acceptable in tests
-            self.skipTest(f"Network request failed: {e}")
-
     def test_binary_name_is_a_universal_build(self):
         """Stockfish 19+ only ships universal builds; the old per-microarch
         assets (stockfish-ubuntu-x86-64) are the generic SSE2 build and no
@@ -701,62 +686,60 @@ class TestStockfishUpdater(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 stockfish_updater.get_binary_name()
 
-    def test_download_url_matches_gzipped_asset(self):
-        """The asset lookup uses the .tar.gz name the release actually
-        publishes, not the old uncompressed .tar."""
+    DOWNLOADS = "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/"
+
+    def asset(self, name, digest="sha256:" + "ab" * 32, url=None):
+        return {"name": name, "digest": digest, "browser_download_url": url or self.DOWNLOADS + name}
+
+    def test_asset_lookup_returns_the_address_and_checksum_of_this_platforms_archive(self):
         import stockfish_updater
 
-        release = {
-            "tag_name": "sf_19",
-            "assets": [
-                {"name": "stockfish-linux-arm64-universal.tar.gz",
-                 "browser_download_url": "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/arm.tar.gz"},
-                {"name": "stockfish-linux-x86-64-universal.tar.gz",
-                 "browser_download_url": "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/x86.tar.gz"},
-            ],
-        }
-        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
-            url = stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+        release = {"tag_name": "sf_19", "assets": [
+            self.asset("stockfish-linux-arm64-universal.tar.gz", digest="sha256:" + "11" * 32),
+            self.asset("stockfish-linux-x86-64-universal.tar.gz", digest="sha256:" + "22" * 32),
+        ]}
 
-        self.assertTrue(url.endswith("x86.tar.gz"))
+        url, sha256 = stockfish_updater.find_release_asset("stockfish-linux-x86-64-universal", release)
 
-    def test_download_url_reports_available_assets_when_missing(self):
+        self.assertEqual(url, self.DOWNLOADS + "stockfish-linux-x86-64-universal.tar.gz")
+        self.assertEqual(sha256, "22" * 32)
+
+    def test_asset_lookup_reports_available_assets_when_missing(self):
         """A missing asset names what the release does contain, so the failure
         is diagnosable rather than a bare lookup error."""
         import stockfish_updater
 
-        release = {"tag_name": "sf_19", "assets": [{"name": "stockfish-macos-universal.tar.gz",
-                                                    "browser_download_url": "https://github.com/x"}]}
-        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
-            with self.assertRaises(RuntimeError) as ctx:
-                stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+        release = {"tag_name": "sf_19", "assets": [self.asset("stockfish-macos-universal.tar.gz")]}
+        with self.assertRaises(RuntimeError) as ctx:
+            stockfish_updater.find_release_asset("stockfish-linux-x86-64-universal", release)
 
         self.assertIn("stockfish-macos-universal.tar.gz", str(ctx.exception))
 
-    def test_download_url_rejects_unexpected_host(self):
-        """The download URL comes out of an API response and is made
-        executable, so a non-GitHub host is refused."""
+    def test_an_archive_without_a_published_checksum_is_refused(self):
         import stockfish_updater
 
-        release = {
-            "tag_name": "sf_19",
-            "assets": [{"name": "stockfish-linux-x86-64-universal.tar.gz",
-                        "browser_download_url": "https://evil.example.com/payload.tar.gz"}],
-        }
-        with patch.object(stockfish_updater, "get_latest_release_info", return_value=release):
-            with self.assertRaises(RuntimeError) as ctx:
-                stockfish_updater.get_download_url("stockfish-linux-x86-64-universal")
+        for digest in (None, "", "md5:abcdef"):
+            with self.subTest(digest=digest):
+                release = {"assets": [self.asset("stockfish-linux-x86-64-universal.tar.gz", digest=digest)]}
+                with self.assertRaises(RuntimeError) as ctx:
+                    stockfish_updater.find_release_asset("stockfish-linux-x86-64-universal", release)
+                self.assertIn("SHA-256", str(ctx.exception))
 
-        self.assertIn("unexpected host", str(ctx.exception))
-
-    def test_download_url_accepts_github_hosts(self):
-        """Both hosts GitHub serves release assets from are allowed."""
+    def test_a_download_address_outside_the_stockfish_releases_is_refused(self):
+        """The address comes out of an API response and what it points at is run."""
         import stockfish_updater
 
-        for host in ("github.com", "objects.githubusercontent.com"):
-            with self.subTest(host=host):
-                url = f"https://{host}/official-stockfish/x.tar.gz"
-                self.assertEqual(stockfish_updater._check_download_url(url), url)
+        for url in (
+            "https://evil.example.com/payload.tar.gz",
+            "https://github.com/someone-else/Stockfish/releases/download/sf_19/x.tar.gz",
+            "http://github.com/official-stockfish/Stockfish/releases/download/sf_19/x.tar.gz",
+            "https://github.com.evil.example/official-stockfish/Stockfish/releases/download/x.tar.gz",
+        ):
+            with self.subTest(url=url):
+                release = {"assets": [self.asset("stockfish-linux-x86-64-universal.tar.gz", url=url)]}
+                with self.assertRaises(RuntimeError) as ctx:
+                    stockfish_updater.find_release_asset("stockfish-linux-x86-64-universal", release)
+                self.assertIn("unexpected address", str(ctx.exception))
 
     def test_log_build_info_reports_compilation_settings(self):
         """The installed build's code path is logged, so a generic build on a
@@ -780,6 +763,147 @@ class TestStockfishUpdater(unittest.TestCase):
 
         with patch("subprocess.run", side_effect=FileNotFoundError):
             self.assertIsNone(stockfish_updater.log_build_info("/nonexistent/stockfish"))
+
+
+class TestStockfishInstall(unittest.TestCase):
+    """Download, check and install, against a local server standing in for GitHub."""
+
+    BINARY = "stockfish-linux-x86-64-universal"
+
+    def setUp(self):
+        import io
+        import tarfile
+        import tempfile
+        from lichess_stub import StubLichess
+
+        self.server = StubLichess()
+        self.addCleanup(self.server.close)
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.directory, ignore_errors=True))
+        self.target = os.path.join(self.directory, "installed-stockfish")
+
+        # An archive laid out like a release: the binary nested in a directory.
+        self.engine = b"#!/bin/sh\necho engine\n"
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            info = tarfile.TarInfo(f"stockfish/{self.BINARY}")
+            info.size = len(self.engine)
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(self.engine))
+        self.archive = buffer.getvalue()
+        self.sha256 = __import__("hashlib").sha256(self.archive).hexdigest()
+
+        self.server.reply("GET", f"/download/{self.BINARY}.tar.gz", 200, self.archive)
+        self.url = f"{self.server.url}/download/{self.BINARY}.tar.gz"
+        for target, value in {
+            "stockfish_updater.RELEASE_DOWNLOAD_PREFIX": f"{self.server.url}/download/",
+            "stockfish_updater.INSTALL_PATH": self.target,
+            "stockfish_updater.GITHUB_API": f"{self.server.url}/releases/latest",
+        }.items():
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_matching_archive_is_installed_and_executable(self):
+        import stockfish_updater
+
+        stockfish_updater.download_and_install(self.url, self.sha256, self.BINARY)
+
+        with open(self.target, "rb") as f:
+            self.assertEqual(f.read(), self.engine)
+        self.assertEqual(os.stat(self.target).st_mode & 0o777, 0o755)
+
+    def test_an_archive_that_differs_from_the_published_checksum_is_not_installed(self):
+        import stockfish_updater
+
+        with self.assertRaises(RuntimeError) as ctx:
+            stockfish_updater.download_and_install(self.url, "00" * 32, self.BINARY)
+
+        self.assertIn("does not match", str(ctx.exception))
+        self.assertFalse(os.path.exists(self.target))
+
+    def test_the_checksum_is_compared_without_regard_to_case(self):
+        import stockfish_updater
+
+        stockfish_updater.download_and_install(self.url, self.sha256.upper(), self.BINARY)
+
+        self.assertTrue(os.path.exists(self.target))
+
+    def test_an_archive_without_the_expected_binary_is_not_installed(self):
+        import stockfish_updater
+
+        with self.assertRaises(RuntimeError) as ctx:
+            stockfish_updater.download_and_install(self.url, self.sha256, "stockfish-linux-arm64-universal")
+
+        self.assertIn("Could not find", str(ctx.exception))
+        self.assertFalse(os.path.exists(self.target))
+
+    def test_nothing_is_fetched_from_an_address_outside_the_releases(self):
+        import stockfish_updater
+
+        with self.assertRaises(RuntimeError):
+            stockfish_updater.download_and_install(f"{self.server.url}/elsewhere/x.tar.gz", self.sha256, self.BINARY)
+
+        self.assertEqual(self.server.requests, [])
+
+    def test_a_missing_engine_is_installed_from_the_latest_release(self):
+        import stockfish_updater
+
+        self.server.reply("GET", "/releases/latest", 200, {"tag_name": "sf_19", "assets": [
+            {"name": f"{self.BINARY}.tar.gz", "digest": f"sha256:{self.sha256}", "browser_download_url": self.url},
+        ]})
+        with patch("stockfish_updater.get_binary_name", return_value=self.BINARY), \
+             patch("stockfish_updater.log_build_info"):
+            path = stockfish_updater.ensure_stockfish_installed(auto_update=True)
+
+        self.assertEqual(path, self.target)
+        self.assertTrue(os.access(self.target, os.X_OK))
+
+    def test_an_engine_that_is_present_is_left_alone_without_auto_update(self):
+        import stockfish_updater
+
+        with open(self.target, "w") as f:
+            f.write("#!/bin/sh\necho 'Stockfish 18 by the Stockfish developers'\n")
+        os.chmod(self.target, 0o755)
+
+        with patch("stockfish_updater.get_binary_name", return_value=self.BINARY), \
+             patch("stockfish_updater.log_build_info"):
+            path = stockfish_updater.ensure_stockfish_installed(auto_update=False)
+
+        self.assertEqual(path, self.target)
+        self.assertEqual(self.server.requests, [])
+
+    def test_an_older_engine_is_replaced_and_a_current_one_is_not(self):
+        import stockfish_updater
+
+        release = {"assets": [{"name": f"{self.BINARY}.tar.gz", "digest": f"sha256:{self.sha256}", "browser_download_url": self.url}]}
+        for installed, latest, replaced in (("18", "sf_19", True), ("19", "sf_19", False)):
+            with self.subTest(installed=installed, latest=latest):
+                with open(self.target, "w") as f:
+                    f.write(f"#!/bin/sh\necho 'Stockfish {installed} by the Stockfish developers'\n")
+                os.chmod(self.target, 0o755)
+                self.server.reply("GET", "/releases/latest", 200, {"tag_name": latest, **release})
+
+                with patch("stockfish_updater.get_binary_name", return_value=self.BINARY), \
+                     patch("stockfish_updater.log_build_info"):
+                    stockfish_updater.ensure_stockfish_installed(auto_update=True)
+
+                with open(self.target, "rb") as f:
+                    self.assertEqual(f.read() == self.engine, replaced)
+
+    def test_a_failed_update_check_keeps_the_installed_engine(self):
+        import stockfish_updater
+
+        with open(self.target, "w") as f:
+            f.write("#!/bin/sh\necho 'Stockfish 18 by the Stockfish developers'\n")
+        os.chmod(self.target, 0o755)
+        self.server.reply("GET", "/releases/latest", 503, {"message": "unavailable"})
+
+        with patch("stockfish_updater.get_binary_name", return_value=self.BINARY), \
+             patch("stockfish_updater.log_build_info"):
+            path = stockfish_updater.ensure_stockfish_installed(auto_update=True)
+
+        self.assertEqual(path, self.target)
 
 
 class TestParseTimeToMilliseconds(unittest.TestCase):
