@@ -149,6 +149,11 @@ class TestEnvironmentOverrides(unittest.TestCase):
 
         self.assertIn("hyperbullet", str(caught.exception))
 
+    def test_the_engine_is_not_installed_behind_the_users_back(self):
+        """The self-updater downloads a binary and may ask for sudo: only when asked for."""
+        self.assertIs(load_config()["AUTO_UPDATE_STOCKFISH"], False)
+        self.assertIs(load_config(AUTO_UPDATE_STOCKFISH="true")["AUTO_UPDATE_STOCKFISH"], True)
+
     def test_a_missing_token_stops_the_import(self):
         with self.assertRaises(RuntimeError) as caught:
             load_config(TOKEN="")

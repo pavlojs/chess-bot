@@ -14,8 +14,10 @@ if not TOKEN:
 # Configure logging for this module
 logger = logging.getLogger(__name__)
 
-# Auto-install/update Stockfish if AUTO_UPDATE_STOCKFISH is enabled (default: True)
-AUTO_UPDATE_STOCKFISH = os.getenv("AUTO_UPDATE_STOCKFISH", "true").lower() in ("true", "1", "yes")
+# Install Stockfish on startup, and replace it when a newer release appears.
+# Off by default: it downloads a binary into /usr/local/bin and may ask for sudo,
+# which is for the person running the bot to decide.
+AUTO_UPDATE_STOCKFISH = os.getenv("AUTO_UPDATE_STOCKFISH", "false").lower() in ("true", "1", "yes")
 
 def find_stockfish_path():
     """Find or install Stockfish binary."""
@@ -25,7 +27,7 @@ def find_stockfish_path():
         logger.info(f"Using Stockfish from STOCKFISH_PATH: {env_path}")
         return env_path
     
-    # If auto-update is enabled, ensure latest version is installed
+    # If auto-update is enabled, install the latest release or update to it
     if AUTO_UPDATE_STOCKFISH:
         try:
             from stockfish_updater import ensure_stockfish_installed
@@ -55,10 +57,10 @@ def find_stockfish_path():
             return path
     
     raise FileNotFoundError(
-        "Stockfish not found. Please install it:\n"
-        "  Run: ./scripts/install_stockfish.sh\n"
-        "  Or download from: https://github.com/official-stockfish/Stockfish/releases\n"
-        "  Or set STOCKFISH_PATH environment variable"
+        "Stockfish not found. Install it in one of these ways:\n"
+        "  run ./scripts/install_stockfish.sh\n"
+        "  set AUTO_UPDATE_STOCKFISH=true to have the bot install it on startup\n"
+        "  set STOCKFISH_PATH to a binary from https://github.com/official-stockfish/Stockfish/releases"
     )
 
 STOCKFISH_PATH = find_stockfish_path()
