@@ -110,9 +110,25 @@ PREDICTION_RECOVER_THRESHOLD = int(os.getenv("PREDICTION_RECOVER_THRESHOLD", "40
 PREDICTION_RECOVER_ELO_BOOST = int(os.getenv("PREDICTION_RECOVER_ELO_BOOST", "200"))
 
 ACCEPT_CHALLENGES = True
-MIN_RATING = 1320
-MAX_RATING = 2800
-TIME_CONTROL = ["bullet", "blitz", "rapid", "classical"]
+
+# Rating range of the challengers the bot accepts, at the speed of the challenge.
+# 1320 is the lowest rating Stockfish's strength limit can be set to.
+MIN_RATING = int(os.getenv("MIN_RATING", "1320"))
+MAX_RATING = int(os.getenv("MAX_RATING", "2800"))
+
+# Speeds the bot plays, fastest first, and the ones it accepts challenges at
+SPEEDS = ("bullet", "blitz", "rapid", "classical")
+TIME_CONTROL = [
+    speed.strip().lower()
+    for speed in os.getenv("TIME_CONTROL", ",".join(SPEEDS)).split(",")
+    if speed.strip()
+]
+_unknown_speeds = [speed for speed in TIME_CONTROL if speed not in SPEEDS]
+if _unknown_speeds:
+    raise ValueError(
+        f"TIME_CONTROL names unknown speeds: {', '.join(_unknown_speeds)}. "
+        f"Choose from: {', '.join(SPEEDS)}"
+    )
 
 # Dynamic strength: the engine is limited to the opponent's level
 DYNAMIC_STRENGTH = os.getenv("DYNAMIC_STRENGTH", "true").lower() in ("true", "1", "yes")

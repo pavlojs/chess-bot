@@ -108,6 +108,8 @@ class TestDocumentedDefaults(unittest.TestCase):
                     self.assertEqual(shown, str(actual).lower())
                 elif isinstance(actual, float):
                     self.assertEqual(float(shown), actual)
+                elif isinstance(actual, list):
+                    self.assertEqual(shown.split(","), actual)
                 else:
                     self.assertEqual(shown, str(actual))
 
@@ -134,6 +136,18 @@ class TestEnvironmentOverrides(unittest.TestCase):
                 config = load_config(ENABLE_AUTO_CHALLENGE=value, DYNAMIC_STRENGTH=value)
                 self.assertIs(config["ENABLE_AUTO_CHALLENGE"], expected)
                 self.assertIs(config["DYNAMIC_STRENGTH"], expected)
+
+    def test_accepted_ratings_and_speeds_are_read_from_the_environment(self):
+        config = load_config(MIN_RATING=1500, MAX_RATING=2400, TIME_CONTROL="blitz, Rapid")
+
+        self.assertEqual((config["MIN_RATING"], config["MAX_RATING"]), (1500, 2400))
+        self.assertEqual(config["TIME_CONTROL"], ["blitz", "rapid"])
+
+    def test_a_speed_that_does_not_exist_stops_the_import(self):
+        with self.assertRaises(RuntimeError) as caught:
+            load_config(TIME_CONTROL="blitz,hyperbullet")
+
+        self.assertIn("hyperbullet", str(caught.exception))
 
     def test_a_missing_token_stops_the_import(self):
         with self.assertRaises(RuntimeError) as caught:
