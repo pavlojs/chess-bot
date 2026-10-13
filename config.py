@@ -114,20 +114,20 @@ MIN_RATING = 1320
 MAX_RATING = 2800
 TIME_CONTROL = ["bullet", "blitz", "rapid", "classical"]
 
-# Dynamic strength: THREE-TIER HYBRID approach for fair games at all levels
+# Dynamic strength: the engine is limited to the opponent's level
 DYNAMIC_STRENGTH = os.getenv("DYNAMIC_STRENGTH", "true").lower() in ("true", "1", "yes")
 
-# THREE-TIER HYBRID SYSTEM:
-# 1. < LIMIT_STRENGTH_THRESHOLD (1800):
-#    UCI_LimitStrength at opponent+STRENGTH_ADVANTAGE + go movetime (fair, winnable)
-# 2. LIMIT_STRENGTH_THRESHOLD – FULL_STRENGTH_THRESHOLD (1800–2799):
-#    UCI_LimitStrength at opponent+STRENGTH_ADVANTAGE + go movetime (scaled time)
-#    NOTE: native clocks cannot be used with UCI_LimitStrength — causes Stockfish
-#    to time-manage as a limited player, potentially hanging 30+ seconds on first move.
-# 3. >= FULL_STRENGTH_THRESHOLD (2800): MAXIMUM POWER + native clocks, no handicaps
+# Three tiers by the opponent's rating:
+# 1. below LIMIT_STRENGTH_THRESHOLD: Stockfish's strength limit (UCI_LimitStrength)
+#    at opponent + STRENGTH_ADVANTAGE, 40 % of STOCKFISH_TIME per move
+# 2. from there to FULL_STRENGTH_THRESHOLD: the same limit, 40-95 % of STOCKFISH_TIME
+# 3. at or above FULL_STRENGTH_THRESHOLD: full strength, searched on the game clock
+#
+# Limited games get a fixed time per move so that the bot answers quickly; on
+# the game clock Stockfish takes tens of seconds over an early move.
 
-LIMIT_STRENGTH_THRESHOLD = int(os.getenv("LIMIT_STRENGTH_THRESHOLD", "1800"))  # Below: minimal movetime (40%); above: scaled movetime (40-95%)
-FULL_STRENGTH_THRESHOLD = int(os.getenv("FULL_STRENGTH_THRESHOLD", "2800"))    # At or above: FULL POWER + native clocks (no UCI_LimitStrength)
+LIMIT_STRENGTH_THRESHOLD = int(os.getenv("LIMIT_STRENGTH_THRESHOLD", "1800"))
+FULL_STRENGTH_THRESHOLD = int(os.getenv("FULL_STRENGTH_THRESHOLD", "2800"))
 
 # ELO bonus: UCI_Elo = opponent_rating + STRENGTH_ADVANTAGE
 # Applied for ALL opponents below FULL_STRENGTH_THRESHOLD
@@ -171,14 +171,13 @@ CHALLENGE_TIME_CONTROLS = [
 # Challenge check interval (seconds) - how often to check if we should challenge
 CHALLENGE_CHECK_INTERVAL = int(os.getenv("CHALLENGE_CHECK_INTERVAL", "60"))  # 1 minute
 
-# Game watchdog interval (seconds) — how often to poll the Lichess API
-# to verify a game is still active.  Unlike a hard stream timeout this
-# approach is safe for classical games where opponents think for a long time.
+# Seconds a game stream may be silent before the bot asks Lichess about the
+# game. A game that has ended closes its thread; a game under way is left alone
+# however long the opponent thinks.
 GAME_WATCHDOG_INTERVAL = int(os.getenv("GAME_WATCHDOG_INTERVAL", "60"))  # 1 minute
 
-# Maximum seconds a game can stay in "started" status (no moves made) before
-# the watchdog forcefully aborts it.  Prevents the bot from being stuck
-# indefinitely when an opponent goes offline before making any move.
+# Seconds a game may go without both sides having made their first move before
+# the bot aborts it. Until then an abort costs neither side anything.
 GAME_WATCHDOG_ABORT_TIMEOUT = int(os.getenv("GAME_WATCHDOG_ABORT_TIMEOUT", "600"))  # 10 minutes
 
 # Maximum number of concurrent games the bot will play simultaneously.
