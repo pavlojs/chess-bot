@@ -558,23 +558,64 @@ class TestChallengeTracker(unittest.TestCase):
         self.assertFalse(tracker.can_challenge())
         self.assertGreater(tracker.seconds_until_free(), 0)
 
-    def test_filter_suitable_bots(self):
-        """Test filtering bots by rating."""
+
+class TestFilterSuitableBots(unittest.TestCase):
+    """Opponents are chosen by their rating in the kind of game being offered."""
+
+    def names(self, bots, speed, low=1500, high=2900, me="Axiom_BOT"):
         from bot import filter_suitable_bots
-        
+        return [b["username"] for b in filter_suitable_bots(bots, low, high, me, speed)]
+
+    def bot(self, name, **ratings):
+        return {"username": name, "perfs": {speed: {"rating": rating} for speed, rating in ratings.items()}}
+
+    def test_rating_range_is_inclusive(self):
         bots = [
-            {"username": "bot1", "perfs": {"blitz": {"rating": 1400}}},  # Too low
-            {"username": "bot2", "perfs": {"blitz": {"rating": 1600}}},  # Good
-            {"username": "bot3", "perfs": {"blitz": {"rating": 2500}}},  # Good
-            {"username": "bot4", "perfs": {"blitz": {"rating": 3000}}},  # Too high
-            {"username": "TestBot", "perfs": {"blitz": {"rating": 2000}}},  # Self (should be excluded)
+            self.bot("low", blitz=1499),
+            self.bot("floor", blitz=1500),
+            self.bot("mid", blitz=2200),
+            self.bot("ceiling", blitz=2900),
+            self.bot("high", blitz=2901),
         ]
-        
-        suitable = filter_suitable_bots(bots, 1500, 2900, "TestBot")
-        
-        self.assertEqual(len(suitable), 2)
-        self.assertEqual(suitable[0]["username"], "bot2")
-        self.assertEqual(suitable[1]["username"], "bot3")
+
+        self.assertEqual(self.names(bots, "blitz"), ["floor", "mid", "ceiling"])
+
+    def test_the_bot_never_picks_itself(self):
+        bots = [self.bot("axiom_bot", blitz=2000), self.bot("other", blitz=2000)]
+
+        self.assertEqual(self.names(bots, "blitz"), ["other"])
+
+    def test_only_the_rating_of_the_speed_being_played_counts(self):
+        """Rated 2000 in blitz and 900 in bullet: a 900 opponent in a bullet game."""
+        bots = [self.bot("specialist", blitz=2000, bullet=900, rapid=1700)]
+
+        self.assertEqual(self.names(bots, "blitz"), ["specialist"])
+        self.assertEqual(self.names(bots, "rapid"), ["specialist"])
+        self.assertEqual(self.names(bots, "bullet"), [])
+
+    def test_a_bot_without_a_rating_at_that_speed_is_skipped(self):
+        bots = [self.bot("blitz_only", blitz=2000), {"username": "no_perfs"}]
+
+        self.assertEqual(self.names(bots, "classical"), [])
+
+    def test_the_speed_follows_the_time_control_that_was_drawn(self):
+        """try_challenge_random_bot must look at the rating for the game it offers."""
+        import bot
+        client = Mock()
+        client.bots.get_online_bots.return_value = iter([
+            self.bot("BulletWeak", blitz=2000, bullet=900),
+            self.bot("BulletFine", blitz=1000, bullet=2000),
+        ])
+        client.challenges.create.return_value = {"id": "chal0001"}
+        tracker = bot.ChallengeTracker(5, 100)
+
+        with patch("bot.ENABLE_AUTO_CHALLENGE", True), \
+             patch("bot.CHALLENGE_TIME_CONTROLS", [{"limit": 60, "increment": 0}]), \
+             patch("bot.CHALLENGE_MIN_RATING", 1500), patch("bot.CHALLENGE_MAX_RATING", 2900):
+            result = bot.try_challenge_random_bot(client, "Axiom_BOT", tracker)
+
+        self.assertEqual(result, ("chal0001", "BulletFine"))
+        self.assertEqual(client.challenges.create.call_args.args[0], "BulletFine")
 
 
 class TestDrawOfferHandling(unittest.TestCase):

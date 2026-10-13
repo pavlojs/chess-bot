@@ -869,43 +869,31 @@ def get_online_bots(client: berserk.Client, limit: int = 100) -> List[Dict[str, 
     return online_bots
 
 
-def filter_suitable_bots(bots: List[Dict[str, Any]], min_rating: int, max_rating: int, 
-                         bot_username: str) -> List[Dict[str, Any]]:
-    """Filter bots by rating criteria.
-    
+def filter_suitable_bots(bots: List[Dict[str, Any]], min_rating: int, max_rating: int,
+                         bot_username: str, speed: str) -> List[Dict[str, Any]]:
+    """Keep the bots whose rating at ``speed`` lies within the range.
+
+    The rating looked at is the one for the kind of game about to be offered.
+    A bot rated 2000 in blitz and 900 in bullet is a 900 opponent in a bullet
+    game, and one that has never played the speed has no rating to go by.
+
     Args:
-        bots: List of bot dictionaries
-        min_rating: Minimum rating threshold
-        max_rating: Maximum rating threshold
+        bots: Bots as returned by the Lichess list of online bots
+        min_rating: Lowest rating to challenge
+        max_rating: Highest rating to challenge
         bot_username: Our bot's username (to exclude self)
-    
-    Returns:
-        Filtered list of suitable bots
+        speed: "bullet", "blitz", "rapid" or "classical"
     """
     suitable = []
-    
+
     for bot in bots:
-        username = bot.get("username", "").lower()
-        
-        # Skip self
-        if username == bot_username.lower():
+        if bot.get("username", "").lower() == bot_username.lower():
             continue
-        
-        # Get perfs (performance ratings)
-        perfs = bot.get("perfs", {})
-        
-        # Check if bot has any rating in acceptable range
-        has_suitable_rating = False
-        for time_control in ["blitz", "rapid", "bullet", "classical"]:
-            if time_control in perfs:
-                rating = perfs[time_control].get("rating", 0)
-                if min_rating <= rating <= max_rating:
-                    has_suitable_rating = True
-                    break
-        
-        if has_suitable_rating:
+
+        perf = bot.get("perfs", {}).get(speed)
+        if perf and min_rating <= perf.get("rating", 0) <= max_rating:
             suitable.append(bot)
-    
+
     return suitable
 
 
@@ -972,21 +960,26 @@ def try_challenge_random_bot(client: berserk.Client, bot_username: str,
         logger.info("No online bots found")
         return None
 
+    # The time control comes first: it decides which of a bot's ratings counts.
+    time_control = random.choice(CHALLENGE_TIME_CONTROLS)
+    speed = determine_time_category(time_control["limit"], time_control["increment"])
+
     suitable_bots = filter_suitable_bots(
         online_bots,
         CHALLENGE_MIN_RATING,
         CHALLENGE_MAX_RATING,
-        bot_username
+        bot_username,
+        speed,
     )
 
     if not suitable_bots:
         logger.info(
-            f"No suitable bots online (rating range: {CHALLENGE_MIN_RATING}–{CHALLENGE_MAX_RATING})"
+            f"No suitable bots online for {speed} "
+            f"(rating range: {CHALLENGE_MIN_RATING}–{CHALLENGE_MAX_RATING})"
         )
         return None
 
     target_bot = random.choice(suitable_bots)
-    time_control = random.choice(CHALLENGE_TIME_CONTROLS)
 
     # Counted before the outcome is known: Lichess counts the request too.
     tracker.record_challenge()
