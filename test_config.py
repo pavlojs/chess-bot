@@ -228,6 +228,39 @@ class TestEnvironmentOverrides(unittest.TestCase):
         self.assertIs(load_config()["UCI_OPTIONS"]["UCI_LimitStrength"], False)
 
 
+class TestComposeFiles(unittest.TestCase):
+    """The compose file the README shows, the one in the repository and the one for a local build."""
+
+    def read(self, name):
+        with open(os.path.join(ROOT, name)) as f:
+            return f.read()
+
+    def settings(self, text):
+        """The lines that set something: no comments, no blank lines."""
+        lines = (re.sub(r"\s+#.*$", "", line.rstrip()) for line in text.splitlines())
+        return [line for line in lines if line.strip() and not line.strip().startswith("#")]
+
+    def test_the_compose_file_in_the_readme_is_the_one_in_the_repository(self):
+        shown = re.search(r"```yaml\n(services:.*?)```", self.read("README.md"), re.S).group(1)
+
+        self.assertEqual(self.settings(shown), self.settings(self.read("docker-compose.yml")))
+
+    def test_the_compose_file_runs_the_published_image(self):
+        settings = self.settings(self.read("docker-compose.yml"))
+
+        self.assertIn("    image: ghcr.io/pavlojs/axiom-chess-bot:latest", settings)
+        self.assertFalse([line for line in settings if line.strip().startswith("build:")])
+
+    def test_the_dev_file_changes_only_where_the_image_comes_from(self):
+        """Hardening written twice would be hardening that differs sooner or later."""
+        settings = self.settings(self.read("docker-compose.dev.yml"))
+
+        of_the_service = [line.strip() for line in settings if re.match(r"^    \S", line)]
+        self.assertEqual(of_the_service, ["extends:", "build: .", "image: axiom-chess-bot:dev"])
+        self.assertIn("      file: docker-compose.yml", settings)
+        self.assertIn("      service: axiom-bot", settings)
+
+
 class TestLogFile(unittest.TestCase):
     """The log file on the volume has a ceiling."""
 

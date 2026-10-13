@@ -1,0 +1,16 @@
+# Builds the image from this checkout instead of pulling the published one:
+#
+#   docker compose -f docker-compose.dev.yml up -d --build
+#
+# Everything about how the bot runs is taken from docker-compose.yml, so the
+# two cannot drift apart. Only where the image comes from differs.
+services:
+  axiom-bot:
+    extends:
+      file: docker-compose.yml
+      service: axiom-bot
+    build: .
+    image: axiom-chess-bot:dev
+
+volumes:
+  logs:

@@ -1,6 +1,8 @@
+# Runs the published image. To run a build of this checkout instead, use
+# docker-compose.dev.yml.
 services:
   axiom-bot:
-    build: .
+    image: ghcr.io/pavlojs/axiom-chess-bot:latest
     container_name: axiom-bot
     env_file: .env  # Load environment variables from .env file
     restart: unless-stopped

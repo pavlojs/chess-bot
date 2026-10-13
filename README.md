@@ -56,7 +56,7 @@ See [TESTING.md](TESTING.md) for what the suite covers and how it is built.
 
 ### Docker
 
-`ghcr.io/pavlojs/axiom-chess-bot:latest` is built from `main` each time `dev` is promoted, after the tests and the image checks have passed on that commit. Every build is also tagged `main-<commit>`.
+`ghcr.io/pavlojs/axiom-chess-bot:latest` is built from `main` each time `dev` is promoted, after the tests and the image checks have passed on that commit. Every build is also tagged `main-<commit>`. The [docker-compose.yml](docker-compose.yml) in this repository runs it:
 
 ```yaml
 services:
@@ -88,7 +88,7 @@ volumes:
 
 Put your token in a `.env` file beside it (copy [.env.example](.env.example)) and run `docker compose up -d`. A change to `.env` takes effect with the next `docker compose up -d`.
 
-To build the image yourself, use the [docker-compose.yml](docker-compose.yml) in this repository, which is the same file with `build: .` in place of `image:`: `docker compose up -d --build`.
+To run a build of your own checkout instead, use [docker-compose.dev.yml](docker-compose.dev.yml): `docker compose -f docker-compose.dev.yml up -d --build`. It takes every setting from `docker-compose.yml` and changes only where the image comes from.
 
 What the image is and how it is meant to run:
 
