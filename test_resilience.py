@@ -67,7 +67,13 @@ class _Handler(BaseHTTPRequestHandler):
         if scripts:
             self._play(scripts.popleft())
             return
-        status, payload = self.server.replies.get((self.command, path), (404, {"error": "Not found"}))
+        queue = self.server.replies.get((self.command, path))
+        if not queue:
+            status, payload = 404, {"error": "Not found"}
+        elif len(queue) > 1:
+            status, payload = queue.popleft()
+        else:
+            status, payload = queue[0]
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -84,8 +90,9 @@ class StubLichess:
     ``stream(path, steps)`` queues one response for the next connection to
     ``path``. A step is a line of bytes, a pause in seconds, ``STALL`` or
     ``CLOSE``; a script that runs out ends the response like ``CLOSE``.
-    ``reply(method, path, status, payload)`` sets the JSON answer of a plain
-    request. Every request received is kept in ``requests``.
+    ``reply(method, path, status, payload)`` queues the JSON answer of a plain
+    request; answers are given in order and the last one repeats. Every
+    request received is kept in ``requests``.
     """
 
     def __init__(self):
@@ -103,7 +110,8 @@ class StubLichess:
         self._server.streams[path].append(list(steps))
 
     def reply(self, method, path, status=200, payload=None):
-        self._server.replies[(method, path)] = (status, payload if payload is not None else {"ok": True})
+        answer = (status, payload if payload is not None else {"ok": True})
+        self._server.replies.setdefault((method, path), deque()).append(answer)
 
     @property
     def requests(self):
@@ -217,6 +225,67 @@ class TestHttpTimeout(StubLichessTestCase):
 
         self.assertTrue(finished, "the request never returned")
         self.assertIsInstance(box.get("error"), Exception)
+
+
+class TestErrorClassification(StubLichessTestCase):
+    """Errors are told apart by what Lichess answered, on real responses."""
+
+    def client(self):
+        return berserk.Client(session_with_timeout((2, 2)), base_url=self.lichess.url)
+
+    def failure(self, status):
+        self.lichess.reply("GET", "/api/account", status, {"error": "nope"})
+        with self.assertRaises(berserk.exceptions.ResponseError) as caught:
+            self.client().account.get()
+        return caught.exception
+
+    def test_status_is_read_from_a_real_error_response(self):
+        for status in (401, 404, 429, 502, 503, 504):
+            with self.subTest(status=status):
+                self.lichess = StubLichess()
+                self.addCleanup(self.lichess.close)
+                exc = self.failure(status)
+                # Why the status must not be reached through `exc.response and ...`.
+                self.assertFalse(exc.response)
+                self.assertEqual(bot._http_status(exc), status)
+
+    def test_status_of_something_that_is_not_an_http_answer(self):
+        self.assertIsNone(bot._http_status(ValueError("boom")))
+        self.assertIsNone(bot._http_status(requests.exceptions.ConnectionError("down")))
+
+    def test_retry_with_backoff_retries_gateway_errors_until_lichess_answers(self):
+        self.lichess.reply("GET", "/api/account", 502, {"error": "bad gateway"})
+        self.lichess.reply("GET", "/api/account", 503, {"error": "unavailable"})
+        self.lichess.reply("GET", "/api/account", 200, {"username": "Axiom_BOT", "title": "BOT"})
+        client = self.client()
+
+        with patch("bot.time.sleep") as sleep:
+            account = bot.retry_with_backoff(client.account.get, max_retries=5, base_delay=2, description="Get account")
+
+        self.assertEqual(account["username"], "Axiom_BOT")
+        self.assertEqual(self.lichess.paths("GET"), ["/api/account"] * 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+
+    def test_retry_with_backoff_does_not_retry_a_rejected_token(self):
+        self.lichess.reply("GET", "/api/account", 401, {"error": "No such token"})
+        client = self.client()
+
+        with patch("bot.time.sleep") as sleep:
+            with self.assertRaises(berserk.exceptions.ResponseError):
+                bot.retry_with_backoff(client.account.get, max_retries=5, description="Get account")
+
+        self.assertEqual(len(self.lichess.paths("GET")), 1)
+        sleep.assert_not_called()
+
+    def test_retry_with_backoff_stops_after_the_last_attempt(self):
+        self.lichess.reply("GET", "/api/account", 504, {"error": "timeout"})
+        client = self.client()
+
+        with patch("bot.time.sleep"):
+            with self.assertRaises(berserk.exceptions.ResponseError):
+                bot.retry_with_backoff(client.account.get, max_retries=3, description="Get account")
+
+        self.assertEqual(len(self.lichess.paths("GET")), 3)
 
 
 if __name__ == "__main__":

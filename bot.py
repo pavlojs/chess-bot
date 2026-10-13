@@ -118,6 +118,23 @@ class RateLimitError(Exception):
     pass
 
 
+# Gateway answers that mean "Lichess is briefly unavailable": worth a retry.
+_GATEWAY_ERRORS = frozenset({502, 503, 504})
+
+
+def _http_status(exc: BaseException) -> Optional[int]:
+    """HTTP status of a failed Lichess call, or None if Lichess never answered.
+
+    Read it from the exception, never through ``exc.response``: a
+    requests.Response is falsy for every status of 400 and above, so
+    ``exc.response and exc.response.status_code == ...`` is false for exactly
+    the answers it is meant to recognise.
+    """
+    if isinstance(exc, ResponseError):
+        return exc.status_code
+    return None
+
+
 # ─────────────────────────────────────────────
 # SIGNAL HANDLING
 # ─────────────────────────────────────────────
@@ -283,13 +300,13 @@ def retry_with_backoff(func, max_retries=5, base_delay=1, max_delay=60, descript
             time.sleep(delay)
         except berserk.exceptions.ResponseError as e:
             # Handle 502, 503, 504 errors with retry
-            if hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]:
+            if _http_status(e) in _GATEWAY_ERRORS:
                 if attempt == max_retries - 1:
                     logger.error(f"{description} failed after {max_retries} attempts: {e}")
                     raise
                 
                 delay = min(base_delay * (2 ** attempt), max_delay)
-                logger.warning(f"{description} failed with {e.response.status_code} (attempt {attempt + 1}/{max_retries}). Retrying in {delay}s...")
+                logger.warning(f"{description} failed with {_http_status(e)} (attempt {attempt + 1}/{max_retries}). Retrying in {delay}s...")
                 time.sleep(delay)
             else:
                 # For other errors, don't retry
@@ -854,8 +871,7 @@ def challenge_bot(client: berserk.Client, opponent_username: str,
     except berserk.exceptions.ResponseError as e:
         logger.warning(f"Failed to challenge {opponent_username}: {e}")
         # Propagate rate-limit errors so callers can apply backoff
-        status = getattr(e, 'status_code', None)
-        if status == 429 or '429' in str(e):
+        if _http_status(e) == 429:
             raise RateLimitError(str(e))
         return None
     except Exception as e:
@@ -1554,8 +1570,8 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                 time.sleep(5)
                 continue
             except ResponseError as e:
-                if hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]:
-                    logger.warning(f"[{game_id}] Lichess API error {e.response.status_code}. Reconnecting in 5s...")
+                if _http_status(e) in _GATEWAY_ERRORS:
+                    logger.warning(f"[{game_id}] Lichess API error {_http_status(e)}. Reconnecting in 5s...")
                     time.sleep(5)
                     continue
                 logger.error(f"[{game_id}] API error in game stream: {e}", exc_info=True)
@@ -1935,11 +1951,11 @@ def main():
             time.sleep(10)
             continue
         except berserk.exceptions.ResponseError as e:
-            if hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]:
-                logger.warning(f"Lichess API error {e.response.status_code}. Reconnecting in 15s...")
+            if _http_status(e) in _GATEWAY_ERRORS:
+                logger.warning(f"Lichess API error {_http_status(e)}. Reconnecting in 15s...")
                 time.sleep(15)
                 continue
-            elif hasattr(e, 'response') and e.response and e.response.status_code == 429:
+            elif _http_status(e) == 429:
                 logger.warning("Rate limited by Lichess (429). Backing off for 60s...")
                 time.sleep(60)
                 continue
