@@ -19,6 +19,8 @@ It accepts a challenge when all of these hold:
 - a challenger rated between 1320 and 2800 at that speed;
 - a free game slot. It plays two games at a time by default and declines the rest with "later".
 
+A challenge it does not take is declined with the reason Lichess has for it, so the challenger reads what to change: standard chess only, another time control, a slower or a faster game, or later. A rating outside the range gets Lichess's general "not accepting challenges at the moment", the closest there is. The speeds and the rating range are settings: `TIME_CONTROL`, `MIN_RATING` and `MAX_RATING`.
+
 ## Requirements
 
 - Python 3.11 or newer (CI runs the tests on 3.11 to 3.14)
@@ -121,6 +123,8 @@ Settings come from the environment or from a `.env` file. [.env.example](.env.ex
 | `SF_THREADS` | `4` | Engine threads, per game |
 | `SF_HASH` | `2048` | Engine hash in MB, per game |
 | `MAX_CONCURRENT_GAMES` | `2` | Games played at the same time |
+| `MIN_RATING` / `MAX_RATING` | `1320` / `2800` | Rating range of the challengers it accepts |
+| `TIME_CONTROL` | `bullet,blitz,rapid,classical` | Speeds it accepts challenges at |
 | `STOCKFISH_TIME` | `3000` | Base thinking time per move in ms against a limited opponent |
 | `STRENGTH_ADVANTAGE` | `100` | How far above the opponent's rating the engine's limit is set |
 | `FULL_STRENGTH_THRESHOLD` | `2800` | Opponent rating from which the bot plays at full strength |
@@ -131,8 +135,6 @@ Settings come from the environment or from a `.env` file. [.env.example](.env.ex
 
 A few settings are lists or fixed values and live in `config.py`:
 
-- `TIME_CONTROL`: the speeds accepted, by default `["bullet", "blitz", "rapid", "classical"]`.
-- `MIN_RATING` / `MAX_RATING`: the rating range of challengers accepted, `1320` and `2800`.
 - `CHALLENGE_TIME_CONTROLS`: the clocks the bot offers when it challenges, from 1+0 to 30+0.
 - `UCI_OPTIONS`: any further Stockfish option. `stockfish` followed by `uci` lists what the engine has.
 
