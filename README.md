@@ -25,23 +25,23 @@ A challenge it does not take is declined with the reason Lichess has for it, so 
 
 - Python 3.11 or newer (CI runs the tests on 3.11 to 3.14)
 - A Lichess [BOT account](https://lichess.org/api#tag/Bot) and an API token for it with the `bot:play` scope
-- Stockfish. Outside a container the bot installs it by itself; see below.
+- Stockfish. `./scripts/install_stockfish.sh` installs the latest release; the container image brings its own.
 
 ## Setup
 
 1. Clone this repository.
 2. Create the virtual environment: `./scripts/setup_venv.sh`
-3. Copy `.env.example` to `.env` and put your token in `TOKEN`. Create the token at https://lichess.org/account/oauth/token.
-4. Run the bot: `./scripts/run_bot.sh`
-5. Stop it with `Ctrl+C`. The bot gives its game threads up to 15 seconds to wind down and then exits; a second `Ctrl+C` exits at once. A game that is still going is not resigned: it is picked up again if the bot is back before its clock runs out.
+3. Install Stockfish: `./scripts/install_stockfish.sh`. Skip this if there is a `stockfish` on your `PATH` already.
+4. Copy `.env.example` to `.env` and put your token in `TOKEN`. Create the token at https://lichess.org/account/oauth/token.
+5. Run the bot: `./scripts/run_bot.sh`
+6. Stop it with `Ctrl+C`. The bot gives its game threads up to 15 seconds to wind down and then exits; a second `Ctrl+C` exits at once. A game that is still going is not resigned: it is picked up again if the bot is back before its clock runs out.
 
 ### Stockfish
 
-With `AUTO_UPDATE_STOCKFISH=true`, which is the default outside the container, the bot looks at the [official Stockfish releases](https://github.com/official-stockfish/Stockfish/releases) each time it starts. If `/usr/local/bin/stockfish` is missing or is not the latest release, it downloads the build for this platform, checks the archive against the SHA-256 the release publishes, and installs it, asking for `sudo` when `/usr/local/bin` is not writable.
+`./scripts/install_stockfish.sh` looks at the [official Stockfish releases](https://github.com/official-stockfish/Stockfish/releases). If `/usr/local/bin/stockfish` is missing or is not the latest release, it downloads the build for this platform, checks the archive against the SHA-256 the release publishes, and installs it, asking for `sudo` when `/usr/local/bin` is not writable. Run it again to update.
 
-- To install or update by hand: `./scripts/install_stockfish.sh` (the same code).
-- To use a binary you chose yourself: set `STOCKFISH_PATH=/path/to/stockfish`.
-- To switch the startup check off: set `AUTO_UPDATE_STOCKFISH=false`.
+- To use a binary you chose yourself: set `STOCKFISH_PATH=/path/to/stockfish`. Without it the bot takes the `stockfish` on the `PATH`.
+- To have the bot do the same each time it starts: set `AUTO_UPDATE_STOCKFISH=true`. It is off by default, because it puts a downloaded binary into a system directory and may ask for `sudo`, and that is yours to decide.
 
 ## Testing
 
@@ -132,6 +132,7 @@ Settings come from the environment or from a `.env` file. [.env.example](.env.ex
 | `MAX_CHALLENGES_PER_HOUR` | `5` | Challenges created per hour |
 | `MAX_CHALLENGES_PER_DAY` | `180` | Challenges created in any 24 hours |
 | `CHALLENGE_MIN_RATING` / `CHALLENGE_MAX_RATING` | `1500` / `2900` | Rating range of the bots it challenges |
+| `AUTO_UPDATE_STOCKFISH` | `false` | Install and update the engine at startup; see [Stockfish](#stockfish) |
 
 A few settings are lists or fixed values and live in `config.py`:
 
@@ -236,7 +237,7 @@ With tablebases Stockfish plays endgames of up to 7 pieces perfectly. If `./syzy
 
 The container image installs the Stockfish release named in the [Dockerfile](Dockerfile), checked against the SHA-256 written beside it. The [Update Stockfish](.github/workflows/update_stockfish.yml) workflow looks for a new release every day and, when there is one, moves both values on `dev` and runs CI on the result. The new engine reaches `ghcr.io/pavlojs/axiom-chess-bot:latest` with the next promotion to `main`.
 
-Outside the container the bot updates the engine itself; see [Stockfish](#stockfish).
+Outside the container, run `./scripts/install_stockfish.sh` again, or set `AUTO_UPDATE_STOCKFISH=true` to have the bot do it each time it starts; see [Stockfish](#stockfish).
 
 ## Development
 

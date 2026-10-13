@@ -31,11 +31,13 @@ Please include:
 The bot holds a **Lichess API token** with the `bot:play` scope. Anything that
 can read that token, or make the bot act outside a game it is playing, is in
 scope. So is anything that causes the bot to fetch and execute untrusted code:
-outside the container the engine self-updater downloads and runs a binary. It
-takes the binary only from the Stockfish project's GitHub releases and installs
-it only if it matches the SHA-256 the release publishes.
+outside the container the engine installer downloads and runs a binary. It runs
+when you start `scripts/install_stockfish.sh`, and at each start of the bot only
+if you set `AUTO_UPDATE_STOCKFISH=true`. It takes the binary only from the
+Stockfish project's GitHub releases and installs it only if it matches the
+SHA-256 the release publishes.
 
-The container image does not contain the self-updater. Its engine is one named
+The container image does not contain the installer. Its engine is one named
 release, checked against its SHA-256 when the image is built. The image has no
 shell and no package manager, and the bot runs in it as an unprivileged user
 that owns nothing but its log directory. A way around any of that is in scope.
