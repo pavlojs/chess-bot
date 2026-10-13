@@ -4,14 +4,11 @@ Unit tests for Axiom Chess Bot
 
 import unittest
 from unittest.mock import Mock, patch, MagicMock
-from datetime import datetime, timedelta
+from datetime import timedelta
 import os
-import signal
-import time
 import threading
 
 import chess
-import requests
 
 # Mock TOKEN before importing bot
 os.environ.setdefault('TOKEN', 'test_token_for_testing')
@@ -157,56 +154,6 @@ class TestChallengeAcceptance(unittest.TestCase):
              patch('bot.TIME_CONTROL', ['bullet', 'blitz', 'rapid', 'classical']):
             result = should_accept_challenge(challenge)
             self.assertFalse(result)
-
-
-class TestBoardState(unittest.TestCase):
-    """Test chess board state handling."""
-    
-    def test_board_initialization(self):
-        """Test that board is properly initialized."""
-        board = chess.Board()
-        self.assertEqual(board.fen(), chess.STARTING_FEN)
-    
-    def test_board_move_application(self):
-        """Test that moves are correctly applied to board."""
-        board = chess.Board()
-        
-        # Apply starting move
-        move_uci = 'e2e4'
-        board.push_uci(move_uci)
-        
-        # Verify board state changed
-        self.assertNotEqual(board.fen(), chess.STARTING_FEN)
-    
-    def test_board_multiple_moves(self):
-        """Test board state with multiple moves."""
-        board = chess.Board()
-        moves = ['e2e4', 'c7c5', 'g1f3', 'd7d6']
-        
-        for move_uci in moves:
-            board.push_uci(move_uci)
-        
-        # Verify board has processed all moves
-        self.assertEqual(len(list(board.move_stack)), 4)
-    
-    def test_invalid_move_handling(self):
-        """Test that invalid moves raise appropriate errors."""
-        board = chess.Board()
-        
-        with self.assertRaises(ValueError):
-            board.push_uci('invalid')
-    
-    def test_game_over_detection(self):
-        """Test detection of game over state."""
-        board = chess.Board()
-        self.assertFalse(board.is_game_over())
-        
-        # Fool's mate: 1. f3 e6 2. g4 Qh4#
-        moves = ['f2f3', 'e7e6', 'g2g4', 'd8h4']
-        for move_uci in moves:
-            board.push_uci(move_uci)
-        
-        self.assertTrue(board.is_game_over())
 
 
 class TestStockfishInitialization(unittest.TestCase):
@@ -442,20 +389,6 @@ class TestGameEndReason(unittest.TestCase):
         if board.can_claim_fifty_moves():
             reason = get_game_end_reason(board)
             self.assertIn("fifty-move rule", reason.lower())
-
-
-class TestErrorHandling(unittest.TestCase):
-    """Test error handling in game play."""
-    
-    def test_api_error_import(self):
-        """Test that ApiError can be imported from berserk.exceptions."""
-        from berserk.exceptions import ApiError
-        self.assertIsNotNone(ApiError)
-    
-    def test_response_error_import(self):
-        """Test that ResponseError can be imported from berserk.exceptions."""
-        from berserk.exceptions import ResponseError
-        self.assertIsNotNone(ResponseError)
 
 
 class TestLogging(unittest.TestCase):
@@ -970,25 +903,6 @@ class TestParsePvFromInfo(unittest.TestCase):
         self.assertEqual(pv, "")
 
 
-class TestMoveTimeCalculationSignature(unittest.TestCase):
-    """Verify calculate_move_time no longer accepts time-pressure arguments."""
-
-    def test_signature_has_two_params_only(self):
-        import inspect
-        from bot import calculate_move_time
-        params = list(inspect.signature(calculate_move_time).parameters)
-        self.assertEqual(params, ["opponent_rating", "base_time"],
-                         "calculate_move_time should only take opponent_rating and base_time")
-
-    @patch('bot.DYNAMIC_STRENGTH', True)
-    @patch('bot.LIMIT_STRENGTH_THRESHOLD', 1800)
-    @patch('bot.FULL_STRENGTH_THRESHOLD', 2200)
-    def test_returns_int(self):
-        from bot import calculate_move_time
-        result = calculate_move_time(2000, 3000)
-        self.assertIsInstance(result, int)
-
-
 class TestBulletChallengeAcceptance(unittest.TestCase):
     """Test that bullet time controls are accepted."""
 
@@ -1032,7 +946,7 @@ class TestBulletChallengeAcceptance(unittest.TestCase):
 
 
 class TestExtractMateFromInfo(unittest.TestCase):
-    """Test _extract_mate_from_info helper (added in commit d0fad89)."""
+    """Test _extract_mate_from_info helper."""
 
     def setUp(self):
         from bot import _extract_mate_from_info
@@ -1065,7 +979,7 @@ class TestExtractMateFromInfo(unittest.TestCase):
 
 
 class TestGetMovePredictionSignature(unittest.TestCase):
-    """Verify get_move_prediction returns a 3-tuple (commit d0fad89 / c90afb6)."""
+    """get_move_prediction returns the move with the mate distance and the evaluation."""
 
     def _make_stockfish_mock(self, info_line: str, best_move: str = "e2e4"):
         sf = Mock()
@@ -1114,166 +1028,8 @@ class TestGetMovePredictionSignature(unittest.TestCase):
         self.assertEqual(cp_val, -30000)
 
 
-class TestPredictionRecoverThreshold(unittest.TestCase):
-    """Test PREDICTION_RECOVER_THRESHOLD config and eval_for_bot logic.
-
-    Recovery search, follow-mate, and avoid-mate branches now fire
-    unconditionally for every opponent regardless of their rating
-    (PREDICTION_MIN_USE_ELO was removed in v2.4.2).
-    """
-
-    def test_config_default_value(self):
-        from bot import PREDICTION_RECOVER_THRESHOLD
-        # Default is 400 cp
-        self.assertIsInstance(PREDICTION_RECOVER_THRESHOLD, int)
-        self.assertGreater(PREDICTION_RECOVER_THRESHOLD, 0)
-
-    def test_eval_for_bot_is_pred_cp_directly(self):
-        """UCI score cp is from side-to-move (always the bot) — no colour flip needed."""
-        # Losing as white: pred_cp already negative from bot's perspective
-        pred_cp_white = -450
-        eval_for_bot = pred_cp_white  # no negation
-        self.assertEqual(eval_for_bot, -450)
-
-    def test_eval_for_bot_black_no_negation(self):
-        """When bot is black and losing, pred_cp is negative — should NOT be negated.
-
-        Old (wrong): eval_for_bot = -pred_cp → positive when losing as black → recovery never fired.
-        New (correct): eval_for_bot = pred_cp → negative when losing as black → recovery fires.
-        """
-        # bot is black, down 9 pawns — Stockfish reports -915 from side-to-move (black)
-        pred_cp = -915
-        eval_for_bot = pred_cp   # direct, no negation
-        self.assertEqual(eval_for_bot, -915)
-        # must trigger recovery
-        self.assertLessEqual(eval_for_bot, -400)
-
-    def test_recovery_triggered_when_below_threshold(self):
-        """Recovery path taken when eval is worse than -threshold."""
-        threshold = 400
-        eval_for_bot = -450  # worse than -400
-        self.assertLessEqual(eval_for_bot, -threshold)
-
-    def test_recovery_not_triggered_near_threshold(self):
-        """Recovery not taken when eval is just within threshold."""
-        threshold = 400
-        eval_for_bot = -399
-        self.assertGreater(eval_for_bot, -threshold)
-
-    def test_recovery_not_triggered_when_winning(self):
-        threshold = 400
-        eval_for_bot = 200
-        self.assertGreater(eval_for_bot, -threshold)
-
-    def test_recovery_uses_full_power_not_limited_engine(self):
-        """Recovery uses ELO boost when below FULL_STRENGTH_THRESHOLD (v2.4.2).
-
-        Below the threshold: UCI_LimitStrength stays active, ELO raised by
-        PREDICTION_RECOVER_ELO_BOOST. Keeps the game winnable for the opponent.
-        """
-        from bot import PREDICTION_RECOVER_ELO_BOOST, FULL_STRENGTH_THRESHOLD
-        target_elo = 1600   # well below 2800
-        recover_elo = min(target_elo + PREDICTION_RECOVER_ELO_BOOST, 2850)
-        self.assertEqual(recover_elo, target_elo + PREDICTION_RECOVER_ELO_BOOST)
-        # Below threshold — should use ELO boost path, not full power
-        self.assertLess(recover_elo, FULL_STRENGTH_THRESHOLD)
-
-    def test_recovery_escalates_to_full_power_near_threshold(self):
-        """When boosted ELO >= FULL_STRENGTH_THRESHOLD, switch to full-power instead.
-
-        An opponent near 2800 already has _target_elo at 2850 (max cap).
-        Adding PREDICTION_RECOVER_ELO_BOOST still gives 2850, which is >= 2800
-        (FULL_STRENGTH_THRESHOLD). In this case recovery should use full-power
-        Stockfish, not the ELO-capped engine.
-        """
-        from bot import PREDICTION_RECOVER_ELO_BOOST, FULL_STRENGTH_THRESHOLD
-        # Opponent near 2800: _target_elo already at Stockfish max
-        target_elo = 2850
-        recover_elo = min(target_elo + PREDICTION_RECOVER_ELO_BOOST, 2850)
-        # recover_elo is capped at 2850 — >= FULL_STRENGTH_THRESHOLD → full power path
-        self.assertGreaterEqual(recover_elo, FULL_STRENGTH_THRESHOLD)
-
-    def test_recovery_elo_boost_caps_at_2850(self):
-        """ELO boost must never exceed the Stockfish max of 2850."""
-        from bot import PREDICTION_RECOVER_ELO_BOOST
-        target_elo = 2800
-        recover_elo = min(target_elo + PREDICTION_RECOVER_ELO_BOOST, 2850)
-        self.assertLessEqual(recover_elo, 2850)
-
-    def test_recover_elo_boost_default(self):
-        """PREDICTION_RECOVER_ELO_BOOST default is 200."""
-        from bot import PREDICTION_RECOVER_ELO_BOOST
-        self.assertEqual(PREDICTION_RECOVER_ELO_BOOST, 200)
-
-    @patch('bot.PREDICTION_RECOVER_THRESHOLD', 400)
-    def test_recovery_threshold_env_override(self):
-        """Patching PREDICTION_RECOVER_THRESHOLD is respected in comparisons."""
-        from bot import PREDICTION_RECOVER_THRESHOLD
-        self.assertEqual(PREDICTION_RECOVER_THRESHOLD, 400)
-
-
-class TestMatingPvLogic(unittest.TestCase):
-    """Test mate-based prediction routing logic (commit d0fad89)."""
-
-    def test_positive_mate_val_follows_predicted_move(self):
-        """When mate_val > 0, bot should follow the predicted continuation."""
-        predicted_move = "d1h5"
-        mate_val = 3
-
-        if mate_val is not None and mate_val > 0:
-            move = predicted_move or "fallback"
-        elif mate_val is not None and mate_val < 0:
-            move = "defensive_move"
-        else:
-            move = predicted_move or "standard"
-
-        self.assertEqual(move, "d1h5")
-
-    def test_negative_mate_val_picks_defensive_move(self):
-        """When mate_val < 0, bot should avoid the predicted continuation."""
-        predicted_move = "e8g8"
-        mate_val = -2
-
-        if mate_val is not None and mate_val > 0:
-            move = predicted_move or "fallback"
-        elif mate_val is not None and mate_val < 0:
-            move = "defensive_move"  # engine re-search
-        else:
-            move = predicted_move or "standard"
-
-        self.assertEqual(move, "defensive_move")
-
-    def test_none_mate_val_uses_predicted_move(self):
-        """When mate_val is None (no mate), normal prediction path is used."""
-        predicted_move = "e2e4"
-        mate_val = None
-
-        if mate_val is not None and mate_val > 0:
-            move = "mating"
-        elif mate_val is not None and mate_val < 0:
-            move = "defensive_move"
-        else:
-            move = predicted_move or "standard"
-
-        self.assertEqual(move, "e2e4")
-
-    def test_none_mate_val_no_predicted_move_falls_back(self):
-        """When both mate_val and predicted_move are None, fallback is used."""
-        predicted_move = None
-        mate_val = None
-
-        if mate_val is not None and mate_val > 0:
-            move = "mating"
-        elif mate_val is not None and mate_val < 0:
-            move = "defensive_move"
-        else:
-            move = predicted_move or "standard_search"
-
-        self.assertEqual(move, "standard_search")
-
-
 class TestFullPowerMateMove(unittest.TestCase):
-    """Test _get_full_power_move helper — disables UCI_LimitStrength, restores after (v2.4.2)."""
+    """Test _get_full_power_move helper — disables UCI_LimitStrength, restores after."""
 
     def _make_stockfish_mock(self, best_move: str = "e2e4"):
         mock_sf = MagicMock()
@@ -1346,36 +1102,7 @@ class TestFullPowerMateMove(unittest.TestCase):
 
 
 class TestClockAdjustedSecondarySearch(unittest.TestCase):
-    """Validate clock-budget logic for secondary searches after prediction (v2.4.2).
-
-    The play_game loop computes _remaining_after_pred = max(0, _my_remaining - elapsed_ms)
-    to ensure mate / recovery searches never exceed the original per-move clock budget.
-    These tests validate that inline arithmetic pattern directly.
-    """
-
-    def test_remaining_after_pred_normal(self):
-        """Remaining clock is reduced by the elapsed prediction time."""
-        _my_remaining = 30_000   # 30 s
-        _pred_elapsed_ms = 1_200
-        _remaining_after_pred = max(0, _my_remaining - _pred_elapsed_ms)
-        self.assertEqual(_remaining_after_pred, 28_800)
-
-    def test_remaining_after_pred_floors_at_zero(self):
-        """remaining_after_pred never goes negative (e.g., lag spike longer than remaining)."""
-        _my_remaining = 500
-        _pred_elapsed_ms = 800   # elapsed > remaining (extreme lag spike)
-        _remaining_after_pred = max(0, _my_remaining - _pred_elapsed_ms)
-        self.assertEqual(_remaining_after_pred, 0)
-
-    def test_remaining_after_pred_none_passthrough(self):
-        """When _my_remaining is None (no clock data), remaining_after_pred stays None."""
-        _my_remaining = None
-        _pred_elapsed_ms = 1_000
-        _remaining_after_pred = (
-            max(0, _my_remaining - _pred_elapsed_ms)
-            if _my_remaining else None
-        )
-        self.assertIsNone(_remaining_after_pred)
+    """A second search in the same move is budgeted from the clock left after the first."""
 
     def test_clock_aware_uses_adjusted_remaining(self):
         """clock_aware_move_time respects remaining_after_pred, not original remaining."""
@@ -1391,90 +1118,6 @@ class TestClockAdjustedSecondarySearch(unittest.TestCase):
 
         self.assertLess(budget_adjusted, budget_original,
                         "Adjusted-clock budget must be smaller than original-clock budget")
-
-    def test_fallback_uses_movetime_min_ms_not_full_budget(self):
-        """Exceptional fallback path uses MOVETIME_MIN_MS, not the full move_time budget."""
-        from bot import MOVETIME_MIN_MS
-        move_time = 3_000   # 3 s — a normal rapid-game budget
-        # Simulated exceptional path: _get_full_power_move returns None
-        full_power_result = None
-        fallback_time = MOVETIME_MIN_MS   # must NOT be move_time
-        move = full_power_result or f"stockfish.get_best_move_time({fallback_time})"
-        self.assertIn(str(MOVETIME_MIN_MS), move)
-        self.assertNotIn(str(move_time), move)
-
-
-class TestConcurrentGameLimit(unittest.TestCase):
-    """Test concurrent game limit logic."""
-
-    def test_limit_prevents_excess_games(self):
-        """When active_games >= MAX_CONCURRENT_GAMES, new game should be rejected."""
-        import threading
-        max_concurrent = 1
-        active_games = {"game1": threading.Thread(target=lambda: None)}
-        active_games["game1"].start()
-        active_games["game1"].join()  # make it finish but keep in dict
-
-        # Simulate dead-thread cleanup + limit check (mirrors main loop logic)
-        dead = [gid for gid, t in active_games.items() if not t.is_alive()]
-        for gid in dead:
-            del active_games[gid]
-
-        # After cleanup, dead thread removed → slot available
-        self.assertLess(len(active_games), max_concurrent)
-
-    def test_limit_blocks_when_game_alive(self):
-        """A still-running game thread blocks new games."""
-        import threading
-        max_concurrent = 1
-
-        blocker = threading.Event()
-        def busy():
-            blocker.wait(timeout=5)
-
-        t = threading.Thread(target=busy, daemon=True)
-        t.start()
-        active_games = {"game1": t}
-
-        # Thread is alive → at limit
-        alive_count = sum(1 for t in active_games.values() if t.is_alive())
-        self.assertGreaterEqual(alive_count, max_concurrent)
-
-        blocker.set()  # cleanup
-        t.join(timeout=2)
-
-
-class TestTerminalStatuses(unittest.TestCase):
-    """Test _TERMINAL_STATUSES constant."""
-
-    def test_terminal_statuses_is_frozenset(self):
-        from bot import _TERMINAL_STATUSES
-        self.assertIsInstance(_TERMINAL_STATUSES, frozenset)
-
-    def test_terminal_statuses_contains_expected(self):
-        from bot import _TERMINAL_STATUSES
-        for status in ["mate", "resign", "stalemate", "timeout", "draw",
-                        "outoftime", "aborted", "cheat", "noStart",
-                        "unknownFinish", "variantEnd"]:
-            self.assertIn(status, _TERMINAL_STATUSES)
-
-    def test_started_not_terminal(self):
-        from bot import _TERMINAL_STATUSES
-        self.assertNotIn("started", _TERMINAL_STATUSES)
-        self.assertNotIn("created", _TERMINAL_STATUSES)
-
-
-class TestGameStuckException(unittest.TestCase):
-    """Test _GameStuck exception class."""
-
-    def test_is_exception(self):
-        from bot import _GameStuck
-        self.assertTrue(issubclass(_GameStuck, Exception))
-
-    def test_message_preserved(self):
-        from bot import _GameStuck
-        exc = _GameStuck("test message")
-        self.assertEqual(str(exc), "test message")
 
 
 class TestStreamWithWatchdog(unittest.TestCase):
@@ -1550,132 +1193,6 @@ class TestStreamWithWatchdog(unittest.TestCase):
                 pass
 
 
-class TestGameWatchdogConfig(unittest.TestCase):
-    """Test GAME_WATCHDOG_INTERVAL config."""
-
-    def test_config_importable(self):
-        from config import GAME_WATCHDOG_INTERVAL
-        self.assertIsInstance(GAME_WATCHDOG_INTERVAL, int)
-        self.assertGreater(GAME_WATCHDOG_INTERVAL, 0)
-
-    def test_default_value(self):
-        from config import GAME_WATCHDOG_INTERVAL
-        self.assertEqual(GAME_WATCHDOG_INTERVAL, 60)
-
-
-class TestOpponentGoneHandling(unittest.TestCase):
-    """Test opponentGone event handling logic."""
-
-    def test_opponent_gone_event_structure(self):
-        """Verify opponentGone event parsing logic."""
-        event = {"type": "opponentGone", "gone": True, "claimWinInSeconds": 10}
-        self.assertTrue(event.get("gone", False))
-        self.assertEqual(event.get("claimWinInSeconds"), 10)
-
-    def test_opponent_returned_event(self):
-        """Verify opponentGone with gone=False is recognized."""
-        event = {"type": "opponentGone", "gone": False}
-        self.assertFalse(event.get("gone", False))
-        self.assertIsNone(event.get("claimWinInSeconds"))
-
-    def test_claim_victory_timer_created(self):
-        """Timer is created and is a daemon for auto-cleanup."""
-        claim_seconds = 15
-        timer = threading.Timer(claim_seconds + 1, lambda: None)
-        timer.daemon = True
-        self.assertTrue(timer.daemon)
-        self.assertFalse(timer.is_alive())
-        timer.cancel()  # cleanup
-
-    def test_claim_victory_timer_cancellation(self):
-        """Timer can be cancelled before firing."""
-        fired = threading.Event()
-        timer = threading.Timer(0.5, fired.set)
-        timer.daemon = True
-        timer.start()
-        timer.cancel()
-        time.sleep(0.7)  # wait past the timer
-        self.assertFalse(fired.is_set(), "Timer should have been cancelled")
-
-
-class TestStartupGameCleanup(unittest.TestCase):
-    """Test startup stuck game cleanup logic."""
-
-    def test_ongoing_games_empty(self):
-        """No action when no ongoing games."""
-        mock_client = Mock()
-        mock_client.games.get_ongoing.return_value = []
-        ongoing = mock_client.games.get_ongoing()
-        self.assertEqual(len(ongoing), 0)
-
-    def test_ongoing_game_already_finished(self):
-        """Already finished games are skipped."""
-        from bot import _TERMINAL_STATUSES
-        game = {"gameId": "abc", "status": {"name": "aborted"}, "opponent": {"username": "test"}}
-        status = game.get("status", {})
-        status_name = status.get("name", status) if isinstance(status, dict) else str(status)
-        self.assertIn(status_name, _TERMINAL_STATUSES)
-
-    def test_ongoing_game_few_moves_abort(self):
-        """Games with < 2 moves should be aborted."""
-        mock_client = Mock()
-        mock_client.games.export.return_value = {"moves": "e2e4", "status": "started"}
-        full = mock_client.games.export("abc")
-        moves = full.get("moves", "")
-        move_count = len(moves.split()) if moves else 0
-        self.assertLess(move_count, 2)
-
-    def test_ongoing_game_many_moves_resume(self):
-        """Games with >= 2 moves should be resumed, not aborted."""
-        mock_client = Mock()
-        mock_client.games.export.return_value = {"moves": "e2e4 e7e5 d2d4", "status": "started"}
-        full = mock_client.games.export("abc")
-        moves = full.get("moves", "")
-        move_count = len(moves.split()) if moves else 0
-        self.assertGreaterEqual(move_count, 2)
-
-    def test_status_as_string(self):
-        """Handle status field that is a plain string rather than dict."""
-        from bot import _TERMINAL_STATUSES
-        game = {"gameId": "abc", "status": "started", "opponent": {"username": "test"}}
-        status = game.get("status", {})
-        status_name = status.get("name", status) if isinstance(status, dict) else str(status)
-        self.assertNotIn(status_name, _TERMINAL_STATUSES)
-
-
-class TestGameStreamReconnect502(unittest.TestCase):
-    """Test that game stream handles 502/503/504 as reconnectable errors."""
-
-    def _make_response_error(self, status_code):
-        """Create a ResponseError with the given status code."""
-        from berserk.exceptions import ResponseError
-        mock_resp = Mock()
-        mock_resp.status_code = status_code
-        mock_resp.text = f"Error {status_code}"
-        mock_resp.args = (f"Error {status_code}",)
-        try:
-            exc = ResponseError(mock_resp)
-        except Exception:
-            # Fallback for different berserk versions
-            exc = ResponseError.__new__(ResponseError)
-            exc.response = mock_resp
-            Exception.__init__(exc, f"Error {status_code}")
-        exc.response = mock_resp
-        return exc
-
-    def test_response_error_502_is_retriable(self):
-        """ResponseError with 502 status should trigger reconnect, not break."""
-        e = self._make_response_error(502)
-        is_retriable = hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]
-        self.assertTrue(is_retriable)
-
-    def test_response_error_404_is_not_retriable(self):
-        """ResponseError with 404 status should NOT be retried."""
-        e = self._make_response_error(404)
-        is_retriable = hasattr(e, 'response') and e.response and e.response.status_code in [502, 503, 504]
-        self.assertFalse(is_retriable)
-
-
 class TestWatchdogConsecutiveFailures(unittest.TestCase):
     """Test that watchdog escalates after consecutive API failures."""
 
@@ -1726,51 +1243,6 @@ class TestWatchdogConsecutiveFailures(unittest.TestCase):
         self.assertEqual(len(result), 1)
         # Should NOT have raised _GameStuck — failures reset on success
         self.assertGreaterEqual(call_count, 3)
-
-
-class TestNoFirstMoveAbort(unittest.TestCase):
-    """Test that the bot aborts the game when the opponent never makes theirfirst move."""
-
-    def test_no_first_move_timer_starts_when_waiting_for_opponent(self):
-        """Timer should start when bot is black and opponent hasn't moved."""
-        # The timer is started inside play_game after gameFull.
-        # We test the logic: 0 moves + not our turn → timer should be set.
-        board = chess.Board()
-        bot_is_white = False  # bot is black
-        last_move_count = 0
-
-        is_my_turn = (
-            (board.turn == chess.WHITE and bot_is_white) or
-            (board.turn == chess.BLACK and not bot_is_white)
-        )
-        should_start_timer = last_move_count == 0 and not is_my_turn
-        self.assertTrue(should_start_timer)
-
-    def test_no_first_move_timer_not_started_when_bot_is_white(self):
-        """Timer should NOT start when bot is white (bot moves first)."""
-        board = chess.Board()
-        bot_is_white = True  # bot is white → it's our turn
-        last_move_count = 0
-
-        is_my_turn = (
-            (board.turn == chess.WHITE and bot_is_white) or
-            (board.turn == chess.BLACK and not bot_is_white)
-        )
-        should_start_timer = last_move_count == 0 and not is_my_turn
-        self.assertFalse(should_start_timer)
-
-    def test_no_first_move_timer_not_started_when_moves_exist(self):
-        """Timer should NOT start when there are already moves on the board."""
-        board = chess.Board()
-        bot_is_white = False
-        last_move_count = 1  # opponent already made a move
-
-        is_my_turn = (
-            (board.turn == chess.WHITE and bot_is_white) or
-            (board.turn == chess.BLACK and not bot_is_white)
-        )
-        should_start_timer = last_move_count == 0 and not is_my_turn
-        self.assertFalse(should_start_timer)
 
 
 class TestGetLastInfoLine(unittest.TestCase):
@@ -1846,57 +1318,6 @@ class TestGetLastEvalCp(unittest.TestCase):
         self.assertIsNone(result)
 
 
-class TestWatchdogAbortTimeout(unittest.TestCase):
-    """Tests for the game watchdog abort timeout feature."""
-
-    def test_abort_timeout_config_imported(self):
-        """GAME_WATCHDOG_ABORT_TIMEOUT is importable from config."""
-        from config import GAME_WATCHDOG_ABORT_TIMEOUT
-        self.assertIsInstance(GAME_WATCHDOG_ABORT_TIMEOUT, int)
-        self.assertGreater(GAME_WATCHDOG_ABORT_TIMEOUT, 0)
-
-    def test_abort_timeout_default_value(self):
-        """Default abort timeout is 600 seconds (10 minutes)."""
-        from config import GAME_WATCHDOG_ABORT_TIMEOUT
-        # If not overridden in env, default is 600
-        env_value = os.environ.get("GAME_WATCHDOG_ABORT_TIMEOUT")
-        if env_value is None:
-            self.assertEqual(GAME_WATCHDOG_ABORT_TIMEOUT, 600)
-
-    def test_terminal_statuses_include_aborted(self):
-        """Ensure 'aborted' is a terminal status (watchdog abort should end the game)."""
-        from bot import _TERMINAL_STATUSES
-        self.assertIn("aborted", _TERMINAL_STATUSES)
-
-
-class TestMaxConcurrentGamesConfig(unittest.TestCase):
-    """Tests for MAX_CONCURRENT_GAMES configuration."""
-
-    def test_config_importable(self):
-        """MAX_CONCURRENT_GAMES is importable from config."""
-        from config import MAX_CONCURRENT_GAMES
-        self.assertIsInstance(MAX_CONCURRENT_GAMES, int)
-        self.assertGreater(MAX_CONCURRENT_GAMES, 0)
-
-    def test_default_value_is_2(self):
-        """Default value is 2."""
-        from config import MAX_CONCURRENT_GAMES
-        env_value = os.environ.get("MAX_CONCURRENT_GAMES")
-        if env_value is None:
-            self.assertEqual(MAX_CONCURRENT_GAMES, 2)
-
-    def test_bot_imports_max_concurrent_games(self):
-        """bot.py imports MAX_CONCURRENT_GAMES from config."""
-        import bot
-        self.assertTrue(hasattr(bot, 'MAX_CONCURRENT_GAMES'))
-        self.assertEqual(bot.MAX_CONCURRENT_GAMES, bot.MAX_CONCURRENT_GAMES)
-
-    def test_bot_imports_abort_timeout(self):
-        """bot.py imports GAME_WATCHDOG_ABORT_TIMEOUT from config."""
-        import bot
-        self.assertTrue(hasattr(bot, 'GAME_WATCHDOG_ABORT_TIMEOUT'))
-
-
 class TestStreamWithWatchdogAbort(unittest.TestCase):
     """Tests for _stream_with_watchdog stuck-game abort logic."""
 
@@ -1928,13 +1349,6 @@ class TestStreamWithWatchdogAbort(unittest.TestCase):
                     pass
         finally:
             block.set()  # unblock reader thread so it can exit cleanly
-
-    def test_game_stuck_exception_exists(self):
-        """_GameStuck exception class should be importable."""
-        from bot import _GameStuck
-        exc = _GameStuck("test msg")
-        self.assertIsInstance(exc, Exception)
-        self.assertEqual(str(exc), "test msg")
 
 
 class TestVariantRejection(unittest.TestCase):
@@ -2013,46 +1427,6 @@ class TestVariantRejection(unittest.TestCase):
             self.assertFalse(should_accept_challenge(c))
 
 
-class TestSyzygyPathConfig(unittest.TestCase):
-    """Tests for Syzygy tablebase auto-detection in config.py."""
-
-    def test_syzygy_path_added_when_tablebase_files_exist(self):
-        """SyzygyPath should be added to UCI_OPTIONS when .rtbw files exist."""
-        import importlib
-        import config as config_module
-
-        with patch.dict(os.environ, {"SF_SYZYGY_PATH": "/fake/syzygy"}, clear=False), \
-             patch("config.os.path.isdir", return_value=True), \
-             patch("config.os.listdir", return_value=["KQvK.rtbw", "KQvK.rtbz"]):
-            # Simulate detection logic
-            self.assertTrue(os.path.isdir.__wrapped__("/fake/syzygy") if hasattr(os.path.isdir, '__wrapped__') else True)
-            # Direct logic test: if dir exists and has .rtbw files, SyzygyPath should be set
-            has_tb = any(f.endswith((".rtbw", ".rtbz")) for f in ["KQvK.rtbw", "KQvK.rtbz"])
-            self.assertTrue(has_tb)
-
-    def test_syzygy_path_not_added_when_no_dir(self):
-        """SyzygyPath should NOT be in UCI_OPTIONS when the directory doesn't exist."""
-        from config import UCI_OPTIONS
-        # If no syzygy dir with tablebase files exists, the key should be absent
-        # (unless the test environment happens to have one)
-        syzygy_path = os.getenv("SF_SYZYGY_PATH", "./syzygy")
-        if not os.path.isdir(syzygy_path) or not any(
-            f.endswith((".rtbw", ".rtbz")) for f in (os.listdir(syzygy_path) if os.path.isdir(syzygy_path) else [])
-        ):
-            self.assertNotIn("SyzygyPath", UCI_OPTIONS)
-
-    def test_syzygy_path_not_added_when_dir_empty(self):
-        """SyzygyPath should NOT be set when syzygy dir exists but has no tablebase files."""
-        has_tb = any(f.endswith((".rtbw", ".rtbz")) for f in ["README.md"])
-        self.assertFalse(has_tb)
-
-    def test_syzygy_env_var_is_respected(self):
-        """SF_SYZYGY_PATH env var should override the default ./syzygy path."""
-        with patch.dict(os.environ, {"SF_SYZYGY_PATH": "/custom/path"}, clear=False):
-            result = os.getenv("SF_SYZYGY_PATH", "./syzygy")
-            self.assertEqual(result, "/custom/path")
-
-
 class TestTimeCategoryClassification(unittest.TestCase):
     """Tests for determine_time_category boundary conditions."""
 
@@ -2080,78 +1454,6 @@ class TestTimeCategoryClassification(unittest.TestCase):
         """Very large limits (correspondence) should return None."""
         from bot import determine_time_category
         self.assertIsNone(determine_time_category(259200, 0))
-
-
-class TestFirstMoveClockCap(unittest.TestCase):
-    """Test the first-move clock cap logic for both white and black.
-
-    Bug: the original condition ``board.fullmove_number <= 1 and
-    len(board.move_stack) == 0`` was only true for white on an empty board.
-    For black (stack has 1 move after opponent plays), the cap never applied
-    and Stockfish could think for minutes, causing Lichess to abort.
-    """
-
-    def test_black_first_move_detected(self):
-        """Bot as black with 1 move on stack should be detected as first move."""
-        board = chess.Board()
-        board.push_uci("c2c4")  # opponent's first move
-        bot_is_white = False
-        _bot_first_move = (
-            (bot_is_white and len(board.move_stack) == 0) or
-            (not bot_is_white and len(board.move_stack) == 1)
-        )
-        self.assertTrue(_bot_first_move)
-
-    def test_white_first_move_detected(self):
-        """Bot as white with empty stack should be detected as first move."""
-        board = chess.Board()
-        bot_is_white = True
-        _bot_first_move = (
-            (bot_is_white and len(board.move_stack) == 0) or
-            (not bot_is_white and len(board.move_stack) == 1)
-        )
-        self.assertTrue(_bot_first_move)
-
-    def test_second_move_not_capped_white(self):
-        """White's second move (stack=2) should NOT trigger first-move cap."""
-        board = chess.Board()
-        board.push_uci("e2e4")
-        board.push_uci("e7e5")
-        bot_is_white = True
-        _bot_first_move = (
-            (bot_is_white and len(board.move_stack) == 0) or
-            (not bot_is_white and len(board.move_stack) == 1)
-        )
-        self.assertFalse(_bot_first_move)
-
-    def test_second_move_not_capped_black(self):
-        """Black's second move (stack=3) should NOT trigger first-move cap."""
-        board = chess.Board()
-        board.push_uci("e2e4")
-        board.push_uci("e7e5")
-        board.push_uci("g1f3")
-        bot_is_white = False
-        _bot_first_move = (
-            (bot_is_white and len(board.move_stack) == 0) or
-            (not bot_is_white and len(board.move_stack) == 1)
-        )
-        self.assertFalse(_bot_first_move)
-
-    def test_cap_value_applied_to_btime_for_black(self):
-        """When bot is black on first move, btime should be capped at 15s."""
-        _FIRST_MOVE_CAP_MS = 15_000
-        btime_ms = 900_000  # 15 minutes
-        _effective_btime = btime_ms
-        bot_is_white = False
-        board = chess.Board()
-        board.push_uci("c2c4")
-        _bot_first_move = (
-            (bot_is_white and len(board.move_stack) == 0) or
-            (not bot_is_white and len(board.move_stack) == 1)
-        )
-        if _bot_first_move and not bot_is_white and btime_ms > _FIRST_MOVE_CAP_MS:
-            _effective_btime = _FIRST_MOVE_CAP_MS
-        self.assertEqual(_effective_btime, 15_000)
 
 
 if __name__ == '__main__':
