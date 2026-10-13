@@ -610,6 +610,54 @@ class TestReconnectDuringGames(EventLoopTestCase):
         self.state.client.bots.resign_game.assert_not_called()
 
 
+class TestBotEndpoints(StubLichessTestCase):
+    """Calls berserk has no method for are sent like every other call."""
+
+    def setUp(self):
+        super().setUp()
+        self.client = berserk.Client(session_with_timeout((2, 2)), base_url=self.lichess.url)
+
+    def test_accepting_a_draw(self):
+        self.lichess.reply("POST", "/api/bot/game/game0001/draw/yes")
+
+        bot.answer_draw_offer(self.client, "game0001", accept=True)
+
+        method, path, headers, _ = self.lichess.requests[-1]
+        self.assertEqual((method, path), ("POST", "/api/bot/game/game0001/draw/yes"))
+        self.assertEqual(headers["Authorization"], "Bearer test-token")
+
+    def test_declining_a_draw(self):
+        self.lichess.reply("POST", "/api/bot/game/game0001/draw/no")
+
+        bot.answer_draw_offer(self.client, "game0001", accept=False)
+
+        self.assertEqual(self.lichess.paths("POST"), ["/api/bot/game/game0001/draw/no"])
+
+    def test_claiming_a_win(self):
+        self.lichess.reply("POST", "/api/bot/game/game0001/claim-victory")
+
+        bot.claim_victory(self.client, "game0001")
+
+        self.assertEqual(self.lichess.paths("POST"), ["/api/bot/game/game0001/claim-victory"])
+
+    def test_a_refusal_is_reported_as_an_error(self):
+        self.lichess.reply("POST", "/api/bot/game/game0001/claim-victory", 400, {"error": "The opponent is back"})
+
+        with self.assertRaises(berserk.exceptions.ResponseError) as caught:
+            bot.claim_victory(self.client, "game0001")
+
+        self.assertEqual(bot._http_status(caught.exception), 400)
+
+    def test_an_unanswered_call_times_out(self):
+        self.lichess.stream("/api/bot/game/game0001/draw/no", [STALL])
+        client = berserk.Client(session_with_timeout((2, 0.5)), base_url=self.lichess.url)
+
+        finished, box = within(5, lambda: bot.answer_draw_offer(client, "game0001", accept=False))
+
+        self.assertTrue(finished)
+        self.assertTrue(bot._is_network_error(box["error"]))
+
+
 class FakeClock:
     def __init__(self):
         self.now = 1000.0

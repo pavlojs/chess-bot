@@ -994,6 +994,65 @@ def try_challenge_random_bot(client: berserk.Client, bot_username: str,
 
 
 # ─────────────────────────────────────────────
+# DRAW OFFERS AND ABANDONED GAMES
+# ─────────────────────────────────────────────
+
+# A draw is accepted while the position is worth at most this much to either side.
+DRAW_ACCEPT_WINDOW_CP = 200
+
+
+def should_accept_draw(evaluation_cp: int) -> bool:
+    """Accept a draw in a roughly level position only.
+
+    ``evaluation_cp`` is from the bot's side. A forced mate arrives as ±30000
+    and is declined either way: with a win in hand, or to make the opponent
+    prove the mate.
+    """
+    return -DRAW_ACCEPT_WINDOW_CP <= evaluation_cp <= DRAW_ACCEPT_WINDOW_CP
+
+
+def evaluation_for_bot(stockfish: Stockfish, board: chess.Board, bot_is_white: bool,
+                       last_eval_cp: Optional[int]) -> int:
+    """Value of the position in centipawns from the bot's side, a forced mate as ±30000.
+
+    The evaluation left by the bot's last search is used when there is one: it
+    was made with the bot to move, so it is already from the bot's side.
+    Otherwise the engine is asked. Its answer is from the side to move and is
+    turned round when that side is the opponent.
+    """
+    if last_eval_cp is not None:
+        return last_eval_cp
+
+    stockfish.set_fen_position(board.fen())
+    info = stockfish.get_evaluation()
+    if info["type"] == "cp":
+        cp = info["value"]
+    else:
+        cp = 30000 if info["value"] > 0 else -30000
+
+    bot_to_move = (board.turn == chess.WHITE) == bot_is_white
+    return cp if bot_to_move else -cp
+
+
+def _bot_post(client: berserk.Client, path: str):
+    """POST to a bot endpoint that berserk has no method for.
+
+    Goes through the client's own requestor, so the token, the timeout and the
+    error types are the same as for every other call.
+    """
+    client.bots._r.post(path)
+
+
+def answer_draw_offer(client: berserk.Client, game_id: str, accept: bool):
+    _bot_post(client, f"/api/bot/game/{game_id}/draw/{'yes' if accept else 'no'}")
+
+
+def claim_victory(client: berserk.Client, game_id: str):
+    """Claim the win of a game the opponent has left."""
+    _bot_post(client, f"/api/bot/game/{game_id}/claim-victory")
+
+
+# ─────────────────────────────────────────────
 # GAME THREAD
 # ─────────────────────────────────────────────
 
@@ -1239,81 +1298,24 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         )
                         if opponent_draw_now and not last_opponent_draw:
                             logger.info(f"[{game_id}] Draw offer received")
-                            
+
                             if stockfish:
+                                # Anything going wrong while judging the offer declines it.
+                                accept_draw = False
                                 try:
-                                    accept_draw = False
-
-                                    # Reuse the eval cached from the last move search — no extra engine
-                                    # call needed. Fall back to get_evaluation() only at game start.
-                                    if last_eval_cp is not None:
-                                        # last_eval_cp is from side-to-move perspective at search time,
-                                        # which was always the bot's turn → already bot's perspective.
-                                        evaluation = last_eval_cp
-                                    else:
-                                        # First few moves or no cache yet — quick explicit evaluation.
-                                        # get_evaluation() returns from current side-to-move perspective;
-                                        # flip only if it's the opponent's turn.
-                                        stockfish.set_fen_position(board.fen())
-                                        eval_info = stockfish.get_evaluation()
-                                        if eval_info["type"] == "cp":
-                                            raw_cp = eval_info["value"]
-                                        else:
-                                            mate = eval_info["value"]
-                                            raw_cp = 30000 if mate > 0 else -30000
-                                        bot_is_side_to_move = (board.turn == chess.WHITE) == bot_is_white
-                                        evaluation = raw_cp if bot_is_side_to_move else -raw_cp
-
-                                    logger.info(f"[{game_id}] Position evaluation: {evaluation} centipawns")
-
-                                    if abs(evaluation) >= 29000:
-                                        # Mate evaluation — always decline
-                                        if evaluation > 0:
-                                            logger.info(f"[{game_id}] Declining draw offer (we have mate)")
-                                        else:
-                                            logger.info(f"[{game_id}] Declining draw offer (getting mated, but will fight)")
-                                    elif -200 <= evaluation <= 200:
-                                        accept_draw = True
-                                        logger.info(f"[{game_id}] Accepting draw offer (balanced position: {evaluation}cp)")
-                                    elif evaluation > 200:
-                                        logger.info(f"[{game_id}] Declining draw offer (we're winning: {evaluation}cp)")
-                                    else:
-                                        logger.info(f"[{game_id}] Declining draw offer (we're losing but engine can play: {evaluation}cp)")
-
-                                    # Send decision via API (try library first, then fall back to BOT endpoint)
-                                    try:
-                                        client.board.handle_draw_offer(game_id, accept=accept_draw)
-                                    except Exception as api_error:
-                                        # If the error indicates this endpoint isn't for BOT accounts,
-                                        # fallback to the BOT HTTP endpoint which supports bot tokens.
-                                        err_text = str(api_error).lower()
-                                        if "not for bot accounts" in err_text or "403" in err_text or (getattr(api_error, 'response', None) and getattr(api_error.response, 'status_code', None) == 403):
-                                            try:
-                                                url_action = "yes" if accept_draw else "no"
-                                                url = f"https://lichess.org/api/bot/game/{game_id}/draw/{url_action}"
-                                                headers = {"Authorization": f"Bearer {TOKEN}"}
-                                                resp = requests.post(url, headers=headers, timeout=10)
-                                                if resp.status_code >= 400:
-                                                    logger.error(f"[{game_id}] BOT endpoint responded {resp.status_code}: {resp.text}")
-                                                else:
-                                                    logger.info(f"[{game_id}] Responded to draw via BOT endpoint: {url_action}")
-                                            except Exception as http_err:
-                                                logger.error(f"[{game_id}] Failed to respond to draw offer via BOT endpoint: {http_err}")
-                                        else:
-                                            logger.error(f"[{game_id}] Failed to respond to draw offer: {api_error}")
-
+                                    evaluation = evaluation_for_bot(stockfish, board, bot_is_white, last_eval_cp)
+                                    accept_draw = should_accept_draw(evaluation)
+                                    logger.info(
+                                        f"[{game_id}] {'Accepting' if accept_draw else 'Declining'} draw offer "
+                                        f"(evaluation for the bot: {evaluation:+d} cp)"
+                                    )
                                 except Exception as e:
                                     logger.error(f"[{game_id}] Error evaluating draw offer: {e}")
-                                    # On error, attempt to decline draw and continue playing
-                                    try:
-                                        client.board.handle_draw_offer(game_id, accept=False)
-                                    except Exception as api_error:
-                                        try:
-                                            url = f"https://lichess.org/api/bot/game/{game_id}/draw/no"
-                                            headers = {"Authorization": f"Bearer {TOKEN}"}
-                                            requests.post(url, headers=headers, timeout=10)
-                                        except Exception as e:
-                                            logger.debug(f"Draw decline failed for {game_id}: {e}")
+
+                                try:
+                                    answer_draw_offer(client, game_id, accept_draw)
+                                except Exception as e:
+                                    logger.error(f"[{game_id}] Failed to answer draw offer: {e}")
 
                         last_opponent_draw = opponent_draw_now
 
@@ -1330,15 +1332,10 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                             if claim_seconds is not None:
                                 def _claim_win(_gid=game_id):
                                     try:
-                                        url = f"https://lichess.org/api/bot/game/{_gid}/claim-victory"
-                                        headers = {"Authorization": f"Bearer {TOKEN}"}
-                                        resp = requests.post(url, headers=headers, timeout=10)
-                                        if resp.status_code < 400:
-                                            logger.info(f"[{_gid}] Claimed victory (opponent gone)")
-                                        else:
-                                            logger.warning(f"[{_gid}] Claim victory returned {resp.status_code}: {resp.text}")
+                                        claim_victory(client, _gid)
+                                        logger.info(f"[{_gid}] Claimed victory (opponent gone)")
                                     except Exception as e:
-                                        logger.error(f"[{_gid}] Failed to claim victory: {e}")
+                                        logger.warning(f"[{_gid}] Could not claim victory: {e}")
                                 _claim_victory_timer = threading.Timer(claim_seconds + 1, _claim_win)
                                 _claim_victory_timer.daemon = True
                                 _claim_victory_timer.start()

@@ -618,137 +618,70 @@ class TestFilterSuitableBots(unittest.TestCase):
         self.assertEqual(client.challenges.create.call_args.args[0], "BulletFine")
 
 
-class TestDrawOfferHandling(unittest.TestCase):
-    """Test draw offer handling logic."""
-    
-    @patch('bot.Stockfish')
-    def test_accept_draw_balanced_position(self, mock_stockfish_class):
-        """Test that draw is accepted in balanced positions (±200cp)."""
-        # Mock Stockfish to return balanced evaluation
-        mock_sf = Mock()
-        mock_sf.get_evaluation.return_value = {"type": "cp", "value": 50}
-        
-        # Simulate bot deciding on draw offer
-        eval_info = mock_sf.get_evaluation()
-        evaluation = eval_info["value"]
-        
-        # Bot is white, so evaluation is from white's perspective
-        accept_draw = -200 <= evaluation <= 200
-        
-        self.assertTrue(accept_draw)
-        self.assertEqual(evaluation, 50)
-    
-    @patch('bot.Stockfish')
-    def test_decline_draw_winning_position(self, mock_stockfish_class):
-        """Test that draw is declined when bot is winning (>200cp)."""
-        # Mock Stockfish to return winning evaluation
-        mock_sf = Mock()
-        mock_sf.get_evaluation.return_value = {"type": "cp", "value": 921}
-        
-        eval_info = mock_sf.get_evaluation()
-        evaluation = eval_info["value"]
-        
-        # Bot is white, so evaluation is from white's perspective
-        accept_draw = -200 <= evaluation <= 200
-        
-        self.assertFalse(accept_draw)
-        self.assertGreater(evaluation, 200)
-    
-    @patch('bot.Stockfish')
-    def test_decline_draw_losing_position(self, mock_stockfish_class):
-        """Test that draw is declined when bot is losing (<-200cp)."""
-        # Mock Stockfish to return losing evaluation
-        mock_sf = Mock()
-        mock_sf.get_evaluation.return_value = {"type": "cp", "value": -1003}
-        
-        eval_info = mock_sf.get_evaluation()
-        evaluation = eval_info["value"]
-        
-        # Bot is white, so evaluation is from white's perspective
-        accept_draw = -200 <= evaluation <= 200
-        
-        self.assertFalse(accept_draw)
-        self.assertLess(evaluation, -200)
-    
-    @patch('bot.Stockfish')
-    def test_decline_draw_mate_position(self, mock_stockfish_class):
-        """Test that draw is declined when bot has mate."""
-        # Mock Stockfish to return mate evaluation
-        mock_sf = Mock()
-        mock_sf.get_evaluation.return_value = {"type": "mate", "value": 3}
-        
-        eval_info = mock_sf.get_evaluation()
-        
-        # Mate evaluation means always decline
-        accept_draw = eval_info["type"] != "mate"
-        
-        self.assertFalse(accept_draw)
-        self.assertEqual(eval_info["type"], "mate")
-    
-    @patch('bot.Stockfish')
-    def test_color_adjustment_for_black(self, mock_stockfish_class):
-        """Test draw eval fallback: get_evaluation() returns from side-to-move perspective.
+class TestDrawOffers(unittest.TestCase):
+    """When the bot takes a draw, and how it reads the position from its own side."""
 
-        When bot is black and it's the opponent's turn (white to move), Stockfish's
-        get_evaluation() reports from white's perspective.  The bot must negate it.
-        """
-        mock_sf = Mock()
-        # Stockfish says +300 from side-to-move (white) — bad for black bot
-        mock_sf.get_evaluation.return_value = {"type": "cp", "value": 300}
+    def engine(self, kind, value):
+        engine = Mock()
+        engine.get_evaluation.return_value = {"type": kind, "value": value}
+        return engine
 
-        eval_info = mock_sf.get_evaluation()
-        raw_cp = eval_info["value"]
+    def test_level_positions_are_accepted_up_to_the_window(self):
+        from bot import should_accept_draw
+        for cp in (0, 50, -50, 200, -200):
+            self.assertTrue(should_accept_draw(cp), cp)
 
-        # New logic: flip based on whether bot is side-to-move, not bot colour
-        bot_is_white = False
-        board_turn_is_white = True  # opponent (white) to move after draw offer
-        bot_is_side_to_move = (board_turn_is_white == bot_is_white)  # False
-        evaluation = raw_cp if bot_is_side_to_move else -raw_cp
+    def test_anything_beyond_the_window_is_declined(self):
+        from bot import should_accept_draw
+        for cp in (201, -201, 921, -915, 30000, -30000):
+            self.assertFalse(should_accept_draw(cp), cp)
 
-        # From bot's (black's) perspective: -300 → losing → reject draw
-        accept_draw = -200 <= evaluation <= 200
-        self.assertFalse(accept_draw)
-        self.assertEqual(evaluation, -300)
+    def test_the_evaluation_of_the_bots_last_search_is_used_as_it_is(self):
+        """It was made with the bot to move, so it is the bot's score whatever its colour."""
+        from bot import evaluation_for_bot
+        engine = self.engine("cp", 999)
+        board = chess.Board()
 
-    @patch('bot.Stockfish')
-    def test_cached_eval_no_color_flip(self, mock_stockfish_class):
-        """Cached last_eval_cp is already from bot's perspective — no flip needed.
+        self.assertEqual(evaluation_for_bot(engine, board, bot_is_white=False, last_eval_cp=-340), -340)
+        self.assertEqual(evaluation_for_bot(engine, board, bot_is_white=True, last_eval_cp=120), 120)
+        engine.get_evaluation.assert_not_called()
 
-        The search that produced last_eval_cp ran on the bot's turn, so UCI
-        'score cp' is from the bot's side-to-move.  The draw handler must
-        use it directly regardless of bot colour.
-        """
-        # Bot is black, cached eval shows bot is losing (-400 from bot's perspective)
-        last_eval_cp = -400
-        evaluation = last_eval_cp  # NO flip — already bot's perspective
+    def test_without_a_search_the_engine_is_asked_about_the_current_position(self):
+        from bot import evaluation_for_bot
+        engine = self.engine("cp", 80)
+        board = chess.Board()
+        board.push_uci("e2e4")
 
-        accept_draw = -200 <= evaluation <= 200
-        self.assertFalse(accept_draw)
-        self.assertEqual(evaluation, -400)
+        evaluation_for_bot(engine, board, bot_is_white=False, last_eval_cp=None)
 
-    @patch('bot.Stockfish')
-    def test_cached_eval_positive_black_accepts_draw(self, mock_stockfish_class):
-        """Cached eval +50 as black → balanced → should accept draw."""
-        last_eval_cp = 50
-        evaluation = last_eval_cp
-        accept_draw = -200 <= evaluation <= 200
-        self.assertTrue(accept_draw)
+        engine.set_fen_position.assert_called_once_with(board.fen())
 
-    @patch('bot.Stockfish')
-    def test_fallback_eval_bot_is_side_to_move(self, mock_stockfish_class):
-        """Fallback eval when bot IS side-to-move → no flip needed."""
-        mock_sf = Mock()
-        mock_sf.get_evaluation.return_value = {"type": "cp", "value": -150}
+    def test_the_engines_answer_is_kept_when_the_bot_is_to_move(self):
+        from bot import evaluation_for_bot
+        board = chess.Board()                      # white to move
 
-        raw_cp = mock_sf.get_evaluation()["value"]
-        bot_is_white = True
-        board_turn_is_white = True  # bot's turn
-        bot_is_side_to_move = (board_turn_is_white == bot_is_white)
-        evaluation = raw_cp if bot_is_side_to_move else -raw_cp
+        self.assertEqual(evaluation_for_bot(self.engine("cp", 300), board, bot_is_white=True, last_eval_cp=None), 300)
 
-        self.assertEqual(evaluation, -150)  # no flip
-        accept_draw = -200 <= evaluation <= 200
-        self.assertTrue(accept_draw)
+        board.push_uci("e2e4")                     # black to move
+        self.assertEqual(evaluation_for_bot(self.engine("cp", 300), board, bot_is_white=False, last_eval_cp=None), 300)
+
+    def test_the_engines_answer_is_turned_round_when_the_opponent_is_to_move(self):
+        """The engine speaks for the side to move; +300 for the opponent is -300 for the bot."""
+        from bot import evaluation_for_bot
+        board = chess.Board()                      # white to move, bot is black
+
+        self.assertEqual(evaluation_for_bot(self.engine("cp", 300), board, bot_is_white=False, last_eval_cp=None), -300)
+
+    def test_a_forced_mate_becomes_a_score_no_draw_window_reaches(self):
+        from bot import evaluation_for_bot, should_accept_draw
+        board = chess.Board()
+
+        winning = evaluation_for_bot(self.engine("mate", 3), board, bot_is_white=True, last_eval_cp=None)
+        losing = evaluation_for_bot(self.engine("mate", -2), board, bot_is_white=True, last_eval_cp=None)
+        mated_opponent_to_move = evaluation_for_bot(self.engine("mate", 2), board, bot_is_white=False, last_eval_cp=None)
+
+        self.assertEqual((winning, losing, mated_opponent_to_move), (30000, -30000, -30000))
+        self.assertFalse(should_accept_draw(winning) or should_accept_draw(losing))
 
 
 class TestStockfishUpdater(unittest.TestCase):
@@ -1179,82 +1112,6 @@ class TestGetMovePredictionSignature(unittest.TestCase):
         move, mate_val, cp_val = get_move_prediction(sf, "test_game", move_time_ms=100)
         self.assertEqual(mate_val, -2)
         self.assertEqual(cp_val, -30000)
-
-
-class TestDrawOfferFallback(unittest.TestCase):
-    """Test draw offer BOT endpoint fallback logic (commit 8367bb0)."""
-
-    def test_fallback_triggered_on_not_for_bot_accounts(self):
-        """When 'not for bot accounts' appears in error, fallback POST is used."""
-        import requests as req_module
-        error = Exception("This endpoint is not for bot accounts")
-
-        with patch('bot.requests.post') as mock_post, \
-             patch('bot.TOKEN', 'test_token'):
-            mock_post.return_value = Mock(status_code=200, text="ok")
-
-            # Simulate the fallback condition check
-            err_text = str(error).lower()
-            should_fallback = (
-                "not for bot accounts" in err_text
-                or "403" in err_text
-                or (getattr(error, 'response', None)
-                    and getattr(error.response, 'status_code', None) == 403)
-            )
-            self.assertTrue(should_fallback)
-
-    def test_fallback_triggered_on_403_in_message(self):
-        error = Exception("403 Forbidden")
-        err_text = str(error).lower()
-        should_fallback = (
-            "not for bot accounts" in err_text
-            or "403" in err_text
-            or (getattr(error, 'response', None)
-                and getattr(error.response, 'status_code', None) == 403)
-        )
-        self.assertTrue(should_fallback)
-
-    def test_fallback_triggered_on_response_status_403(self):
-        error = Exception("API error")
-        mock_resp = Mock()
-        mock_resp.status_code = 403
-        error.response = mock_resp
-
-        err_text = str(error).lower()
-        should_fallback = (
-            "not for bot accounts" in err_text
-            or "403" in err_text
-            or (getattr(error, 'response', None)
-                and getattr(error.response, 'status_code', None) == 403)
-        )
-        self.assertTrue(should_fallback)
-
-    def test_no_fallback_for_generic_error(self):
-        error = Exception("some other network error")
-        err_text = str(error).lower()
-        should_fallback = (
-            "not for bot accounts" in err_text
-            or "403" in err_text
-            or (getattr(error, 'response', None)
-                and getattr(error.response, 'status_code', None) == 403)
-        )
-        self.assertFalse(should_fallback)
-
-    def test_fallback_url_accept(self):
-        """Verify correct URL is constructed for accept."""
-        game_id = "abc123"
-        accept = True
-        url_action = "accept" if accept else "decline"
-        url = f"https://lichess.org/api/bot/game/{game_id}/draw/{url_action}"
-        self.assertEqual(url, "https://lichess.org/api/bot/game/abc123/draw/accept")
-
-    def test_fallback_url_decline(self):
-        """Verify correct URL is constructed for decline."""
-        game_id = "abc123"
-        accept = False
-        url_action = "accept" if accept else "decline"
-        url = f"https://lichess.org/api/bot/game/{game_id}/draw/{url_action}"
-        self.assertEqual(url, "https://lichess.org/api/bot/game/abc123/draw/decline")
 
 
 class TestPredictionRecoverThreshold(unittest.TestCase):
