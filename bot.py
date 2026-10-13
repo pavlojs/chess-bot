@@ -72,9 +72,11 @@ _TERMINAL_STATUSES = frozenset({
     "unknownFinish", "variantEnd",
 })
 
-# Global reference so shutdown handler can wait for game threads
-_active_games: Dict[str, threading.Thread] = {}
-_active_games_lock: Optional[threading.Lock] = None
+# The state of the running bot, so the shutdown handler can wait for its game threads
+_running_state: Optional["BotState"] = None
+
+# Seconds a shutdown waits for game threads before the process ends anyway
+SHUTDOWN_TIMEOUT = 15
 
 
 # ─────────────────────────────────────────────
@@ -164,41 +166,47 @@ def _is_network_error(exc: BaseException) -> bool:
 # ─────────────────────────────────────────────
 
 def handle_shutdown(signum, frame):
+    """First signal: let the game threads wind down, then exit. Second signal: exit now."""
     global shutdown_requested
     if shutdown_requested:
-        # Second signal - force exit immediately
         logger.warning("Force shutdown!")
         sys.exit(1)
-    
+
     shutdown_requested = True
     _shutdown_event.set()
     logger.warning("Shutdown signal received, waiting for game threads to finish...")
-    
-    def graceful_exit():
-        SHUTDOWN_TIMEOUT = 15  # seconds to wait for game threads
-        deadline = time.monotonic() + SHUTDOWN_TIMEOUT
-        lock = _active_games_lock
-        if lock:
-            while time.monotonic() < deadline:
-                with lock:
-                    alive = {gid: t for gid, t in _active_games.items() if t.is_alive()}
-                if not alive:
-                    break
-                logger.info(f"Waiting for {len(alive)} game thread(s) to finish...")
-                for t in alive.values():
-                    t.join(timeout=max(0.5, deadline - time.monotonic()))
-        
-        # Remove the heartbeat so a process that lingers reads as unhealthy
-        healthcheck.clear()
-        
-        logger.info("Graceful shutdown complete")
-        sys.exit(0)
-    
-    threading.Thread(target=graceful_exit, daemon=True).start()
+    threading.Thread(target=_finish_shutdown, daemon=True).start()
 
 
-signal.signal(signal.SIGINT, handle_shutdown)
-signal.signal(signal.SIGTERM, handle_shutdown)
+def _finish_shutdown(exit_process=os._exit):
+    """Wait for the game threads, then end the process.
+
+    The main thread is normally blocked reading the event stream, and
+    sys.exit() called from this thread would end this thread alone, leaving
+    the process to be killed by its supervisor. os._exit ends the process.
+    """
+    deadline = time.monotonic() + SHUTDOWN_TIMEOUT
+    state = _running_state
+    while state is not None and time.monotonic() < deadline:
+        with state.games_lock:
+            alive = [t for t in state.active_games.values() if t.is_alive()]
+        if not alive:
+            break
+        logger.info(f"Waiting for {len(alive)} game thread(s) to finish...")
+        for t in alive:
+            t.join(timeout=max(0.5, deadline - time.monotonic()))
+
+    # Remove the heartbeat so a process that lingers reads as unhealthy
+    healthcheck.clear()
+
+    logger.info("Graceful shutdown complete")
+    logging.shutdown()
+    exit_process(0)
+
+
+def install_signal_handlers():
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
 
 
 # ─────────────────────────────────────────────
@@ -2067,6 +2075,8 @@ def handle_event(event: Dict[str, Any], state: BotState):
 
 
 def main():
+    install_signal_handlers()
+
     session = berserk.TokenSession(TOKEN)
     adapter = TimeoutHTTPAdapter(timeout=HTTP_TIMEOUT)
     session.mount("https://", adapter)
@@ -2095,9 +2105,8 @@ def main():
         username=bot_username,
         tracker=ChallengeTracker(MAX_CHALLENGES_PER_HOUR),
     )
-    global _active_games, _active_games_lock
-    _active_games = state.active_games
-    _active_games_lock = state.games_lock
+    global _running_state
+    _running_state = state
 
     # Start challenge loop in background thread
     challenge_thread = threading.Thread(target=challenge_loop, args=(state,), daemon=True)

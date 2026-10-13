@@ -610,5 +610,122 @@ class TestReconnectDuringGames(EventLoopTestCase):
         self.state.client.bots.resign_game.assert_not_called()
 
 
+class TestShutdown(unittest.TestCase):
+    """Signals sent to a real process whose main thread is blocked, as it is on the event stream."""
+
+    DRIVER = """
+import os, sys, threading, time
+import bot, healthcheck
+
+healthcheck.HEARTBEAT_FILE = sys.argv[1]
+healthcheck.beat()
+bot.install_signal_handlers()
+{setup}
+print("ready", flush=True)
+time.sleep(60)
+print("the main thread was never interrupted", flush=True)
+"""
+
+    def setUp(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
+        self.heartbeat = os.path.join(directory, "heartbeat")
+
+    def start(self, setup=""):
+        process = subprocess.Popen(
+            [sys.executable, "-c", self.DRIVER.format(setup=setup), self.heartbeat],
+            cwd=os.path.dirname(os.path.abspath(bot.__file__)),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        self.addCleanup(process.kill)
+        self.addCleanup(process.stdout.close)
+        for line in process.stdout:
+            if line.strip() == "ready":
+                return process
+        self.fail("the process did not start")
+
+    def stop(self, process, signals=1, gap=0.3, timeout=10):
+        import signal
+        started = time.monotonic()
+        for n in range(signals):
+            if n:
+                time.sleep(gap)
+            process.send_signal(signal.SIGTERM)
+        try:
+            process.wait(timeout)
+        except subprocess.TimeoutExpired:
+            self.fail(f"still running {timeout}s after SIGTERM: the process ignores shutdown")
+        return time.monotonic() - started, process.stdout.read()
+
+    GAME = """
+state = bot.BotState(client=None, username="Axiom_BOT", tracker=bot.ChallengeTracker(1))
+bot._running_state = state
+
+def game():
+    while not bot.shutdown_requested:
+        time.sleep(0.02)
+    time.sleep({cleanup})
+    print("game thread finished", flush=True)
+
+thread = threading.Thread(target=game, daemon=True)
+state.active_games["game0001"] = thread
+thread.start()
+bot.SHUTDOWN_TIMEOUT = {timeout}
+"""
+
+    def test_sigterm_ends_an_idle_bot_cleanly(self):
+        process = self.start()
+        self.assertTrue(healthcheck.is_healthy(self.heartbeat))
+
+        elapsed, output = self.stop(process)
+
+        self.assertEqual(process.returncode, 0)
+        self.assertLess(elapsed, 5)
+        self.assertIn("Graceful shutdown complete", output)
+        self.assertNotIn("never interrupted", output)
+        self.assertFalse(os.path.exists(self.heartbeat))
+
+    def test_sigint_does_the_same(self):
+        import signal
+        process = self.start()
+
+        process.send_signal(signal.SIGINT)
+        process.wait(10)
+
+        self.assertEqual(process.returncode, 0)
+
+    def test_shutdown_waits_for_a_game_thread_to_wind_down(self):
+        process = self.start(self.GAME.format(cleanup=0.8, timeout=10))
+
+        elapsed, output = self.stop(process)
+
+        self.assertEqual(process.returncode, 0)
+        self.assertGreaterEqual(elapsed, 0.8)
+        self.assertLess(elapsed, 6)
+        self.assertIn("game thread finished", output)
+
+    def test_shutdown_does_not_wait_past_its_limit(self):
+        process = self.start(self.GAME.format(cleanup=30, timeout=1))
+
+        elapsed, output = self.stop(process)
+
+        self.assertEqual(process.returncode, 0)
+        self.assertLess(elapsed, 6)
+        self.assertNotIn("game thread finished", output)
+
+    def test_a_second_signal_ends_the_process_at_once(self):
+        process = self.start(self.GAME.format(cleanup=30, timeout=30))
+
+        elapsed, output = self.stop(process, signals=2)
+
+        self.assertEqual(process.returncode, 1)
+        self.assertLess(elapsed, 5)
+        self.assertIn("Force shutdown", output)
+
+    def test_importing_the_bot_installs_no_signal_handler(self):
+        import signal
+        self.assertIsNot(signal.getsignal(signal.SIGTERM), bot.handle_shutdown)
+
+
 if __name__ == "__main__":
     unittest.main()

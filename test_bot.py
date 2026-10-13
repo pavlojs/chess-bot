@@ -1461,36 +1461,6 @@ class TestClockAdjustedSecondarySearch(unittest.TestCase):
         self.assertNotIn(str(move_time), move)
 
 
-class TestGracefulShutdown(unittest.TestCase):
-    """Test graceful shutdown handler."""
-
-    def test_shutdown_flag_set(self):
-        """handle_shutdown sets shutdown_requested to True."""
-        import bot
-        original = bot.shutdown_requested
-        try:
-            bot.shutdown_requested = False
-            # Patch sys.exit and threading to prevent actual exit
-            with patch('bot.sys.exit'), \
-                 patch('bot.threading.Thread'):
-                bot.handle_shutdown(signal.SIGTERM, None)
-            self.assertTrue(bot.shutdown_requested)
-        finally:
-            bot.shutdown_requested = original
-
-    def test_double_signal_force_exits(self):
-        """Second signal calls sys.exit(1) for forced shutdown."""
-        import bot
-        original = bot.shutdown_requested
-        try:
-            bot.shutdown_requested = True  # simulate first signal already received
-            with self.assertRaises(SystemExit) as ctx:
-                bot.handle_shutdown(signal.SIGTERM, None)
-            self.assertEqual(ctx.exception.code, 1)
-        finally:
-            bot.shutdown_requested = original
-
-
 class TestConcurrentGameLimit(unittest.TestCase):
     """Test concurrent game limit logic."""
 
