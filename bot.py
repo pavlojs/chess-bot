@@ -1811,6 +1811,7 @@ def challenge_loop(state: BotState):
     logger.info("Challenge loop started")
     ACCEPT_TIMEOUT = 90   # seconds to wait for opponent to accept
     RETRY_DELAY   = 30   # seconds to wait after a decline before trying again
+    STREAM_RECHECK_INTERVAL = 5  # seconds between looks at an event stream that is not connected
 
     # Exponential backoff state for HTTP 429 responses
     RATE_LIMIT_BASE  = 300   # initial backoff: 5 minutes
@@ -1859,11 +1860,12 @@ def challenge_loop(state: BotState):
             if not state.stream.alive():
                 # An accepted challenge is announced on the event stream. With
                 # the stream down the game would start and never get a move.
+                # This is also the state at startup, until the first line arrives.
                 if not stream_down:
-                    logger.info("Event stream is down — not challenging until it is back")
+                    logger.info("Event stream is not connected — not challenging until it is")
                     stream_down = True
                 retry_event.clear()
-                retry_event.wait(timeout=CHALLENGE_CHECK_INTERVAL)
+                retry_event.wait(timeout=STREAM_RECHECK_INTERVAL)
                 retry_event.clear()
                 continue
             stream_down = False

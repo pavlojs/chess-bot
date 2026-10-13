@@ -393,7 +393,7 @@ class TestChallengeLoop(ChallengeLoopTestCase):
 
         waits = self.run_loop(3)
 
-        self.assertEqual(waits, [60, 60, 60])
+        self.assertEqual(waits, [5, 5, 5])       # a look at the stream, not a call to Lichess
         self.client.bots.get_online_bots.assert_not_called()
         self.client.challenges.create.assert_not_called()
         self.assertEqual(self.state.tracker.counts(), (0, 0))
@@ -410,7 +410,7 @@ class TestChallengeLoop(ChallengeLoopTestCase):
         self.state.retry_event.wait = wait_then_reconnect
         bot.challenge_loop(self.state)
 
-        self.assertEqual(self.state.retry_event.timeouts, [60, 90])
+        self.assertEqual(self.state.retry_event.timeouts, [5, 90])
         self.client.challenges.create.assert_called_once()
 
     def test_nothing_is_sent_once_the_hourly_limit_is_used_up(self):
