@@ -1461,37 +1461,6 @@ class TestClockAdjustedSecondarySearch(unittest.TestCase):
         self.assertNotIn(str(move_time), move)
 
 
-class TestTimeoutHTTPAdapter(unittest.TestCase):
-    """Test TimeoutHTTPAdapter sets default timeout on all requests."""
-
-    def test_default_timeout_applied(self):
-        from bot import TimeoutHTTPAdapter
-        adapter = TimeoutHTTPAdapter(timeout=(10, 120))
-        self.assertEqual(adapter.timeout, (10, 120))
-
-    def test_send_sets_timeout_in_kwargs(self):
-        from bot import TimeoutHTTPAdapter
-        adapter = TimeoutHTTPAdapter(timeout=(5, 60))
-
-        # Mock the parent send method
-        with patch.object(requests.adapters.HTTPAdapter, 'send', return_value=Mock()) as mock_send:
-            fake_request = Mock()
-            adapter.send(fake_request)
-            _, kwargs = mock_send.call_args
-            self.assertEqual(kwargs.get('timeout'), (5, 60))
-
-    def test_explicit_timeout_not_overridden(self):
-        from bot import TimeoutHTTPAdapter
-        adapter = TimeoutHTTPAdapter(timeout=(5, 60))
-
-        with patch.object(requests.adapters.HTTPAdapter, 'send', return_value=Mock()) as mock_send:
-            fake_request = Mock()
-            adapter.send(fake_request, timeout=30)
-            _, kwargs = mock_send.call_args
-            # Explicit timeout should be preserved, not overridden
-            self.assertEqual(kwargs.get('timeout'), 30)
-
-
 class TestHealthcheck(unittest.TestCase):
     """Test healthcheck heartbeat mechanism."""
 

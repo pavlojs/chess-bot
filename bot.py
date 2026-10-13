@@ -1687,21 +1687,32 @@ def challenge_loop(client: berserk.Client, bot_username: str,
 
 
 class TimeoutHTTPAdapter(requests.adapters.HTTPAdapter):
-    """HTTPAdapter with a default timeout so streaming reads don't hang forever."""
+    """HTTPAdapter that gives every request a timeout unless the caller set one.
+
+    requests hands the adapter ``timeout=None`` whenever the caller gave none,
+    so the key is always present: it has to be tested for None. ``setdefault``
+    never fires here and leaves every request, streams included, without a
+    timeout, and a read on a silently dropped connection then blocks forever.
+    """
     def __init__(self, *args, timeout=None, **kwargs):
         self.timeout = timeout
         super().__init__(*args, **kwargs)
 
-    def send(self, *args, **kwargs):
-        kwargs.setdefault("timeout", self.timeout)
-        return super().send(*args, **kwargs)
+    def send(self, request, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = self.timeout
+        return super().send(request, **kwargs)
+
+
+# (connect, read) in seconds. Lichess writes an empty keep-alive line every
+# 7 seconds on the event stream and on game streams, so 30 seconds without a
+# byte means the connection is gone, not idle.
+HTTP_TIMEOUT = (10, 30)
 
 
 def main():
     session = berserk.TokenSession(TOKEN)
-    # Lichess sends keepalive newlines every ~30s on streams.
-    # A 120s read timeout ensures dead connections are detected within ~2 min.
-    adapter = TimeoutHTTPAdapter(timeout=(10, 120))  # (connect, read)
+    adapter = TimeoutHTTPAdapter(timeout=HTTP_TIMEOUT)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     client = berserk.Client(session)
