@@ -8,6 +8,7 @@ event handling through a sequence of events and checks what it asked Lichess
 to do.
 """
 
+import math
 import os
 import threading
 import unittest
@@ -353,11 +354,23 @@ class TestOutgoingChallenge(EventTestCase):
 class LoopClock:
     """The clock the challenge loop reads, moved by the waits it makes."""
 
-    def __init__(self):
-        self.now = bot.time.monotonic()
+    def __init__(self, now=None):
+        self.now = bot.time.monotonic() if now is None else now
 
     def __call__(self):
         return self.now
+
+    def forward(self, seconds):
+        """Let at least ``seconds`` pass, as a real wait does.
+
+        Adding to a float can round down: from 500.3 a wait of 90 would end
+        after 89.99999999999994. The loop would then find the wait unfinished
+        and wait again, which no real clock makes it do.
+        """
+        start = self.now
+        self.now += seconds
+        while self.now - start < seconds:
+            self.now = math.nextafter(self.now, math.inf)
 
 
 class StoppingEvent:
@@ -376,7 +389,7 @@ class StoppingEvent:
     def wait(self, timeout=None):
         self.timeouts.append(timeout)
         if self._clock is not None:
-            self._clock.now += timeout if self._woken_after is None else min(timeout, self._woken_after)
+            self._clock.forward(timeout if self._woken_after is None else min(timeout, self._woken_after))
         if len(self.timeouts) >= self._waits:
             bot.shutdown_requested = True
         return False
@@ -414,13 +427,13 @@ class ChallengeLoopTestCase(EventTestCase):
         self.client.challenges.create.return_value = {"id": "chal0001"}
         self.stream_connected = True           # Lichess is being heard from
 
-    def run_loop(self, waits, woken_after=None):
+    def run_loop(self, waits, woken_after=None, started_at=None):
         """Run the challenge loop until it has waited ``waits`` times; return the waits it asked for.
 
         Time passes as the loop waits. ``woken_after`` cuts every wait short,
         the way a game starting or ending does.
         """
-        clock = LoopClock()
+        clock = LoopClock(started_at)
         self.state.retry_event = StoppingEvent(waits, clock, woken_after)
         self.state.stream = bot.StreamMonitor(clock) if self.stream_connected else bot.StreamMonitor()
         if self.stream_connected:
@@ -667,6 +680,16 @@ class TestLeavingBotsAlone(ChallengeLoopTestCase):
         self.assertEqual(waits, [90, 30, 90])
         self.assertEqual(self.challenged(), ["AwayBot", "NextBot"])
         self.assertTrue(self.state.rests.resting("AwayBot", "blitz"))
+
+    def test_the_wait_for_an_answer_ends_whatever_the_clock_reads(self):
+        """Just below a power of two, adding 90 to the clock gives a little less than 90 more."""
+        short = [start for start in (500.3 + n * 0.7 for n in range(20)) if (start + 90) - start < 90]
+        self.assertTrue(short, "none of these start times shows the rounding")
+        self.online = [online_bot("AwayBot", blitz=2000), online_bot("NextBot", blitz=2000)]
+
+        waits = self.run_loop(3, started_at=short[0])
+
+        self.assertEqual(waits, [90, 30, 90])
 
     def test_with_every_suitable_bot_resting_nothing_is_sent_or_counted(self):
         self.state.rests.declined("OtherBot", "blitz", "nobot")
