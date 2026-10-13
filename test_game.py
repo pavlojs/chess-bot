@@ -10,7 +10,6 @@ Stockfish binary through the same code.
 
 import json
 import os
-import threading
 import unittest
 from unittest.mock import patch
 
@@ -311,6 +310,107 @@ class TestClocksAndStrength(GameTestCase):
         self.assertEqual(self.engine_ratings, [None])
         self.assertEqual(self.engines[0].searches[0][0], "uci")
         self.assertEqual(self.moves_sent(), [m1])
+
+
+class TestSpecialSearches(GameTestCase):
+    """What the first search finds decides whether the move is searched again, and how."""
+
+    def play_one_move(self, score, rating=1500):
+        self.score = score
+        m1 = first_legal()
+        self.stream(game_full(rating=rating), Await("POST", MOVE, 1), game_state([m1], status="aborted"))
+        with patch("bot.STOCKFISH_TIME", 3000), patch("bot.STRENGTH_ADVANTAGE", 100), \
+             patch("bot.PREDICTION_RECOVER_THRESHOLD", 400), patch("bot.PREDICTION_RECOVER_ELO_BOOST", 200), \
+             patch("bot.FULL_STRENGTH_THRESHOLD", 2800), patch("bot.LIMIT_STRENGTH_THRESHOLD", 1800), \
+             patch("bot.DYNAMIC_STRENGTH", True), patch("bot.MOVETIME_MIN_MS", 50):
+            self.play()
+        self.assertEqual(self.moves_sent(), [m1])
+        return self.engines[0]
+
+    def test_an_ordinary_position_is_searched_once_at_the_limited_strength(self):
+        engine = self.play_one_move("cp 20")
+
+        self.assertEqual(engine.searches, [("movetime", 1200)])
+        self.assertEqual(engine.parameters, [])
+
+    def test_a_mate_for_the_bot_is_searched_again_at_full_strength(self):
+        engine = self.play_one_move("mate 3")
+
+        self.assertEqual(len(engine.searches), 2)
+        self.assertEqual(engine.parameters, [
+            {"UCI_LimitStrength": False},
+            {"UCI_LimitStrength": True, "UCI_Elo": 1600},     # and the limit is put back
+        ])
+
+    def test_a_mate_against_the_bot_is_defended_at_full_strength(self):
+        engine = self.play_one_move("mate -2")
+
+        self.assertEqual(len(engine.searches), 2)
+        self.assertEqual(engine.parameters, [
+            {"UCI_LimitStrength": False},
+            {"UCI_LimitStrength": True, "UCI_Elo": 1600},
+        ])
+
+    def test_a_losing_position_is_searched_again_longer_and_a_little_stronger(self):
+        engine = self.play_one_move("cp -500")
+
+        # 40% of the base time, then 40% of one and a half times the base time
+        self.assertEqual(engine.searches, [("movetime", 1200), ("movetime", 1800)])
+        self.assertEqual(engine.parameters, [
+            {"UCI_LimitStrength": True, "UCI_Elo": 1800},
+            {"UCI_LimitStrength": True, "UCI_Elo": 1600},
+        ])
+
+    def test_a_position_just_short_of_losing_is_not_searched_again(self):
+        engine = self.play_one_move("cp -399")
+
+        self.assertEqual(len(engine.searches), 1)
+        self.assertEqual(engine.parameters, [])
+
+    def test_recovery_against_a_near_elite_opponent_goes_to_full_strength(self):
+        """The raised limit would reach the full-strength threshold, so there is nothing left to limit."""
+        engine = self.play_one_move("cp -500", rating=2750)
+
+        self.assertEqual(engine.parameters, [
+            {"UCI_LimitStrength": False},
+            {"UCI_LimitStrength": True, "UCI_Elo": 2850},
+        ])
+
+
+class TestFirstMove(GameTestCase):
+    def test_as_black_at_full_strength_the_first_reply_is_capped_on_the_bots_clock(self):
+        reply = first_legal("e2e4")
+        self.stream(
+            game_full(moves=["e2e4"], bot_is="black", rating=2900, wtime=900000, btime=900000, inc=0),
+            Await("POST", MOVE, 1),
+            game_state(["e2e4", reply], status="aborted"),
+        )
+        with patch("bot.FULL_STRENGTH_THRESHOLD", 2800), patch("bot.DYNAMIC_STRENGTH", True):
+            self.play()
+
+        self.assertEqual(self.engines[0].searches[0], ("uci", "go wtime 900000 btime 15000 winc 0 binc 0"))
+
+    def test_later_moves_are_searched_on_the_real_clock(self):
+        played = ["e2e4", "e7e5", "g1f3"]
+        reply = first_legal(*played)
+        self.stream(
+            game_full(moves=played, bot_is="black", rating=2900, wtime=900000, btime=800000, inc=0),
+            Await("POST", MOVE, 1),
+            game_state(played + [reply], status="aborted"),
+        )
+        with patch("bot.FULL_STRENGTH_THRESHOLD", 2800), patch("bot.DYNAMIC_STRENGTH", True):
+            self.play()
+
+        self.assertEqual(self.engines[0].searches[0], ("uci", "go wtime 900000 btime 800000 winc 0 binc 0"))
+
+    def test_no_abort_timer_runs_when_the_first_move_is_the_bots(self):
+        timers = self.patch("bot.threading.Timer")
+        m1 = first_legal()
+        self.stream(game_full(), Await("POST", MOVE, 1), game_state([m1], status="aborted"))
+
+        self.play()
+
+        timers.assert_not_called()
 
 
 class TestLosingTheConnection(GameTestCase):
