@@ -211,15 +211,13 @@ class TestNetworkErrors(StubLichessTestCase):
             stub = StubLichess()
             self.addCleanup(stub.close)
             stub.reply("GET", "/api/account", status, {"error": "x"})
-            try:
+            with self.assertRaises(berserk.exceptions.ResponseError) as caught:
                 berserk.Client(session_with_timeout((1, 1)), base_url=stub.url).account.get()
-            except berserk.exceptions.ResponseError as exc:
-                return exc
+            return caught.exception
 
-        try:
+        with self.assertRaises(berserk.exceptions.ApiError) as caught:
             berserk.Client(session_with_timeout((1, 1)), base_url=refused_url()).account.get()
-        except berserk.exceptions.ApiError as exc:
-            refused = exc
+        refused = caught.exception
 
         self.assertEqual(bot._event_stream_retry_delay(refused), 10)
         self.assertEqual(bot._event_stream_retry_delay(requests.exceptions.ChunkedEncodingError("cut")), 10)
@@ -641,10 +639,9 @@ print("the main thread was never interrupted", flush=True)
         )
         self.addCleanup(process.kill)
         self.addCleanup(process.stdout.close)
-        for line in process.stdout:
-            if line.strip() == "ready":
-                return process
-        self.fail("the process did not start")
+        started = any(line.strip() == "ready" for line in process.stdout)
+        self.assertTrue(started, "the process did not start")
+        return process
 
     def stop(self, process, signals=1, gap=0.3, timeout=10):
         import signal

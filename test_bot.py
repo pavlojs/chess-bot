@@ -533,19 +533,19 @@ class TestFilterSuitableBots(unittest.TestCase):
 
     def test_the_speed_follows_the_time_control_that_was_drawn(self):
         """try_challenge_random_bot must look at the rating for the game it offers."""
-        import bot
+        from bot import ChallengeTracker, try_challenge_random_bot
         client = Mock()
         client.bots.get_online_bots.return_value = iter([
             self.bot("BulletWeak", blitz=2000, bullet=900),
             self.bot("BulletFine", blitz=1000, bullet=2000),
         ])
         client.challenges.create.return_value = {"id": "chal0001"}
-        tracker = bot.ChallengeTracker(5, 100)
+        tracker = ChallengeTracker(5, 100)
 
         with patch("bot.ENABLE_AUTO_CHALLENGE", True), \
              patch("bot.CHALLENGE_TIME_CONTROLS", [{"limit": 60, "increment": 0}]), \
              patch("bot.CHALLENGE_MIN_RATING", 1500), patch("bot.CHALLENGE_MAX_RATING", 2900):
-            result = bot.try_challenge_random_bot(client, "Axiom_BOT", tracker)
+            result = try_challenge_random_bot(client, "Axiom_BOT", tracker)
 
         self.assertEqual(result, ("chal0001", "BulletFine"))
         self.assertEqual(client.challenges.create.call_args.args[0], "BulletFine")
@@ -622,19 +622,19 @@ class TestStockfishUpdater(unittest.TestCase):
     
     def test_get_binary_name(self):
         """Test that correct binary name is determined for the platform."""
-        from stockfish_updater import get_binary_name
-        
-        binary_name = get_binary_name()
-        
+        import stockfish_updater
+
+        binary_name = stockfish_updater.get_binary_name()
+
         # Should return a valid binary name
         self.assertIsInstance(binary_name, str)
         self.assertTrue(binary_name.startswith("stockfish-"))
     
     def test_get_installed_version(self):
         """Test version detection of installed Stockfish."""
-        from stockfish_updater import get_installed_version
-        
-        version = get_installed_version()
+        import stockfish_updater
+
+        version = stockfish_updater.get_installed_version()
         
         # Should return either None or a version string
         if version is not None:
@@ -644,9 +644,9 @@ class TestStockfishUpdater(unittest.TestCase):
         """Stockfish 19+ only ships universal builds; the old per-microarch
         assets (stockfish-ubuntu-x86-64) are the generic SSE2 build and no
         longer exist in the release."""
-        from stockfish_updater import get_binary_name
+        import stockfish_updater
 
-        binary_name = get_binary_name()
+        binary_name = stockfish_updater.get_binary_name()
 
         self.assertTrue(
             binary_name.endswith("-universal"),
@@ -864,7 +864,7 @@ class TestStockfishInstall(unittest.TestCase):
 
         with open(self.target, "w") as f:
             f.write("#!/bin/sh\necho 'Stockfish 18 by the Stockfish developers'\n")
-        os.chmod(self.target, 0o755)
+        os.chmod(self.target, 0o700)
 
         with patch("stockfish_updater.get_binary_name", return_value=self.BINARY), \
              patch("stockfish_updater.log_build_info"):
@@ -881,7 +881,7 @@ class TestStockfishInstall(unittest.TestCase):
             with self.subTest(installed=installed, latest=latest):
                 with open(self.target, "w") as f:
                     f.write(f"#!/bin/sh\necho 'Stockfish {installed} by the Stockfish developers'\n")
-                os.chmod(self.target, 0o755)
+                os.chmod(self.target, 0o700)
                 self.server.reply("GET", "/releases/latest", 200, {"tag_name": latest, **release})
 
                 with patch("stockfish_updater.get_binary_name", return_value=self.BINARY), \
@@ -896,7 +896,7 @@ class TestStockfishInstall(unittest.TestCase):
 
         with open(self.target, "w") as f:
             f.write("#!/bin/sh\necho 'Stockfish 18 by the Stockfish developers'\n")
-        os.chmod(self.target, 0o755)
+        os.chmod(self.target, 0o700)
         self.server.reply("GET", "/releases/latest", 503, {"message": "unavailable"})
 
         with patch("stockfish_updater.get_binary_name", return_value=self.BINARY), \

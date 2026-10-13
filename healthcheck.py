@@ -34,6 +34,8 @@ def beat(path: Optional[str] = None) -> None:
         # Swapped in whole, so a check never reads a half-written stamp.
         os.replace(scratch, path)
     except OSError:
+        # Nothing to do about it here: a stamp that cannot be written goes
+        # stale, and the health check reports exactly that.
         pass
 
 
@@ -42,6 +44,7 @@ def clear(path: Optional[str] = None) -> None:
     try:
         os.remove(path or HEARTBEAT_FILE)
     except OSError:
+        # Already gone, which is the state being asked for.
         pass
 
 

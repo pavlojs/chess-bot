@@ -383,6 +383,8 @@ def retry_with_backoff(func, max_retries=5, base_delay=1, max_delay=60, descript
             logger.warning(f"{description} failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
             time.sleep(delay)
 
+    raise ValueError("retry_with_backoff needs max_retries of at least 1")
+
 
 # ─────────────────────────────────────────────
 # UTILS
@@ -1780,7 +1782,7 @@ class BotState:
     # Incoming challenges the bot has accepted whose game has not started yet,
     # by challenge id with the time of acceptance. Each one holds a game slot.
     accepted_challenges: Dict[str, float] = field(default_factory=dict)
-    stream: "StreamMonitor" = field(default_factory=lambda: StreamMonitor())
+    stream: StreamMonitor = field(default_factory=StreamMonitor)
 
 
 # How long an accepted challenge may take to show up as a game before its slot

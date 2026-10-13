@@ -187,7 +187,7 @@ def within(seconds, fn):
     def run():
         try:
             box["value"] = fn()
-        except BaseException as exc:  # the exception is what most callers assert on
+        except Exception as exc:  # the exception is what most callers assert on
             box["error"] = exc
 
     thread = threading.Thread(target=run, daemon=True)
