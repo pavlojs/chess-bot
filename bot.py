@@ -1088,24 +1088,25 @@ def submit_move(client: berserk.Client, game_id: str, move: str, attempts: int =
 
 
 def _stream_with_watchdog(stream, client, game_id, check_interval):
-    """Wrap a blocking game-stream iterator with an API watchdog.
+    """Yield the events of a game stream, and look in on the game while the stream is quiet.
 
-    A daemon reader thread pulls events from *stream* into a queue.
-    The main thread reads the queue with *check_interval* timeouts;
-    on each timeout it polls the Lichess API to verify the game is
-    still in progress.  This is safe for classical games (long thinks)
-    because the watchdog only breaks when the API confirms the game ended.
+    A daemon thread reads *stream* into a queue. Each time nothing has arrived
+    for *check_interval* seconds, Lichess is asked about the game:
 
-    Additionally, if the game stays in "started" status (no moves) for
-    longer than GAME_WATCHDOG_ABORT_TIMEOUT seconds, the watchdog will
-    attempt to abort/resign and terminate the stream to prevent the bot
-    from being stuck indefinitely by an offline opponent.
+    - The game has ended: raise _GameStuck, since the stream will say no more.
+    - Neither side has made its first move for GAME_WATCHDOG_ABORT_TIMEOUT
+      seconds: abort the game and raise _GameStuck. A game can be aborted, at
+      no cost to either side, until both have moved.
+    - Anything else: keep waiting. A game under way is never ended from here,
+      however long the opponent thinks; Lichess's clock takes care of that.
+
+    Failing to reach Lichess says nothing about the game and ends nothing. A
+    connection that has died shows up on the stream itself, as a read timeout.
     """
     q: queue.Queue = queue.Queue()
     _sentinel = object()
-    _consecutive_failures = 0
-    _MAX_CONSECUTIVE_FAILURES = 10  # after 10 failures (~10 min) force-end
-    _started_since: float | None = None  # monotonic time when we first saw "started" status
+    failed_checks = 0
+    unstarted_since: float | None = None  # when the game was first seen without both first moves
 
     def _reader():
         try:
@@ -1121,66 +1122,47 @@ def _stream_with_watchdog(stream, client, game_id, check_interval):
     while True:
         try:
             item = q.get(timeout=check_interval)
-            _consecutive_failures = 0  # reset on any event
-            _started_since = None  # stream event received → game is progressing
+            unstarted_since = None  # something happened in the game
         except queue.Empty:
-            # No stream event — ask the API whether the game is still alive
             try:
                 game = client.games.export(game_id)
-                status = game.get("status")
-                if status in _TERMINAL_STATUSES:
-                    logger.info(f"[{game_id}] Watchdog: game ended via API ({status})")
-                    raise _GameStuck(f"Game {game_id} ended ({status}) but stream did not report it")
-
-                # Track how long the game has been in "started" status (no moves)
-                if status == "started":
-                    if _started_since is None:
-                        _started_since = time.monotonic()
-                    elapsed_stuck = time.monotonic() - _started_since
-                    if elapsed_stuck >= GAME_WATCHDOG_ABORT_TIMEOUT:
-                        logger.warning(
-                            f"[{game_id}] Watchdog: game stuck in '{status}' for "
-                            f"{elapsed_stuck:.0f}s — aborting"
-                        )
-                        try:
-                            client.bots.abort_game(game_id)
-                            logger.info(f"[{game_id}] Watchdog: abort sent")
-                        except Exception:
-                            try:
-                                client.bots.resign_game(game_id)
-                                logger.info(f"[{game_id}] Watchdog: resign sent (abort failed)")
-                            except Exception as resign_err:
-                                logger.warning(f"[{game_id}] Watchdog: resign also failed: {resign_err}")
-                        raise _GameStuck(
-                            f"Game {game_id} stuck in '{status}' for {elapsed_stuck:.0f}s, forced abort"
-                        )
-                    logger.info(
-                        f"[{game_id}] Watchdog: game still active ({status}) "
-                        f"— stuck for {elapsed_stuck:.0f}s/{GAME_WATCHDOG_ABORT_TIMEOUT}s"
-                    )
-                else:
-                    _started_since = None  # game progressed past "started"
-                    logger.info(f"[{game_id}] Watchdog: game still active ({status})")
-
-                _consecutive_failures = 0
-            except _GameStuck:
-                raise
             except Exception as e:
-                _consecutive_failures += 1
-                if _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-                    logger.warning(
-                        f"[{game_id}] Watchdog: {_consecutive_failures} consecutive API failures, "
-                        f"assuming game is over"
-                    )
-                    raise _GameStuck(
-                        f"Game {game_id}: watchdog could not verify game status "
-                        f"after {_consecutive_failures} attempts"
-                    )
-                if _consecutive_failures >= 3:
-                    logger.warning(f"[{game_id}] Watchdog API check failed ({_consecutive_failures}x): {e}")
-                else:
-                    logger.info(f"[{game_id}] Watchdog API check failed: {e}")
-            continue
+                failed_checks += 1
+                log = logger.warning if failed_checks >= 3 else logger.info
+                log(f"[{game_id}] Watchdog: could not check the game ({failed_checks}x in a row): {e}")
+                continue
+            failed_checks = 0
+
+            status = game.get("status")
+            if status in _TERMINAL_STATUSES:
+                logger.info(f"[{game_id}] Watchdog: game ended via API ({status})")
+                raise _GameStuck(f"Game {game_id} ended ({status}) but stream did not report it")
+
+            moves_played = len((game.get("moves") or "").split())
+            if moves_played >= 2:
+                unstarted_since = None
+                logger.info(f"[{game_id}] Watchdog: game still active ({status}, {moves_played} moves)")
+                continue
+
+            if unstarted_since is None:
+                unstarted_since = time.monotonic()
+            waited = time.monotonic() - unstarted_since
+            if waited < GAME_WATCHDOG_ABORT_TIMEOUT:
+                logger.info(
+                    f"[{game_id}] Watchdog: game not under way yet "
+                    f"({moves_played} moves, {waited:.0f}s/{GAME_WATCHDOG_ABORT_TIMEOUT}s)"
+                )
+                continue
+
+            logger.warning(f"[{game_id}] Watchdog: game not under way after {waited:.0f}s — aborting")
+            try:
+                client.bots.abort_game(game_id)
+            except Exception as e:
+                # Refused: a move has been played meanwhile, so the game is on after all.
+                logger.info(f"[{game_id}] Watchdog: abort refused ({e})")
+                unstarted_since = None
+                continue
+            raise _GameStuck(f"Game {game_id} was not under way after {waited:.0f}s and was aborted")
         if item is _sentinel:
             return
         if isinstance(item, BaseException):

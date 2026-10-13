@@ -1344,129 +1344,197 @@ class TestAbortStaleGames(unittest.TestCase):
         client.bots.abort_game.assert_not_called()
 
 
-class TestStreamWithWatchdog(unittest.TestCase):
-    """Test _stream_with_watchdog handles idle streams and terminal games."""
+class QuietStream:
+    """A game stream that delivers the given events and then says nothing until released."""
 
-    def test_yields_events_from_stream(self):
-        """Normal stream events are yielded through the watchdog."""
+    def __init__(self, *events):
+        self._events = list(events)
+        self._release = threading.Event()
+        self._later = []
+
+    def then(self, *events):
+        """Deliver these when ``release`` is called."""
+        self._later = list(events)
+        return self
+
+    def release(self):
+        self._release.set()
+
+    def __iter__(self):
+        yield from self._events
+        self._release.wait(10)
+        yield from self._later
+
+
+class TestGameWatchdog(unittest.TestCase):
+    """What the bot does while a game stream is quiet."""
+
+    def setUp(self):
+        self.client = Mock()
+        self.checks = 0
+
+    def lichess_says(self, *answers):
+        """Answers to "how is the game?", in order; the last one repeats. An exception is raised."""
+        answers = list(answers)
+
+        def export(game_id):
+            self.checks += 1
+            answer = answers[0] if len(answers) == 1 else answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        self.client.games.export.side_effect = export
+
+    def watch(self, stream, interval=0.02, abort_timeout=600):
         from bot import _stream_with_watchdog
-        events = [{"type": "gameState", "moves": "e2e4"}, {"type": "gameState", "moves": "e2e4 e7e5"}]
-        mock_client = Mock()
-        result = list(_stream_with_watchdog(iter(events), mock_client, "test123", check_interval=5))
-        self.assertEqual(result, events)
+        with patch("bot.GAME_WATCHDOG_ABORT_TIMEOUT", abort_timeout):
+            yield from _stream_with_watchdog(stream, self.client, "game0001", interval)
 
-    def test_watchdog_checks_api_on_idle(self):
-        """When stream is idle, watchdog polls the API."""
-        from bot import _stream_with_watchdog, _GameStuck
+    def test_events_pass_through_in_order_and_the_stream_end_ends_it(self):
+        events = [{"type": "gameFull"}, {"type": "gameState", "moves": "e2e4"}]
 
-        # Create a stream that blocks forever
-        block = threading.Event()
-        def slow_stream():
-            block.wait(timeout=10)
-            return
-            yield  # make it a generator
+        self.assertEqual(list(self.watch(iter(events))), events)
+        self.client.games.export.assert_not_called()
 
-        mock_client = Mock()
-        mock_client.games.export.return_value = {"status": "aborted"}
+    def test_an_error_on_the_stream_is_raised_to_the_game_thread(self):
+        def broken():
+            yield {"type": "gameFull"}
+            raise ConnectionError("stream cut")
+
+        watched = self.watch(broken())
+
+        self.assertEqual(next(watched), {"type": "gameFull"})
+        with self.assertRaises(ConnectionError):
+            next(watched)
+
+    def test_a_game_that_ended_without_the_stream_saying_so_is_closed(self):
+        from bot import _GameStuck
+        self.lichess_says({"status": "resign", "moves": "e4 e5 Nf3"})
+        stream = QuietStream({"type": "gameFull"})
+        self.addCleanup(stream.release)
+        watched = self.watch(stream)
+        next(watched)
 
         with self.assertRaises(_GameStuck):
-            # Very short interval so test is fast
-            for _ in _stream_with_watchdog(slow_stream(), mock_client, "test123", check_interval=0.1):
-                pass
+            next(watched)
 
-        mock_client.games.export.assert_called_with("test123")
-        block.set()  # cleanup
+    def test_a_long_think_in_a_game_under_way_ends_nothing(self):
+        """Status "started" covers a whole game in progress, not only one without moves."""
+        self.lichess_says({"status": "started", "moves": "e4 e5 Nf3 Nc6"})
+        stream = QuietStream({"type": "gameFull"}).then({"type": "gameState", "moves": "e2e4 e7e5 g1f3 b8c6 f1b5"})
+        watched = self.watch(stream, abort_timeout=0.05)   # far shorter than the silence below
+        next(watched)
 
-    def test_watchdog_continues_if_game_active(self):
-        """Watchdog does not break if API says game is still active."""
-        from bot import _stream_with_watchdog
+        threading.Timer(0.5, stream.release).start()       # the opponent moves after a long silence
+        event = next(watched)
 
-        call_count = 0
-        event_ready = threading.Event()
+        self.assertEqual(event["type"], "gameState")
+        self.assertGreater(self.checks, 5)
+        self.client.bots.abort_game.assert_not_called()
+        self.client.bots.resign_game.assert_not_called()
 
-        def delayed_stream():
-            # First, delay to trigger watchdog
-            event_ready.wait(timeout=5)
+    def test_a_game_nobody_moves_in_is_aborted_after_the_timeout(self):
+        from bot import _GameStuck
+        self.lichess_says({"status": "started", "moves": ""})
+        stream = QuietStream({"type": "gameFull"})
+        self.addCleanup(stream.release)
+        watched = self.watch(stream, abort_timeout=0.1)
+        next(watched)
+
+        with self.assertRaises(_GameStuck):
+            next(watched)
+
+        self.client.bots.abort_game.assert_called_once_with("game0001")
+        self.client.bots.resign_game.assert_not_called()
+
+    def test_a_game_with_one_move_can_still_be_aborted(self):
+        from bot import _GameStuck
+        self.lichess_says({"status": "started", "moves": "e4"})
+        stream = QuietStream({"type": "gameFull"})
+        self.addCleanup(stream.release)
+        watched = self.watch(stream, abort_timeout=0.1)
+        next(watched)
+
+        with self.assertRaises(_GameStuck):
+            next(watched)
+
+        self.client.bots.abort_game.assert_called_once_with("game0001")
+
+    def test_no_abort_before_the_timeout(self):
+        self.lichess_says({"status": "started", "moves": ""})
+        stream = QuietStream({"type": "gameFull"}).then({"type": "gameState", "moves": "e2e4"})
+        watched = self.watch(stream, abort_timeout=600)
+        next(watched)
+
+        threading.Timer(0.3, stream.release).start()
+        event = next(watched)
+
+        self.assertEqual(event["moves"], "e2e4")
+        self.client.bots.abort_game.assert_not_called()
+
+    def test_a_refused_abort_means_the_game_is_on_and_is_never_a_resignation(self):
+        self.lichess_says({"status": "started", "moves": ""})
+        self.client.bots.abort_game.side_effect = RuntimeError("Too late to abort")
+        stream = QuietStream({"type": "gameFull"}).then({"type": "gameState", "moves": "e2e4 e7e5"})
+        watched = self.watch(stream, abort_timeout=0.1)
+        next(watched)
+
+        threading.Timer(0.6, stream.release).start()
+        event = next(watched)
+
+        self.assertEqual(event["type"], "gameState")
+        self.assertGreaterEqual(self.client.bots.abort_game.call_count, 1)
+        self.client.bots.resign_game.assert_not_called()
+
+    def test_a_move_restarts_the_wait_for_the_other_first_move(self):
+        from bot import _GameStuck
+        self.lichess_says({"status": "started", "moves": "e4"})
+
+        import time
+
+        def stream():
+            yield {"type": "gameFull"}
+            time.sleep(0.15)                      # most of the abort timeout...
             yield {"type": "gameState", "moves": "e2e4"}
+            time.sleep(5)
 
-        mock_client = Mock()
-        # First API call: game active → continue. Then stream delivers event.
-        def export_side_effect(gid):
-            nonlocal call_count
-            call_count += 1
-            event_ready.set()  # wake up the stream after first watchdog check
-            return {"status": "started"}
+        watched = self.watch(stream(), interval=0.02, abort_timeout=0.25)
+        next(watched)
+        self.assertEqual(next(watched)["type"], "gameState")
+        self.client.bots.abort_game.assert_not_called()   # ...and then a move, so the wait starts over
 
-        mock_client.games.export.side_effect = export_side_effect
+        with self.assertRaises(_GameStuck):
+            next(watched)
+        self.client.bots.abort_game.assert_called_once()
 
-        result = list(_stream_with_watchdog(delayed_stream(), mock_client, "test123", check_interval=0.1))
-        self.assertEqual(len(result), 1)
-        self.assertGreaterEqual(call_count, 1)
+    def test_failing_to_reach_lichess_ends_nothing(self):
+        """However often the check fails, the game goes on when its stream does."""
+        self.lichess_says(RuntimeError("HTTP 429"))
+        stream = QuietStream({"type": "gameFull"}).then({"type": "gameState", "moves": "e2e4 e7e5"})
+        watched = self.watch(stream, abort_timeout=0.05)
+        next(watched)
 
-    def test_watchdog_re_raises_stream_exceptions(self):
-        """Exceptions from the underlying stream are re-raised."""
-        from bot import _stream_with_watchdog
+        threading.Timer(0.5, stream.release).start()
+        event = next(watched)
 
-        def failing_stream():
-            raise ConnectionError("lost connection")
-            yield  # make it a generator
+        self.assertEqual(event["type"], "gameState")
+        self.assertGreater(self.checks, 10)
+        self.client.bots.abort_game.assert_not_called()
+        self.client.bots.resign_game.assert_not_called()
 
-        mock_client = Mock()
-        with self.assertRaises(ConnectionError):
-            for _ in _stream_with_watchdog(failing_stream(), mock_client, "x", check_interval=1):
-                pass
+    def test_a_check_that_works_again_is_acted_on(self):
+        from bot import _GameStuck
+        self.lichess_says(RuntimeError("down"), RuntimeError("down"), {"status": "mate", "moves": "f3 e5 g4 Qh4#"})
+        stream = QuietStream({"type": "gameFull"})
+        self.addCleanup(stream.release)
+        watched = self.watch(stream)
+        next(watched)
 
+        with self.assertRaises(_GameStuck):
+            next(watched)
 
-class TestWatchdogConsecutiveFailures(unittest.TestCase):
-    """Test that watchdog escalates after consecutive API failures."""
-
-    def test_watchdog_raises_after_max_failures(self):
-        """After N consecutive API failures, watchdog force-ends the game."""
-        from bot import _stream_with_watchdog, _GameStuck
-
-        block = threading.Event()
-        def slow_stream():
-            block.wait(timeout=10)
-            return
-            yield
-
-        mock_client = Mock()
-        mock_client.games.export.side_effect = Exception("API unavailable")
-
-        with self.assertRaises(_GameStuck) as ctx:
-            for _ in _stream_with_watchdog(slow_stream(), mock_client, "fail_test", check_interval=0.05):
-                pass
-
-        self.assertIn("could not verify game status", str(ctx.exception))
-        block.set()
-
-    def test_watchdog_failure_count_resets_on_success(self):
-        """Successful API check resets the consecutive failure counter."""
-        from bot import _stream_with_watchdog
-
-        call_count = 0
-        event_ready = threading.Event()
-
-        def delayed_stream():
-            event_ready.wait(timeout=5)
-            yield {"type": "gameState", "moves": "e2e4"}
-
-        mock_client = Mock()
-        def export_side_effect(gid):
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 2:
-                raise Exception("temporary failure")
-            # Third call succeeds → stream event arrives
-            event_ready.set()
-            return {"status": "started"}
-
-        mock_client.games.export.side_effect = export_side_effect
-
-        result = list(_stream_with_watchdog(delayed_stream(), mock_client, "reset_test", check_interval=0.05))
-        self.assertEqual(len(result), 1)
-        # Should NOT have raised _GameStuck — failures reset on success
-        self.assertGreaterEqual(call_count, 3)
+        self.assertEqual(self.checks, 3)
 
 
 class TestGetLastInfoLine(unittest.TestCase):
@@ -1540,39 +1608,6 @@ class TestGetLastEvalCp(unittest.TestCase):
         sf.raw_stockfish_output.side_effect = Exception("crash")
         result = _get_last_eval_cp(sf)
         self.assertIsNone(result)
-
-
-class TestStreamWithWatchdogAbort(unittest.TestCase):
-    """Tests for _stream_with_watchdog stuck-game abort logic."""
-
-    @patch('bot.GAME_WATCHDOG_ABORT_TIMEOUT', 0)  # immediate abort for fast test
-    def test_stuck_started_game_triggers_abort(self):
-        """Watchdog should raise _GameStuck when game is in 'started' too long."""
-        from bot import _stream_with_watchdog, _GameStuck
-        import threading as _threading
-
-        mock_client = Mock()
-        mock_client.games.export.return_value = {"status": "started"}
-        mock_client.bots.abort_game.return_value = None
-
-        # Iterator that blocks on next() so reader thread never puts sentinel
-        block = _threading.Event()
-
-        class _BlockingIter:
-            def __iter__(self):
-                return self
-            def __next__(self):
-                block.wait()
-                raise StopIteration
-
-        gen = _stream_with_watchdog(_BlockingIter(), mock_client, "test123", check_interval=0.05)
-
-        try:
-            with self.assertRaises(_GameStuck):
-                for _ in gen:
-                    pass
-        finally:
-            block.set()  # unblock reader thread so it can exit cleanly
 
 
 class TestVariantRejection(unittest.TestCase):
