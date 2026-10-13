@@ -1060,6 +1060,48 @@ class _GameStuck(Exception):
     """Raised by the watchdog when the game is over but the stream didn't report it."""
 
 
+class _Resync(Exception):
+    """The game thread no longer knows the state of its game and has to reread it."""
+
+
+# Rereads in a row, without a move played in between, before a game thread gives up.
+MAX_RESYNCS = 3
+
+
+def _abort_unstarted(client: berserk.Client, game_id: str, move_count: int):
+    """Abort a game the bot is giving up on, as long as that still costs nothing.
+
+    A game can be aborted until both sides have moved. Past that point it is
+    left alone: Lichess announces it again when the event stream reopens, and
+    a new thread picks it up.
+    """
+    if move_count >= 2:
+        return
+    try:
+        client.bots.abort_game(game_id)
+        logger.info(f"[{game_id}] Aborted the game")
+    except Exception as e:
+        logger.debug(f"[{game_id}] Could not abort the game: {e}")
+
+
+def submit_move(client: berserk.Client, game_id: str, move: str, attempts: int = 3):
+    """Send a move, trying again when Lichess cannot be reached.
+
+    An answer from Lichess, whatever it says, is final and is raised as it is.
+    """
+    delay = 2
+    for attempt in range(1, attempts + 1):
+        try:
+            client.bots.make_move(game_id, move)
+            return
+        except Exception as e:
+            if not _is_network_error(e) or attempt == attempts:
+                raise
+            logger.warning(f"[{game_id}] Network error while making move (attempt {attempt}/{attempts}): {e}")
+            _pause(delay)
+            delay *= 2
+
+
 def _stream_with_watchdog(stream, client, game_id, check_interval):
     """Wrap a blocking game-stream iterator with an API watchdog.
 
@@ -1177,6 +1219,7 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
     last_opponent_draw: bool = False  # Tracks opponent draw flag from previous event (rising-edge detection)
     _claim_victory_timer: threading.Timer | None = None  # Timer for claiming win after opponentGone
     _no_first_move_timer: threading.Timer | None = None  # Abort game if opponent never plays first move
+    resyncs = 0  # Times in a row the game had to be reread from Lichess without a move being played
 
     try:
         # Retry stream connection with backoff
@@ -1554,99 +1597,71 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                         # Cache eval for draw offer decisions — free from the search info line above
                         last_eval_cp = _get_last_eval_cp(stockfish)
 
-                        if move:
-                            # Double-check game isn't over before making move
-                            if board.is_game_over():
-                                reason = get_game_end_reason(board)
-                                logger.info(f"[{game_id}] Game ended while calculating move: {reason}")
-                                break
-                            
-                            # Retry mechanism for network errors during move submission
-                            max_retries = 3
-                            retry_delay = 2
-                            
-                            for attempt in range(max_retries):
-                                try:
-                                    client.bots.make_move(game_id, move)
-                                    board.push_uci(move)
-                                    last_move_count += 1  # Increment move count after our move
-                                    logger.info(f"[{game_id}] Played {move}")
-                                    break  # Success - exit retry loop
-                                except (ConnectionError, Timeout, ChunkedEncodingError, ProtocolError, RequestException) as net_err:
-                                    if attempt < max_retries - 1:
-                                        logger.warning(f"[{game_id}] Network error while making move (attempt {attempt + 1}/{max_retries}): {net_err}")
-                                        time.sleep(retry_delay)
-                                        retry_delay *= 2  # Exponential backoff
-                                    else:
-                                        logger.error(f"[{game_id}] Failed to make move after {max_retries} attempts: {net_err}")
-                                        logger.info(f"[{game_id}] Game interrupted due to persistent connection issues")
-                                        raise  # Re-raise to trigger outer exception handler
-                                except (ApiError, ResponseError) as api_err:
-                                    # berserk wraps RemoteDisconnected/connection errors as ApiError
-                                    err_str = str(api_err).lower()
-                                    if "not your turn" in err_str or "game already over" in err_str:
-                                        raise  # Not a network error — let outer handler deal with it
-                                    if "connection" in err_str or "remote" in err_str or "aborted" in err_str:
-                                        if attempt < max_retries - 1:
-                                            logger.warning(f"[{game_id}] Network error while making move (attempt {attempt + 1}/{max_retries}): {api_err}")
-                                            time.sleep(retry_delay)
-                                            retry_delay *= 2
-                                        else:
-                                            logger.error(f"[{game_id}] Failed to make move after {max_retries} attempts: {api_err}")
-                                            logger.info(f"[{game_id}] Game interrupted due to persistent connection issues")
-                                            raise
-                                    else:
-                                        raise  # Non-network API error — let outer handler deal with it
-                        else:
-                            logger.warning(f"[{game_id}] Stockfish returned no move")
+                        if not move:
+                            raise _Resync("the engine returned no move")
 
-                    except (ConnectionError, Timeout, ChunkedEncodingError, ProtocolError, RequestException) as e:
-                        # Network errors that couldn't be resolved after retries
-                        logger.warning(f"[{game_id}] Network error while making move: {e}")
-                        logger.info(f"[{game_id}] Game interrupted due to connection issues")
-                        break
-                    except (ApiError, ResponseError) as e:
-                        # Handle API-specific errors (connection-related ones were already retried above)
-                        error_str = str(e).lower()
-                        if "not your turn" in error_str or "game already over" in error_str:
-                            # Race condition: engine finished computing after game ended (abort/flag)
-                            logger.info(f"[{game_id}] Game ended while making move (race condition)")
-                        elif "connection" in error_str or "remote" in error_str or "aborted" in error_str:
-                            # Exhausted retries from the inner loop
-                            logger.warning(f"[{game_id}] Network error while making move: {e}")
-                            logger.info(f"[{game_id}] Game interrupted due to connection issues")
-                        else:
-                            logger.error(f"[{game_id}] API error while making move: {e}")
-                        break
+                        # Double-check game isn't over before making move
+                        if board.is_game_over():
+                            reason = get_game_end_reason(board)
+                            logger.info(f"[{game_id}] Game ended while calculating move: {reason}")
+                            break
+
+                        try:
+                            submit_move(client, game_id, move)
+                        except ResponseError as e:
+                            if _http_status(e) == 400:
+                                # Either the game ended while the engine was thinking, or an
+                                # earlier attempt got through and only its answer was lost,
+                                # or the board here is out of step. Lichess knows which.
+                                raise _Resync(f"move {move} was refused ({e})") from e
+                            raise
+
+                        board.push_uci(move)
+                        last_move_count += 1  # Increment move count after our move
+                        resyncs = 0
+                        logger.info(f"[{game_id}] Played {move}")
+
                     except StockfishException as e:
-                        logger.error(f"Stockfish error in game {game_id}: {e}")
-                        break
-                
+                        raise _Resync(f"the engine failed ({e})") from e
+
                 # If stream ends normally, exit
                 break
                 
             except _GameStuck:
                 # Watchdog confirmed the game is over — just exit the thread
                 break
+            except _Resync as e:
+                # Reopening the game stream starts from the game as Lichess has
+                # it: finished, or with the true move list and a fresh engine.
+                resyncs += 1
+                if resyncs > MAX_RESYNCS:
+                    logger.error(f"[{game_id}] Giving up on the game: {e}")
+                    _abort_unstarted(client, game_id, last_move_count)
+                    break
+                logger.warning(f"[{game_id}] Rereading the game from Lichess: {e}")
+                _pause(1)
+                continue
             except Exception as e:
                 status = _http_status(e)
                 if _is_network_error(e):
-                    logger.warning(f"[{game_id}] Stream connection lost: {e}. Reconnecting in 5s...")
-                    time.sleep(5)
+                    logger.warning(f"[{game_id}] Connection lost: {e}. Reconnecting in 5s...")
+                    _pause(5)
                 elif status in _GATEWAY_ERRORS:
                     logger.warning(f"[{game_id}] Lichess API error {status}. Reconnecting in 5s...")
-                    time.sleep(5)
+                    _pause(5)
                 elif status == 429:
                     # Lichess asks for a full minute of silence after a 429.
-                    logger.warning(f"[{game_id}] Rate limited on the game stream. Reconnecting in 60s...")
-                    time.sleep(60)
+                    logger.warning(f"[{game_id}] Rate limited. Reconnecting in 60s...")
+                    _pause(60)
                 else:
-                    logger.error(f"[{game_id}] Unexpected stream error: {e}", exc_info=True)
+                    logger.error(f"[{game_id}] Giving up on the game: {e}", exc_info=True)
+                    _abort_unstarted(client, game_id, last_move_count)
                     break
                 continue
 
     except Exception as e:
         logger.error(f"Game {game_id} crashed: {e}", exc_info=True)
+        _abort_unstarted(client, game_id, last_move_count)
 
     finally:
         if _claim_victory_timer is not None:

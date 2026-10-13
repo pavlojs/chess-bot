@@ -23,6 +23,14 @@ STALL = object()   # keep the connection open and send nothing more
 CLOSE = object()   # end the response cleanly
 
 
+class Refuse:
+    """A script of this single step answers the connection with an HTTP error instead of a stream."""
+
+    def __init__(self, status, payload=None):
+        self.status = status
+        self.payload = payload if payload is not None else {"error": "refused"}
+
+
 class Await:
     """A step that holds the stream until the bot has made a matching request.
 
@@ -84,7 +92,11 @@ class _Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         scripts = self.server.streams.get(path)
         if scripts:
-            self._play(scripts.popleft())
+            script = scripts.popleft()
+            if script and isinstance(script[0], Refuse):
+                self._json(script[0].status, script[0].payload)
+            else:
+                self._play(script)
             return
         queue = self.server.replies.get((self.command, path))
         if queue is None:
@@ -99,6 +111,9 @@ class _Handler(BaseHTTPRequestHandler):
             status, payload = queue.popleft()
         else:
             status, payload = queue[0]
+        self._json(status, payload)
+
+    def _json(self, status, payload):
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
