@@ -510,6 +510,121 @@ class TestBotEndpoints(StubLichessTestCase):
         self.assertTrue(bot._is_network_error(box["error"]))
 
 
+class TestKumaReports(StubLichessTestCase):
+    """Optional reports to an Uptime Kuma push monitor. The stand-in server plays Kuma here."""
+
+    PUSH = "/api/push/SecretToken123"
+
+    def setUp(self):
+        super().setUp()
+        self.lichess.reply("GET", self.PUSH, 200, {"ok": True})
+        self.address = f"{self.lichess.url}{self.PUSH}?status=up&msg=OK&ping="     # as Kuma shows it
+        self.pauses = []
+        self.addCleanup(setattr, bot, "shutdown_requested", False)
+
+    def report(self, monitor, times=1, address=None):
+        def pause(seconds):
+            self.pauses.append(seconds)
+            if self.pauses.count(60) >= times:   # that many reports are out
+                bot.shutdown_requested = True
+
+        with patch("bot._pause", pause):
+            finished, box = within(20, lambda: bot.push_health(monitor, address or self.address, interval=60))
+        self.assertTrue(finished)
+        self.assertNotIn("error", box)
+
+    def monitor(self, silent_for=None):
+        clock = FakeClock()
+        monitor = bot.StreamMonitor(clock)
+        if silent_for is not None:
+            with patch("healthcheck.beat"):
+                monitor.line_received()
+            clock.now += silent_for
+        return monitor
+
+    def pushed(self):
+        return [path for method, path, _, _ in self.lichess.requests if path.startswith(self.PUSH)]
+
+    def test_a_bot_that_hears_lichess_reports_up(self):
+        self.report(self.monitor(silent_for=3))
+
+        self.assertEqual(self.pushed(), [f"{self.PUSH}?status=up&msg=OK"])
+
+    def test_a_bot_lichess_has_gone_silent_for_reports_down_with_how_long(self):
+        self.report(self.monitor(silent_for=95))
+
+        self.assertEqual(self.pushed(), [f"{self.PUSH}?status=down&msg=Lichess+silent+for+95s"])
+
+    def test_the_limit_is_the_health_checks_own(self):
+        self.report(self.monitor(silent_for=healthcheck.MAX_AGE - 1))
+        self.assertIn("status=up", self.pushed()[-1])
+
+        bot.shutdown_requested = False
+        self.pauses.clear()
+        self.report(self.monitor(silent_for=healthcheck.MAX_AGE + 1))
+        self.assertIn("status=down", self.pushed()[-1])
+
+    def test_a_bot_that_cannot_reach_lichess_says_so_after_one_interval(self):
+        self.report(self.monitor())
+
+        self.assertEqual(self.pushed(), [f"{self.PUSH}?status=down&msg=Lichess+not+heard+from+yet"])
+        self.assertEqual(self.pauses, [1] * 60 + [60])
+
+    def test_the_first_report_goes_out_as_soon_as_lichess_is_heard(self):
+        """A restart then leaves a gap of seconds in the reports, not of a whole interval."""
+        monitor = self.monitor()
+
+        def pause(seconds):
+            self.pauses.append(seconds)
+            if len(self.pauses) == 2:            # the stream connects two seconds after the start
+                with patch("healthcheck.beat"):
+                    monitor.line_received()
+            if seconds == 60:
+                bot.shutdown_requested = True
+
+        with patch("bot._pause", pause):
+            finished, _ = within(20, lambda: bot.push_health(monitor, self.address, interval=60))
+
+        self.assertTrue(finished)
+        self.assertEqual(self.pauses, [1, 1, 60])
+        self.assertEqual(self.pushed(), [f"{self.PUSH}?status=up&msg=OK"])
+
+    def test_one_report_per_interval(self):
+        self.report(self.monitor(silent_for=1), times=3)
+
+        self.assertEqual(len(self.pushed()), 3)
+        self.assertEqual(self.pauses, [60, 60, 60])
+
+    def test_a_shutdown_ends_the_reports(self):
+        bot.shutdown_requested = True
+
+        self.report(self.monitor(silent_for=1))
+
+        self.assertEqual(self.pushed(), [])
+
+    def test_the_report_carries_nothing_of_lichess(self):
+        self.report(self.monitor(silent_for=1))
+
+        _, _, headers, _ = self.lichess.requests[-1]
+        self.assertNotIn("Authorization", headers)
+
+    def test_kuma_being_down_is_noted_once_without_giving_the_address_away(self):
+        with self.assertLogs("bot", level="WARNING") as logs:
+            self.report(self.monitor(silent_for=1), times=3, address=f"{refused_url()}{self.PUSH}")
+
+        self.assertEqual(len(logs.output), 1)
+        self.assertNotIn("SecretToken123", logs.output[0])
+        self.assertNotIn("/api/push", logs.output[0])
+
+    def test_an_error_answer_from_kuma_is_noted_the_same_way(self):
+        self.lichess.reply("GET", "/api/push/Wrong", 404, {"ok": False, "msg": "Monitor Not Found or not active."})
+
+        with self.assertLogs("bot", level="WARNING") as logs:
+            self.report(self.monitor(silent_for=1), address=f"{self.lichess.url}/api/push/Wrong")
+
+        self.assertNotIn("Wrong", logs.output[0])
+
+
 class FakeClock:
     def __init__(self):
         self.now = 1000.0

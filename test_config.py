@@ -189,6 +189,34 @@ class TestEnvironmentOverrides(unittest.TestCase):
         self.assertIs(load_config()["AUTO_UPDATE_STOCKFISH"], False)
         self.assertIs(load_config(AUTO_UPDATE_STOCKFISH="true")["AUTO_UPDATE_STOCKFISH"], True)
 
+    def test_nothing_is_reported_to_uptime_kuma_unless_an_address_is_given(self):
+        config = load_config()
+
+        self.assertEqual(config["KUMA_PUSH_URL"], "")
+        self.assertEqual(config["KUMA_PUSH_INTERVAL"], 60)
+
+    def test_the_uptime_kuma_address_and_interval_are_read_from_the_environment(self):
+        config = load_config(KUMA_PUSH_URL=" https://kuma.example.org/api/push/AbCdEf123?status=up&msg=OK&ping= ",
+                             KUMA_PUSH_INTERVAL=10)
+
+        self.assertEqual(config["KUMA_PUSH_URL"], "https://kuma.example.org/api/push/AbCdEf123?status=up&msg=OK&ping=")
+        self.assertEqual(config["KUMA_PUSH_INTERVAL"], 10)
+
+    def test_an_uptime_kuma_address_that_is_no_address_stops_the_import_without_being_repeated(self):
+        """The value is a secret, and a mistyped one is most likely still most of the secret."""
+        with self.assertRaises(RuntimeError) as caught:
+            load_config(KUMA_PUSH_URL="kuma.example.org/api/push/AbCdEf123")
+
+        self.assertIn("KUMA_PUSH_URL", str(caught.exception))
+        self.assertNotIn("AbCdEf123", str(caught.exception))
+
+    def test_reports_closer_together_than_ten_seconds_stop_the_import(self):
+        for interval in (9, 0, -60):
+            with self.subTest(interval=interval):
+                with self.assertRaises(RuntimeError) as caught:
+                    load_config(KUMA_PUSH_INTERVAL=interval)
+                self.assertIn("KUMA_PUSH_INTERVAL", str(caught.exception))
+
     def test_a_missing_token_stops_the_import(self):
         with self.assertRaises(RuntimeError) as caught:
             load_config(TOKEN="")

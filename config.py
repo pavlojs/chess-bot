@@ -209,3 +209,22 @@ GAME_WATCHDOG_ABORT_TIMEOUT = int(os.getenv("GAME_WATCHDOG_ABORT_TIMEOUT", "600"
 # Maximum number of concurrent games the bot will play simultaneously.
 MAX_CONCURRENT_GAMES = int(os.getenv("MAX_CONCURRENT_GAMES", "2"))
 
+# ─────────────────────────────────────────────
+# MONITORING
+# ─────────────────────────────────────────────
+
+# Address of an Uptime Kuma push monitor (optional). When set, the bot reports
+# to it every KUMA_PUSH_INTERVAL seconds: up while Lichess is being heard from,
+# down when it is not. A bot that has stopped reports nothing, and Kuma raises
+# the alarm when the reports stop coming. The address holds the monitor's
+# token, so it is never logged and no error message repeats it.
+KUMA_PUSH_URL = os.getenv("KUMA_PUSH_URL", "").strip()
+if KUMA_PUSH_URL and not KUMA_PUSH_URL.startswith(("http://", "https://")):
+    raise ValueError("KUMA_PUSH_URL has to be the http:// or https:// address of an Uptime Kuma push monitor")
+
+KUMA_PUSH_INTERVAL = int(os.getenv("KUMA_PUSH_INTERVAL", "60"))
+SHORTEST_PUSH_INTERVAL = 10
+if KUMA_PUSH_INTERVAL < SHORTEST_PUSH_INTERVAL:
+    raise ValueError(
+        f"KUMA_PUSH_INTERVAL={KUMA_PUSH_INTERVAL} is too short: at least {SHORTEST_PUSH_INTERVAL} seconds"
+    )

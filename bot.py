@@ -56,6 +56,8 @@ from config import (
     GAME_WATCHDOG_INTERVAL,
     GAME_WATCHDOG_ABORT_TIMEOUT,
     MAX_CONCURRENT_GAMES,
+    KUMA_PUSH_URL,
+    KUMA_PUSH_INTERVAL,
 )
 
 import healthcheck
@@ -1908,6 +1910,10 @@ class StreamMonitor:
         """True while lines keep arriving; Lichess sends one at least every 7 seconds."""
         return self._last_line is not None and self._clock() - self._last_line <= max_silence
 
+    def silent_for(self) -> Optional[float]:
+        """Seconds since Lichess last sent a line, or None before the first one."""
+        return None if self._last_line is None else self._clock() - self._last_line
+
     def stalled_for(self) -> float:
         return self._clock() - self._last_progress
 
@@ -1928,6 +1934,45 @@ def watch_event_loop(monitor: StreamMonitor, limit: float = STALL_EXIT_AFTER,
             logging.shutdown()
             exit_process(1)
             return
+
+
+def push_health(monitor: StreamMonitor, url: str, interval: float = KUMA_PUSH_INTERVAL, get=requests.get):
+    """Report to an Uptime Kuma push monitor, once every ``interval`` seconds.
+
+    "up" while Lichess has been heard from within the health check's limit,
+    "down" with the length of the silence otherwise. A bot that has stopped or
+    hangs reports nothing at all, and Kuma raises the alarm when the reports
+    stop.
+
+    The first report goes out as soon as Lichess is heard from, a second or
+    two after the start, which keeps the gap a restart leaves in the reports
+    short. A bot that cannot reach Lichess says so after one interval.
+
+    The address holds the monitor's token: it is sent nowhere else and never
+    logged, and the request carries no Lichess credentials.
+    """
+    address = url.split("?", 1)[0]
+    failing = False
+    waited = 0
+    while monitor.silent_for() is None and waited < interval and not shutdown_requested:
+        _pause(1)
+        waited += 1
+    while not shutdown_requested:
+        if monitor.alive(healthcheck.MAX_AGE):
+            report = {"status": "up", "msg": "OK"}
+        else:
+            silence = monitor.silent_for()
+            heard = "not heard from yet" if silence is None else f"silent for {silence:.0f}s"
+            report = {"status": "down", "msg": f"Lichess {heard}"}
+        try:
+            get(address, params=report, timeout=10).raise_for_status()
+            failing = False
+        except Exception as e:
+            # Only the kind of error: its text would contain the address.
+            if not failing:
+                logger.warning(f"Could not report to Uptime Kuma ({type(e).__name__}); will keep trying")
+                failing = True
+        _pause(interval)
 
 
 def stream_events(session: requests.Session, base_url: str = LICHESS_URL):
@@ -2500,6 +2545,10 @@ def main():
     logger.info("Background challenge thread started")
 
     threading.Thread(target=watch_event_loop, args=(state.stream,), daemon=True).start()
+
+    if KUMA_PUSH_URL:
+        threading.Thread(target=push_health, args=(state.stream, KUMA_PUSH_URL), daemon=True).start()
+        logger.info(f"Reporting health to Uptime Kuma every {KUMA_PUSH_INTERVAL}s")
 
     run_event_loop(session, state)
 

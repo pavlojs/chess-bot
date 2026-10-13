@@ -62,3 +62,9 @@ The token is read from `TOKEN` in the environment or a local `.env` file.
 commit one, revoke the token at
 <https://lichess.org/account/oauth/token> before doing anything else —
 rewriting history does not un-publish it.
+
+`KUMA_PUSH_URL`, if you use it, is a second secret: the address of an Uptime
+Kuma push monitor contains that monitor's token, and whoever has it can report
+in the bot's place. The bot sends its reports there without the Lichess token,
+never writes the address to its log, and names only the kind of error when a
+report fails. A way to make it give the address away is in scope.

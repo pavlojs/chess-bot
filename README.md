@@ -103,6 +103,8 @@ What the image is and how it is meant to run:
 
 **Health.** Lichess sends a line on the bot's event stream at least every 7 seconds, an empty one when nothing is happening. The bot stamps a file each time one arrives, and the image's health check passes while the stamp is younger than a minute. So `healthy` means "Lichess has been heard from in the last minute", whether or not a game is on. Docker does not restart an unhealthy container, and the bot does not wait for it to: a connection that goes silent is noticed after 30 seconds and reopened, and if the bot's event loop stops moving for five minutes the process exits with an error so that `restart: unless-stopped` starts a new one.
 
+**Alerts.** Docker tells nobody that a container is unhealthy. To be told, create a monitor of the type *Push* in [Uptime Kuma](https://github.com/louislam/uptime-kuma) and put the address it shows in `KUMA_PUSH_URL`. The bot then reports to it every `KUMA_PUSH_INTERVAL` seconds (60): `up` while Lichess has been heard from within the last minute, `down` with the length of the silence otherwise, and nothing at all once it has stopped or hangs, which Kuma notices by itself. In Kuma, set the monitor's *Heartbeat Interval* to a little over twice the bot's interval (130 seconds for the default) and leave *Retries* at 0: one lost report or a restart of the bot then raises no alarm. The address contains the monitor's token, so the bot never writes it to its log. None of this needs Docker; it works the same under systemd.
+
 To play with tablebases or change `config.py`, add a read-only mount: `./syzygy:/app/syzygy:ro` or `./config.py:/app/config.py:ro`.
 
 ### systemd
@@ -133,6 +135,7 @@ Settings come from the environment or from a `.env` file. [.env.example](.env.ex
 | `MAX_CHALLENGES_PER_DAY` | `180` | Challenges created in any 24 hours |
 | `CHALLENGE_MIN_RATING` / `CHALLENGE_MAX_RATING` | `1500` / `2900` | Rating range of the bots it challenges |
 | `AUTO_UPDATE_STOCKFISH` | `false` | Install and update the engine at startup; see [Stockfish](#stockfish) |
+| `KUMA_PUSH_URL` | empty | Uptime Kuma push monitor to report to; see [Docker](#docker), *Alerts* |
 
 A few settings are lists or fixed values and live in `config.py`:
 
