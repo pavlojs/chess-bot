@@ -387,6 +387,32 @@ class TestChallengeLoop(ChallengeLoopTestCase):
         self.assertEqual(self.state.pending_challenge["opponent"], "OtherBot")
         self.assertEqual(self.state.tracker.counts(), (1, 1))
 
+    def test_nothing_is_sent_while_the_event_stream_is_down(self):
+        """With the stream down an accepted challenge would start a game nobody plays."""
+        self.state.stream = bot.StreamMonitor()     # never heard from Lichess
+
+        waits = self.run_loop(3)
+
+        self.assertEqual(waits, [60, 60, 60])
+        self.client.bots.get_online_bots.assert_not_called()
+        self.client.challenges.create.assert_not_called()
+        self.assertEqual(self.state.tracker.counts(), (0, 0))
+
+    def test_challenging_resumes_when_the_stream_is_back(self):
+        self.state.stream = bot.StreamMonitor()
+        self.state.retry_event = StoppingEvent(2)
+        original_wait = self.state.retry_event.wait
+
+        def wait_then_reconnect(timeout=None):
+            self.state.stream.line_received()
+            return original_wait(timeout)
+
+        self.state.retry_event.wait = wait_then_reconnect
+        bot.challenge_loop(self.state)
+
+        self.assertEqual(self.state.retry_event.timeouts, [60, 90])
+        self.client.challenges.create.assert_called_once()
+
     def test_nothing_is_sent_once_the_hourly_limit_is_used_up(self):
         self.state.tracker = bot.ChallengeTracker(max_per_hour=2, max_per_day=100)
         self.state.tracker.record_challenge()

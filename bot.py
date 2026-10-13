@@ -1848,6 +1848,7 @@ def challenge_loop(state: BotState):
     RATE_LIMIT_BASE  = 300   # initial backoff: 5 minutes
     RATE_LIMIT_MAX   = 3600  # maximum backoff: 60 minutes
     rate_limit_backoff = RATE_LIMIT_BASE  # current backoff duration (reset after success)
+    stream_down = False  # so the outage is logged once, not on every pass
 
     pending_challenge = state.pending_challenge
     retry_event = state.retry_event
@@ -1885,6 +1886,19 @@ def challenge_loop(state: BotState):
                     cancel_pending_challenge(state, f"no answer after {elapsed:.0f}s")
                     retry_event.wait(timeout=RETRY_DELAY)
                     retry_event.clear()
+
+            # ── Without the event stream a challenge would go unanswered ─────
+            if not state.stream.alive():
+                # An accepted challenge is announced on the event stream. With
+                # the stream down the game would start and never get a move.
+                if not stream_down:
+                    logger.info("Event stream is down — not challenging until it is back")
+                    stream_down = True
+                retry_event.clear()
+                retry_event.wait(timeout=CHALLENGE_CHECK_INTERVAL)
+                retry_event.clear()
+                continue
+            stream_down = False
 
             # ── The bot's own limits ─────────────────────────────────────────
             limit_wait = state.tracker.seconds_until_free()
