@@ -1461,26 +1461,6 @@ class TestClockAdjustedSecondarySearch(unittest.TestCase):
         self.assertNotIn(str(move_time), move)
 
 
-class TestHealthcheck(unittest.TestCase):
-    """Test healthcheck heartbeat mechanism."""
-
-    def test_healthcheck_file_constant(self):
-        from bot import HEALTHCHECK_FILE
-        self.assertEqual(HEALTHCHECK_FILE, "/tmp/axiom_heartbeat")
-
-    def test_heartbeat_file_writable(self):
-        """Verify heartbeat file can be written and read back."""
-        import tempfile
-        from bot import HEALTHCHECK_FILE
-        # Use a temp file to avoid side effects
-        with tempfile.NamedTemporaryFile(mode='w', suffix='_heartbeat', delete=True) as f:
-            f.write(str(time.time()))
-            f.flush()
-            f.seek(0)
-            # File should exist and contain a valid timestamp
-            self.assertTrue(os.path.exists(f.name))
-
-
 class TestGracefulShutdown(unittest.TestCase):
     """Test graceful shutdown handler."""
 

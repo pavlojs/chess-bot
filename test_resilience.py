@@ -8,12 +8,15 @@ up when the HTTP layer is mocked.
 
 import json
 import os
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import unittest
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import berserk
 import requests
@@ -21,6 +24,7 @@ import requests
 os.environ.setdefault('TOKEN', 'test_token_for_testing')
 
 import bot
+import healthcheck
 
 STALL = object()   # keep the connection open and send nothing more
 CLOSE = object()   # end the response cleanly
@@ -362,6 +366,248 @@ class TestNetworkErrors(StubLichessTestCase):
         self.assertEqual(bot._event_stream_retry_delay(status_error(429)), 60)
         self.assertEqual(bot._event_stream_retry_delay(status_error(401)), 30)
         self.assertEqual(bot._event_stream_retry_delay(RuntimeError("bug")), 10)
+
+
+class TestHeartbeat(unittest.TestCase):
+    """The stamp file and the check that reads it."""
+
+    def setUp(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
+        self.path = os.path.join(directory, "heartbeat")
+
+    def write(self, text):
+        with open(self.path, "w") as f:
+            f.write(text)
+
+    def check(self):
+        """Run the check the way the container does and return its exit status."""
+        script = os.path.join(os.path.dirname(os.path.abspath(healthcheck.__file__)), "healthcheck.py")
+        return subprocess.run([sys.executable, script, self.path], timeout=20).returncode
+
+    def test_no_stamp_is_unhealthy(self):
+        self.assertIsNone(healthcheck.age(self.path))
+        self.assertFalse(healthcheck.is_healthy(self.path))
+        self.assertEqual(self.check(), 1)
+
+    def test_a_fresh_stamp_is_healthy(self):
+        healthcheck.beat(self.path)
+
+        self.assertLess(healthcheck.age(self.path), 5)
+        self.assertTrue(healthcheck.is_healthy(self.path))
+        self.assertEqual(self.check(), 0)
+
+    def test_a_stale_stamp_is_unhealthy(self):
+        self.write(str(time.time() - healthcheck.MAX_AGE - 1))
+
+        self.assertFalse(healthcheck.is_healthy(self.path))
+        self.assertEqual(self.check(), 1)
+
+    def test_a_stamp_just_inside_the_limit_is_healthy(self):
+        self.write(str(time.time() - healthcheck.MAX_AGE + 5))
+
+        self.assertTrue(healthcheck.is_healthy(self.path))
+
+    def test_an_unreadable_stamp_is_unhealthy(self):
+        self.write("not a number")
+
+        self.assertFalse(healthcheck.is_healthy(self.path))
+        self.assertEqual(self.check(), 1)
+
+    def test_clear_removes_the_stamp_and_tolerates_its_absence(self):
+        healthcheck.beat(self.path)
+        healthcheck.clear(self.path)
+        healthcheck.clear(self.path)
+
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_beat_leaves_no_scratch_file_behind(self):
+        healthcheck.beat(self.path)
+
+        self.assertEqual(os.listdir(os.path.dirname(self.path)), ["heartbeat"])
+
+    def test_the_limit_outlasts_one_reconnect(self):
+        connect, read = bot.HTTP_TIMEOUT
+        # notice the silence, wait before reopening, connect again
+        self.assertGreater(healthcheck.MAX_AGE, read + 10 + connect)
+
+
+def event_line(kind, **payload):
+    return json.dumps({"type": kind, **payload}).encode()
+
+
+KEEP_ALIVE = b""
+
+
+class EventLoopTestCase(StubLichessTestCase):
+    """Runs the real event loop against the stub until the test has seen enough."""
+
+    def setUp(self):
+        super().setUp()
+        directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
+        self.heartbeat = os.path.join(directory, "heartbeat")
+        self.patch("healthcheck.HEARTBEAT_FILE", self.heartbeat)
+
+        self.state = bot.BotState(client=MagicMock(), username="Axiom_BOT", tracker=bot.ChallengeTracker(5))
+        self.session = session_with_timeout((2, 0.5))
+        self.pauses = []
+        self.addCleanup(setattr, bot, "shutdown_requested", False)
+
+    def patch(self, target, *args, **kwargs):
+        patcher = patch(target, *args, **kwargs)
+        value = patcher.start()
+        self.addCleanup(patcher.stop)
+        return value
+
+    def run_loop(self, pauses):
+        """Run the loop until it has paused ``pauses`` times: once per stream that ended."""
+        def pause(seconds):
+            self.pauses.append(seconds)
+            if len(self.pauses) >= pauses:
+                bot.shutdown_requested = True
+
+        self.patch("bot._pause", pause)
+        finished, box = within(20, lambda: bot.run_event_loop(self.session, self.state, self.lichess.url))
+        self.assertTrue(finished, "the event loop did not come back")
+        self.assertNotIn("error", box)
+
+
+class TestEventLoop(EventLoopTestCase):
+    def setUp(self):
+        super().setUp()
+        self.handled = []
+        self.patch("bot.handle_event", lambda event, state: self.handled.append(event))
+
+    def test_keep_alives_keep_an_idle_bot_healthy(self):
+        """No event for the whole connection: the state the bot is in between games."""
+        self.lichess.stream("/api/stream/event", [KEEP_ALIVE, 0.2, KEEP_ALIVE, 0.2, KEEP_ALIVE])
+        self.assertFalse(healthcheck.is_healthy(self.heartbeat))
+
+        with patch("healthcheck.beat", wraps=healthcheck.beat) as beat:
+            self.run_loop(pauses=1)
+
+        self.assertEqual(self.handled, [])
+        self.assertEqual(beat.call_count, 3)
+        self.assertTrue(healthcheck.is_healthy(self.heartbeat))
+        self.assertTrue(self.state.stream.alive())
+
+    def test_events_reach_the_handler_and_keep_alives_do_not(self):
+        self.lichess.stream("/api/stream/event", [
+            event_line("gameStart", game={"id": "game0001"}),
+            KEEP_ALIVE,
+            event_line("gameFinish", game={"id": "game0001"}),
+        ])
+
+        self.run_loop(pauses=1)
+
+        self.assertEqual([e["type"] for e in self.handled], ["gameStart", "gameFinish"])
+        self.assertEqual(self.pauses, [10])
+
+    def test_the_request_asks_for_ndjson_with_the_token(self):
+        self.lichess.stream("/api/stream/event", [KEEP_ALIVE])
+
+        self.run_loop(pauses=1)
+
+        method, path, headers, _ = self.lichess.requests[0]
+        self.assertEqual((method, path), ("GET", "/api/stream/event"))
+        self.assertEqual(headers["Accept"], "application/x-ndjson")
+        self.assertEqual(headers["Authorization"], "Bearer test-token")
+
+    def test_a_connection_that_goes_silent_is_replaced(self):
+        self.lichess.stream("/api/stream/event", [event_line("gameStart", game={"id": "game0001"}), STALL])
+        self.lichess.stream("/api/stream/event", [event_line("gameStart", game={"id": "game0001"}), KEEP_ALIVE])
+
+        self.run_loop(pauses=2)
+
+        self.assertEqual(self.lichess.paths("GET"), ["/api/stream/event"] * 2)
+        self.assertEqual(len(self.handled), 2)
+        # A read timeout is a network failure (10s), and so is a stream that ends.
+        self.assertEqual(self.pauses, [10, 10])
+        self.assertTrue(healthcheck.is_healthy(self.heartbeat))
+
+    def test_a_stream_lichess_refuses_is_retried_later(self):
+        self.lichess.reply("GET", "/api/stream/event", 429, {"error": "Too many requests"})
+
+        self.run_loop(pauses=1)
+
+        self.assertEqual(self.pauses, [60])
+        self.assertFalse(healthcheck.is_healthy(self.heartbeat))
+        self.assertFalse(self.state.stream.alive())
+
+    def test_a_failing_handler_does_not_end_the_stream(self):
+        def explode_once(event, state):
+            self.handled.append(event)
+            if len(self.handled) == 1:
+                raise RuntimeError("bug in a handler")
+
+        self.patch("bot.handle_event", explode_once)
+        self.lichess.stream("/api/stream/event", [
+            event_line("gameStart", game={"id": "game0001"}),
+            event_line("gameStart", game={"id": "game0002"}),
+        ])
+
+        self.run_loop(pauses=1)
+
+        self.assertEqual(len(self.handled), 2)
+        self.assertEqual(self.lichess.paths("GET"), ["/api/stream/event"])
+
+    def test_a_line_that_is_not_json_reopens_the_stream(self):
+        self.lichess.stream("/api/stream/event", [b"{not json", STALL])
+        self.lichess.stream("/api/stream/event", [event_line("gameStart", game={"id": "game0001"})])
+
+        self.run_loop(pauses=2)
+
+        self.assertEqual(len(self.handled), 1)
+        self.assertEqual(self.pauses[0], 10)
+
+    def test_shutdown_is_noticed_on_the_next_line(self):
+        def stop_on_first_event(event, state):
+            self.handled.append(event)
+            bot.shutdown_requested = True
+
+        self.patch("bot.handle_event", stop_on_first_event)
+        self.lichess.stream("/api/stream/event", [
+            event_line("gameStart", game={"id": "game0001"}),
+            0.2,
+            KEEP_ALIVE,
+            STALL,
+        ])
+
+        finished, _ = within(5, lambda: bot.run_event_loop(self.session, self.state, self.lichess.url))
+
+        self.assertTrue(finished)
+        self.assertEqual(len(self.handled), 1)
+
+
+class TestReconnectDuringGames(EventLoopTestCase):
+    """The connection drops silently while games are being played: the 2026-10-08 failure, end to end."""
+
+    def setUp(self):
+        super().setUp()
+        self.release = threading.Event()
+        self.started = []
+        self.addCleanup(self.release.set)
+
+        def play(client, game_id, username):
+            self.started.append(game_id)
+            self.release.wait(10)
+
+        self.patch("bot.play_game", play)
+
+    def test_games_in_progress_survive_the_reconnect_untouched(self):
+        both = [event_line("gameStart", game={"id": "game0001"}), event_line("gameStart", game={"id": "game0002"})]
+        self.lichess.stream("/api/stream/event", both + [STALL])
+        # Lichess announces every game in progress again when the stream reopens.
+        self.lichess.stream("/api/stream/event", both + [KEEP_ALIVE])
+
+        with patch("bot.MAX_CONCURRENT_GAMES", 2):
+            self.run_loop(pauses=2)
+
+        self.assertEqual(sorted(self.started), ["game0001", "game0002"])
+        self.assertEqual(sorted(self.state.active_games), ["game0001", "game0002"])
+        self.state.client.bots.abort_game.assert_not_called()
+        self.state.client.bots.resign_game.assert_not_called()
 
 
 if __name__ == "__main__":

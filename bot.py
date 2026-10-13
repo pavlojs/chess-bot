@@ -2,6 +2,7 @@
 Axiom Chess Bot – stable BOT API architecture using Berserk and Stockfish
 """
 
+import json
 import os
 import signal
 import sys
@@ -55,11 +56,15 @@ from config import (
     MAX_CONCURRENT_GAMES,
 )
 
+import healthcheck
 from logging_config import setup_logger
 
 logger = setup_logger(__name__)
 shutdown_requested = False
-HEALTHCHECK_FILE = "/tmp/axiom_heartbeat"
+# Set together with shutdown_requested, so that waits end at once on shutdown.
+_shutdown_event = threading.Event()
+
+LICHESS_URL = "https://lichess.org"
 
 _TERMINAL_STATUSES = frozenset({
     "mate", "resign", "stalemate", "timeout", "draw",
@@ -166,6 +171,7 @@ def handle_shutdown(signum, frame):
         sys.exit(1)
     
     shutdown_requested = True
+    _shutdown_event.set()
     logger.warning("Shutdown signal received, waiting for game threads to finish...")
     
     def graceful_exit():
@@ -182,11 +188,8 @@ def handle_shutdown(signum, frame):
                 for t in alive.values():
                     t.join(timeout=max(0.5, deadline - time.monotonic()))
         
-        # Remove heartbeat file so Docker detects unhealthy if process lingers
-        try:
-            os.remove(HEALTHCHECK_FILE)
-        except OSError:
-            pass
+        # Remove the heartbeat so a process that lingers reads as unhealthy
+        healthcheck.clear()
         
         logger.info("Graceful shutdown complete")
         sys.exit(0)
@@ -1617,6 +1620,75 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
 # MAIN LOOP
 # ─────────────────────────────────────────────
 
+class StreamMonitor:
+    """Remembers when Lichess last sent a line on the event stream."""
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._last_line: Optional[float] = None
+
+    def line_received(self):
+        self._last_line = self._clock()
+        healthcheck.beat()
+
+    def alive(self, max_silence: float = 30) -> bool:
+        """True while lines keep arriving; Lichess sends one at least every 7 seconds."""
+        return self._last_line is not None and self._clock() - self._last_line <= max_silence
+
+
+def stream_events(session: requests.Session, base_url: str = LICHESS_URL):
+    """Yield every line of the account's event stream: an event, or None for a keep-alive.
+
+    Lichess writes an empty line every 7 seconds while it has nothing to
+    report. berserk's own iterator drops those lines, yet they are the only
+    sign that an idle stream is still connected, so the stream is read here.
+    """
+    try:
+        response = session.get(
+            f"{base_url}/api/stream/event",
+            stream=True,
+            headers={"Accept": "application/x-ndjson"},
+        )
+    except RequestException as e:
+        raise ApiError(e) from e
+
+    with response:
+        if not response.ok:
+            raise ResponseError(response)
+        for line in response.iter_lines():
+            yield json.loads(line) if line else None
+
+
+def _pause(seconds: float):
+    """Wait, but return at once when the bot is shutting down."""
+    _shutdown_event.wait(seconds)
+
+
+def run_event_loop(session: requests.Session, state: "BotState", base_url: str = LICHESS_URL):
+    """Follow the event stream until shutdown, reopening it whenever it ends or fails."""
+    while not shutdown_requested:
+        try:
+            logger.info("Connecting to event stream...")
+            for event in stream_events(session, base_url):
+                state.stream.line_received()
+                if shutdown_requested:
+                    return
+                if event is None:
+                    continue
+
+                try:
+                    handle_event(event, state)
+                except Exception as e:
+                    logger.error(f"Event processing error: {e}", exc_info=True)
+
+            logger.warning("Event stream ended unexpectedly. Reconnecting in 10s...")
+            delay = 10
+        except Exception as e:
+            delay = _event_stream_retry_delay(e)
+
+        _pause(delay)
+
+
 @dataclass
 class BotState:
     """What the event loop, the challenge loop and the game threads share."""
@@ -1633,6 +1705,7 @@ class BotState:
     # Incoming challenges the bot has accepted whose game has not started yet,
     # by challenge id with the time of acceptance. Each one holds a game slot.
     accepted_challenges: Dict[str, float] = field(default_factory=dict)
+    stream: "StreamMonitor" = field(default_factory=lambda: StreamMonitor())
 
 
 # How long an accepted challenge may take to show up as a game before its slot
@@ -2031,39 +2104,7 @@ def main():
     challenge_thread.start()
     logger.info("Background challenge thread started")
 
-    # Write initial heartbeat
-    def _write_heartbeat():
-        try:
-            with open(HEALTHCHECK_FILE, "w") as f:
-                f.write(str(time.time()))
-        except OSError:
-            pass
-
-    _write_heartbeat()
-
-    # Main event loop with automatic reconnection
-    while not shutdown_requested:
-        try:
-            logger.info("Connecting to event stream...")
-            _write_heartbeat()
-            for event in client.bots.stream_incoming_events():
-                _write_heartbeat()
-                if shutdown_requested:
-                    break
-
-                try:
-                    handle_event(event, state)
-                except Exception as e:
-                    logger.error(f"Event processing error: {e}", exc_info=True)
-
-            # Stream ended normally — reconnect
-            logger.warning("Event stream ended unexpectedly. Reconnecting in 10s...")
-            time.sleep(10)
-            continue
-
-        except Exception as e:
-            time.sleep(_event_stream_retry_delay(e))
-            continue
+    run_event_loop(session, state)
 
     logger.info("Shutting down bot")
 
