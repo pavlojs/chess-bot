@@ -155,12 +155,20 @@ class TestGameStart(EventTestCase):
         self.assertEqual(self.alive(), ["game0002"])
         self.client.bots.abort_game.assert_not_called()
 
-    def test_game_start_clears_the_pending_challenge_and_wakes_the_challenge_loop(self):
+    def test_the_game_of_the_bots_own_challenge_clears_it_and_wakes_the_challenge_loop(self):
+        self.state.pending_challenge.update(id="chal0001", opponent="otherbot", sent_at=0.0)
+
+        self.start_game("chal0001")     # a game has the id of its challenge
+
+        self.assertEqual(self.state.pending_challenge, {})
+        self.assertTrue(self.state.retry_event.is_set())
+
+    def test_another_game_starting_leaves_the_bots_own_challenge_open(self):
         self.state.pending_challenge.update(id="chal0001", opponent="otherbot", sent_at=0.0)
 
         self.start_game("game0001")
 
-        self.assertEqual(self.state.pending_challenge, {})
+        self.assertEqual(self.state.pending_challenge["id"], "chal0001")
         self.assertTrue(self.state.retry_event.is_set())
 
 
@@ -258,8 +266,6 @@ class TestIncomingChallenge(EventTestCase):
         self.state.pending_challenge.update(id="mine0001", opponent="slowbot", sent_at=0.0)
         with patch("bot.MAX_CONCURRENT_GAMES", 2):
             self.start_game("game0001")
-            # start_game cleared the pending challenge as "accepted"; set it again
-            self.state.pending_challenge.update(id="mine0001", opponent="slowbot", sent_at=0.0)
             self.send("challenge", challenge=incoming("chal0001"))
 
         self.client.bots.accept_challenge.assert_called_once_with("chal0001")
@@ -491,6 +497,17 @@ class TestChallengeLoop(ChallengeLoopTestCase):
         self.client.challenges.cancel.assert_called_once_with("mine0001")
         self.assertEqual(waits, [30, 90])
         self.assertEqual(self.state.pending_challenge["id"], "chal0001")
+
+    def test_a_challenge_accepted_before_the_loop_notes_it_is_not_left_pending(self):
+        def create_and_get_accepted(*args, **kwargs):
+            self.start_game("chal0001")      # the game starts while the request returns
+            return {"id": "chal0001"}
+
+        self.client.challenges.create.side_effect = create_and_get_accepted
+
+        self.run_loop(1)
+
+        self.assertEqual(self.state.pending_challenge, {})
 
     def test_no_bot_in_the_rating_range_means_no_challenge(self):
         self.online = [online_bot("WeakBot", blitz=900), online_bot("Axiom_BOT", blitz=2000)]

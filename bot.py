@@ -1924,7 +1924,14 @@ def challenge_loop(state: BotState):
             rate_limit_backoff = RATE_LIMIT_BASE
 
             if challenge:
-                pending_challenge["id"], pending_challenge["opponent"] = challenge
+                challenge_id, opponent = challenge
+                with state.games_lock:
+                    already_playing = challenge_id in state.active_games
+                if already_playing:
+                    # Accepted before this thread got here; the game has the challenge's id.
+                    continue
+                pending_challenge["id"] = challenge_id
+                pending_challenge["opponent"] = opponent
                 pending_challenge["sent_at"] = time.monotonic()
                 # Wait up to ACCEPT_TIMEOUT; fires early on decline/cancel
                 retry_event.clear()
@@ -2153,14 +2160,12 @@ def handle_event(event: Dict[str, Any], state: BotState):
 
         thread.start()
 
-        # Now safe to clear pending challenge and wake the loop
-        if pending_challenge:
-            logger.info(
-                f"Challenge accepted — game {game_id} started "
-                f"(challenge id: {pending_challenge.get('id', '?')})"
-            )
+        # A game carries the id of the challenge it came from, so this tells
+        # the bot's own challenge being accepted from any other game starting.
+        if pending_challenge.get("id") == game_id:
+            logger.info(f"Challenge to {pending_challenge.get('opponent', 'unknown')} accepted — game {game_id} started")
             pending_challenge.clear()
-            retry_event.set()
+        retry_event.set()
 
         logger.info(f"Game {game_id} started")
 
