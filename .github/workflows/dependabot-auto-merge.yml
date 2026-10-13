@@ -58,9 +58,11 @@ jobs:
       - name: Classify the bump
         id: bump
         if: steps.pr.outputs.number
+        env:
+          N: ${{ steps.pr.outputs.number }}
         run: |
           set -euo pipefail
-          TITLE=$(gh pr view "${{ steps.pr.outputs.number }}" --repo "$REPO" --json title --jq .title)
+          TITLE=$(gh pr view "$N" --repo "$REPO" --json title --jq .title)
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
           # Grouped PRs are configured for minor+patch only, so they carry no
           # "from X to Y" and are safe by construction.
@@ -98,8 +100,11 @@ jobs:
 
       - name: Merge
         if: steps.checks.outputs.ready == 'true'
+        # The title reaches the shell as a variable, not as part of the script.
+        env:
+          N: ${{ steps.pr.outputs.number }}
+          TITLE: ${{ steps.bump.outputs.title }}
         run: |
           set -euo pipefail
-          N="${{ steps.pr.outputs.number }}"
           gh pr merge "$N" --repo "$REPO" --squash \
-            --subject "${{ steps.bump.outputs.title }} (#$N)" --body "" --delete-branch
+            --subject "$TITLE (#$N)" --body "" --delete-branch
