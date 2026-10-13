@@ -288,5 +288,81 @@ class TestErrorClassification(StubLichessTestCase):
         self.assertEqual(len(self.lichess.paths("GET")), 3)
 
 
+def refused_url():
+    """Address of a port nothing listens on."""
+    import socket
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return f"http://127.0.0.1:{sock.getsockname()[1]}"
+
+
+class TestNetworkErrors(StubLichessTestCase):
+    """A connection that fails is a network error, whichever library reports it."""
+
+    def test_refused_connection_arrives_wrapped_by_berserk(self):
+        client = berserk.Client(session_with_timeout((1, 1)), base_url=refused_url())
+        with self.assertRaises(berserk.exceptions.ApiError) as caught:
+            client.account.get()
+
+        # Not one of the requests classes the bot used to catch.
+        self.assertNotIsInstance(caught.exception, requests.exceptions.RequestException)
+        self.assertTrue(bot._is_network_error(caught.exception))
+
+    def test_read_timeout_on_a_stream_is_a_network_error(self):
+        self.lichess.stream("/api/stream/event", [STALL])
+        client = berserk.Client(session_with_timeout((1, 0.3)), base_url=self.lichess.url)
+
+        finished, box = within(5, lambda: next(client.bots.stream_incoming_events()))
+
+        self.assertTrue(finished)
+        self.assertTrue(bot._is_network_error(box["error"]))
+
+    def test_an_answer_from_lichess_is_not_a_network_error(self):
+        self.lichess.reply("GET", "/api/account", 404, {"error": "Not found"})
+        client = berserk.Client(session_with_timeout((1, 1)), base_url=self.lichess.url)
+        with self.assertRaises(berserk.exceptions.ResponseError) as caught:
+            client.account.get()
+
+        self.assertFalse(bot._is_network_error(caught.exception))
+
+    def test_unrelated_errors_are_not_network_errors(self):
+        self.assertFalse(bot._is_network_error(ValueError("boom")))
+        self.assertFalse(bot._is_network_error(berserk.exceptions.ApiError(ValueError("boom"))))
+
+    def test_retry_with_backoff_retries_until_the_network_is_back(self):
+        self.lichess.reply("GET", "/api/account", 200, {"username": "Axiom_BOT"})
+        down = berserk.Client(session_with_timeout((1, 1)), base_url=refused_url())
+        up = berserk.Client(session_with_timeout((1, 1)), base_url=self.lichess.url)
+        attempts = iter([down.account.get, down.account.get, up.account.get])
+
+        with patch("bot.time.sleep") as sleep:
+            account = bot.retry_with_backoff(lambda: next(attempts)(), max_retries=10, base_delay=2, description="Get account")
+
+        self.assertEqual(account["username"], "Axiom_BOT")
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_event_stream_retry_delay_by_kind_of_failure(self):
+        def status_error(status):
+            stub = StubLichess()
+            self.addCleanup(stub.close)
+            stub.reply("GET", "/api/account", status, {"error": "x"})
+            try:
+                berserk.Client(session_with_timeout((1, 1)), base_url=stub.url).account.get()
+            except berserk.exceptions.ResponseError as exc:
+                return exc
+
+        try:
+            berserk.Client(session_with_timeout((1, 1)), base_url=refused_url()).account.get()
+        except berserk.exceptions.ApiError as exc:
+            refused = exc
+
+        self.assertEqual(bot._event_stream_retry_delay(refused), 10)
+        self.assertEqual(bot._event_stream_retry_delay(requests.exceptions.ChunkedEncodingError("cut")), 10)
+        self.assertEqual(bot._event_stream_retry_delay(status_error(503)), 15)
+        self.assertEqual(bot._event_stream_retry_delay(status_error(429)), 60)
+        self.assertEqual(bot._event_stream_retry_delay(status_error(401)), 30)
+        self.assertEqual(bot._event_stream_retry_delay(RuntimeError("bug")), 10)
+
+
 if __name__ == "__main__":
     unittest.main()

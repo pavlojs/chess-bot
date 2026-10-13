@@ -135,6 +135,24 @@ def _http_status(exc: BaseException) -> Optional[int]:
     return None
 
 
+_NETWORK_ERRORS = (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout)
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """True when Lichess could not be reached, as opposed to having answered.
+
+    berserk wraps whatever requests raises while a request is being sent in
+    ApiError, so a refused, reset or timed-out connection does not arrive as a
+    requests exception. Failures while a stream is being read come straight
+    from requests and are not wrapped. Both have to count.
+    """
+    if isinstance(exc, _NETWORK_ERRORS):
+        return True
+    if isinstance(exc, ApiError) and not isinstance(exc, ResponseError):
+        return isinstance(exc.__cause__, RequestException)
+    return False
+
+
 # ─────────────────────────────────────────────
 # SIGNAL HANDLING
 # ─────────────────────────────────────────────
@@ -269,8 +287,11 @@ def parse_time_to_milliseconds(time_value: Any) -> Optional[int]:
 # ─────────────────────────────────────────────
 
 def retry_with_backoff(func, max_retries=5, base_delay=1, max_delay=60, description="Operation"):
-    """Execute a function with exponential backoff retry logic.
-    
+    """Call ``func``, retrying with exponential backoff while Lichess is unreachable.
+
+    Network failures and gateway answers (502, 503, 504) are retried; any other
+    error is raised at once, since repeating the call would not change it.
+
     Args:
         func: Function to execute
         max_retries: Maximum number of retry attempts
@@ -287,33 +308,21 @@ def retry_with_backoff(func, max_retries=5, base_delay=1, max_delay=60, descript
     for attempt in range(max_retries):
         if shutdown_requested:
             raise KeyboardInterrupt("Shutdown requested")
-        
+
         try:
             return func()
-        except (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout) as e:
+        except Exception as e:
+            if not (_is_network_error(e) or _http_status(e) in _GATEWAY_ERRORS):
+                logger.error(f"{description} failed: {e}")
+                raise
+
             if attempt == max_retries - 1:
                 logger.error(f"{description} failed after {max_retries} attempts: {e}")
                 raise
-            
+
             delay = min(base_delay * (2 ** attempt), max_delay)
             logger.warning(f"{description} failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
             time.sleep(delay)
-        except berserk.exceptions.ResponseError as e:
-            # Handle 502, 503, 504 errors with retry
-            if _http_status(e) in _GATEWAY_ERRORS:
-                if attempt == max_retries - 1:
-                    logger.error(f"{description} failed after {max_retries} attempts: {e}")
-                    raise
-                
-                delay = min(base_delay * (2 ** attempt), max_delay)
-                logger.warning(f"{description} failed with {_http_status(e)} (attempt {attempt + 1}/{max_retries}). Retrying in {delay}s...")
-                time.sleep(delay)
-            else:
-                # For other errors, don't retry
-                raise
-        except Exception as e:
-            logger.error(f"{description} failed with unexpected error: {e}")
-            raise
 
 
 # ─────────────────────────────────────────────
@@ -1565,23 +1574,25 @@ def play_game(client: berserk.Client, game_id: str, bot_username: str):
                 # If stream ends normally, exit
                 break
                 
-            except (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout) as e:
-                logger.warning(f"[{game_id}] Stream connection lost: {e}. Reconnecting in 5s...")
-                time.sleep(5)
-                continue
-            except ResponseError as e:
-                if _http_status(e) in _GATEWAY_ERRORS:
-                    logger.warning(f"[{game_id}] Lichess API error {_http_status(e)}. Reconnecting in 5s...")
-                    time.sleep(5)
-                    continue
-                logger.error(f"[{game_id}] API error in game stream: {e}", exc_info=True)
-                break
             except _GameStuck:
                 # Watchdog confirmed the game is over — just exit the thread
                 break
             except Exception as e:
-                logger.error(f"[{game_id}] Unexpected stream error: {e}", exc_info=True)
-                break
+                status = _http_status(e)
+                if _is_network_error(e):
+                    logger.warning(f"[{game_id}] Stream connection lost: {e}. Reconnecting in 5s...")
+                    time.sleep(5)
+                elif status in _GATEWAY_ERRORS:
+                    logger.warning(f"[{game_id}] Lichess API error {status}. Reconnecting in 5s...")
+                    time.sleep(5)
+                elif status == 429:
+                    # Lichess asks for a full minute of silence after a 429.
+                    logger.warning(f"[{game_id}] Rate limited on the game stream. Reconnecting in 60s...")
+                    time.sleep(60)
+                else:
+                    logger.error(f"[{game_id}] Unexpected stream error: {e}", exc_info=True)
+                    break
+                continue
 
     except Exception as e:
         logger.error(f"Game {game_id} crashed: {e}", exc_info=True)
@@ -1700,6 +1711,26 @@ def challenge_loop(client: berserk.Client, bot_username: str,
             time.sleep(10)
 
     logger.info("Challenge loop stopped")
+
+
+def _event_stream_retry_delay(exc: BaseException) -> int:
+    """Log why the event stream stopped and return the seconds to wait before reopening it."""
+    status = _http_status(exc)
+    if _is_network_error(exc):
+        logger.warning(f"Event stream connection lost: {exc}. Reconnecting in 10s...")
+        return 10
+    if status in _GATEWAY_ERRORS:
+        logger.warning(f"Lichess API error {status}. Reconnecting in 15s...")
+        return 15
+    if status == 429:
+        # Lichess asks for a full minute of silence after a 429.
+        logger.warning("Rate limited by Lichess (429). Backing off for 60s...")
+        return 60
+    if status is not None:
+        logger.error(f"API error: {exc}. Reconnecting in 30s...")
+        return 30
+    logger.error(f"Main loop error: {exc}", exc_info=True)
+    return 10
 
 
 class TimeoutHTTPAdapter(requests.adapters.HTTPAdapter):
@@ -1946,26 +1977,8 @@ def main():
             time.sleep(10)
             continue
             
-        except (ChunkedEncodingError, ProtocolError, ConnectionError, Timeout) as e:
-            logger.warning(f"Event stream connection lost: {e}. Reconnecting in 10s...")
-            time.sleep(10)
-            continue
-        except berserk.exceptions.ResponseError as e:
-            if _http_status(e) in _GATEWAY_ERRORS:
-                logger.warning(f"Lichess API error {_http_status(e)}. Reconnecting in 15s...")
-                time.sleep(15)
-                continue
-            elif _http_status(e) == 429:
-                logger.warning("Rate limited by Lichess (429). Backing off for 60s...")
-                time.sleep(60)
-                continue
-            else:
-                logger.error(f"API error: {e}. Reconnecting in 30s...", exc_info=True)
-                time.sleep(30)
-                continue
         except Exception as e:
-            logger.error(f"Main loop error: {e}", exc_info=True)
-            time.sleep(10)
+            time.sleep(_event_stream_retry_delay(e))
             continue
 
     logger.info("Shutting down bot")
