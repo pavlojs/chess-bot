@@ -21,8 +21,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 NOT_COMPARED = {"TOKEN", "STOCKFISH_PATH"}
 
 DUMP = """
-import json, config
-values = {name: getattr(config, name) for name in dir(config) if name.isupper()}
+import json, config, logging_config
+values = {name: getattr(module, name) for module in (config, logging_config) for name in dir(module) if name.isupper()}
 print(json.dumps(values, default=str))
 """
 
@@ -63,7 +63,7 @@ def documented_defaults():
 
 
 # Every module that takes settings from the environment.
-MODULES_WITH_SETTINGS = ("config.py",)
+MODULES_WITH_SETTINGS = ("config.py", "logging_config.py")
 
 
 def variables_read_by_config():
@@ -144,6 +144,74 @@ class TestEnvironmentOverrides(unittest.TestCase):
     def test_the_strength_limit_is_left_to_the_bot(self):
         """UCI_LimitStrength is set per opponent, so the base options keep it off."""
         self.assertIs(load_config()["UCI_OPTIONS"]["UCI_LimitStrength"], False)
+
+
+class TestLogFile(unittest.TestCase):
+    """The log file on the volume has a ceiling."""
+
+    def setUp(self):
+        import logging
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
+        self.previous = os.getcwd()
+        os.chdir(self.directory)
+        self.addCleanup(os.chdir, self.previous)
+        self.logging = logging
+
+    def logger(self, name, max_bytes, backups):
+        from unittest.mock import patch
+        import logging_config
+        with patch.object(logging_config, "LOG_FILE_MAX_BYTES", max_bytes), \
+             patch.object(logging_config, "LOG_FILE_BACKUPS", backups):
+            logger = logging_config.setup_logger(name)
+        for handler in logger.handlers:
+            self.addCleanup(handler.close)
+            if isinstance(handler, self.logging.StreamHandler) and not hasattr(handler, "baseFilename"):
+                handler.setLevel(self.logging.CRITICAL + 1)      # keep the test output quiet
+        return logger
+
+    def test_defaults_are_ten_megabytes_and_five_older_files(self):
+        config = load_config()
+
+        self.assertEqual(config["LOG_FILE_MAX_BYTES"], 10 * 1024 * 1024)
+        self.assertEqual(config["LOG_FILE_BACKUPS"], 5)
+
+    def test_the_limits_can_be_set_from_the_environment(self):
+        config = load_config(LOG_FILE_MAX_MB=2, LOG_FILE_BACKUPS=1)
+
+        self.assertEqual(config["LOG_FILE_MAX_BYTES"], 2 * 1024 * 1024)
+        self.assertEqual(config["LOG_FILE_BACKUPS"], 1)
+
+    def test_the_directory_never_grows_past_its_ceiling(self):
+        max_bytes, backups = 2000, 2
+        logger = self.logger("test_log_ceiling", max_bytes, backups)
+
+        for number in range(2000):
+            logger.debug("line %05d of a log that keeps growing", number)
+
+        files = sorted(os.listdir("logs"))
+        self.assertEqual(files, ["axiom_bot.log", "axiom_bot.log.1", "axiom_bot.log.2"])
+        total = sum(os.path.getsize(os.path.join("logs", name)) for name in files)
+        self.assertLessEqual(total, max_bytes * (backups + 1))
+
+    def test_the_newest_lines_are_the_ones_kept(self):
+        logger = self.logger("test_log_newest", 2000, 1)
+
+        for number in range(500):
+            logger.debug("line %05d", number)
+
+        with open(os.path.join("logs", "axiom_bot.log")) as f:
+            self.assertIn("line 00499", f.read())
+
+    def test_debug_goes_to_the_file_and_names_where_it_came_from(self):
+        logger = self.logger("test_log_detail", 100000, 1)
+
+        logger.debug("a detail")
+
+        with open(os.path.join("logs", "axiom_bot.log")) as f:
+            line = f.read()
+        self.assertIn("DEBUG", line)
+        self.assertIn("test_debug_goes_to_the_file_and_names_where_it_came_from", line)
 
 
 class TestTablebaseDetection(unittest.TestCase):
