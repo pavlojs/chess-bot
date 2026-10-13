@@ -1,5 +1,10 @@
 name: Update Stockfish
 
+# The image installs one named Stockfish release, checked against its SHA-256.
+# Both values live in the Dockerfile. When Stockfish publishes a new release,
+# this workflow moves them on dev; the engine reaches the published image with
+# the next promotion, after CI has built and checked an image with it.
+
 on:
   schedule:
     - cron: '0 0 * * *'  # Daily at midnight UTC
@@ -11,48 +16,69 @@ concurrency:
 
 permissions:
   contents: write
+  # Needed to start CI on the commit this workflow pushes.
+  actions: write
 
 jobs:
   update-stockfish:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ASSET: stockfish-linux-x86-64-universal.tar.gz
     steps:
       - uses: actions/checkout@v7
         with:
           ref: dev
 
-      - name: Resolve latest Stockfish release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve the latest Stockfish release
         run: |
           set -euo pipefail
-          LATEST_TAG=$(gh release view --repo official-stockfish/Stockfish --json tagName --jq .tagName)
-          if [ -z "$LATEST_TAG" ]; then
-            echo "::error::Could not resolve the latest Stockfish tag."
+          RELEASE=$(gh api repos/official-stockfish/Stockfish/releases/latest)
+          TAG=$(jq -r '.tag_name' <<<"$RELEASE")
+          SHA256=$(jq -r --arg name "$ASSET" '.assets[] | select(.name == $name) | .digest' <<<"$RELEASE" | sed 's/^sha256://')
+
+          # Both values are written into the Dockerfile, so they have to look
+          # exactly like a release tag and a SHA-256 and nothing else.
+          if ! [[ "$TAG" =~ ^sf_[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::Unexpected release tag: '$TAG'"
             exit 1
           fi
-          echo "LATEST_TAG=$LATEST_TAG" >> "$GITHUB_ENV"
+          if ! [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::The release publishes no SHA-256 for $ASSET"
+            exit 1
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "SHA256=$SHA256" >> "$GITHUB_ENV"
 
-      - name: Record the version if it changed
+      - name: Point the Dockerfile at it
         run: |
           set -euo pipefail
-          if [ -f last_version.txt ] && [ "$(cat last_version.txt)" = "$LATEST_TAG" ]; then
-            echo "Stockfish is already recorded as $LATEST_TAG"
-            echo "UPDATE_NEEDED=false" >> "$GITHUB_ENV"
+          sed -i -E \
+            -e "s|^ARG STOCKFISH_TAG=.*|ARG STOCKFISH_TAG=${TAG}|" \
+            -e "s|^ARG STOCKFISH_SHA256=.*|ARG STOCKFISH_SHA256=${SHA256}|" \
+            Dockerfile
+          grep -q "^ARG STOCKFISH_TAG=${TAG}$" Dockerfile
+          grep -q "^ARG STOCKFISH_SHA256=${SHA256}$" Dockerfile
+
+          if git diff --quiet -- Dockerfile; then
+            echo "The Dockerfile already installs Stockfish $TAG"
+            echo "UPDATED=false" >> "$GITHUB_ENV"
           else
-            echo "New Stockfish version available: $LATEST_TAG"
-            echo "UPDATE_NEEDED=true" >> "$GITHUB_ENV"
-            echo "$LATEST_TAG" > last_version.txt
+            echo "UPDATED=true" >> "$GITHUB_ENV"
           fi
 
-      # last_version.txt is a marker: the Dockerfile always pulls the latest
-      # release at build time, so this commit's job is to make version drift
-      # visible in history and to carry a rebuild through the next promotion.
       - name: Commit to dev
-        if: env.UPDATE_NEEDED == 'true'
+        if: env.UPDATED == 'true'
         run: |
           set -euo pipefail
           git config user.name  'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add last_version.txt
-          git commit -m "chore: record Stockfish $LATEST_TAG"
+          git add Dockerfile
+          git commit -m "build: install Stockfish $TAG"
           git push origin HEAD:dev
+
+      # A push made with GITHUB_TOKEN starts no workflow, and promotion needs a
+      # green CI run on the head of dev, so CI is started by hand.
+      - name: Run CI on the new commit
+        if: env.UPDATED == 'true'
+        run: gh workflow run ci.yml --ref dev
