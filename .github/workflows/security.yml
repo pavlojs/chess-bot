@@ -27,13 +27,15 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: requirements*.txt
 
       - name: Install pip-audit
         run: python -m pip install --upgrade pip pip-audit
 
-      # Audits the pinned set in requirements.txt against PyPI advisories.
+      # Audits the pinned sets against PyPI advisories. requirements-dev.txt
+      # includes requirements.txt, so one pass covers what ships and what tests.
       - name: Audit dependencies
-        run: pip-audit --requirement requirements.txt --strict
+        run: pip-audit --requirement requirements-dev.txt --strict
 
   trivy-fs:
     name: Trivy filesystem scan
