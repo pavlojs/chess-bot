@@ -1876,35 +1876,47 @@ def handle_event(event: Dict[str, Any], state: BotState):
 
     elif kind == "gameStart":
         game_id = event["game"]["id"]
+        over_limit = False
 
-        # Clean up dead threads before checking limits
         with state.games_lock:
+            # Forget threads that have ended, so their slots are free again
             dead = [gid for gid, t in state.active_games.items() if not t.is_alive()]
             for gid in dead:
                 del state.active_games[gid]
 
-            if len(state.active_games) >= MAX_CONCURRENT_GAMES:
-                logger.warning(f"Concurrent game limit ({MAX_CONCURRENT_GAMES}) reached, cannot start game {game_id}")
-                try:
-                    client.bots.abort_game(game_id)
-                except Exception:
-                    try:
-                        client.bots.resign_game(game_id)
-                    except Exception as e:
-                        logger.debug(f"Could not abort or resign {game_id}: {e}")
+            if game_id in state.active_games:
+                # Lichess announces every game in progress each time the event
+                # stream opens, so after a reconnect this arrives for games
+                # that already have a thread. Starting again would put two
+                # engines on one game, and counting it against the limit
+                # would abort or resign a game the bot is in the middle of.
+                logger.debug(f"Game {game_id} is already being played")
                 return
 
-        # Start game thread and register in active_games FIRST —
-        # before clearing pending_challenge or waking the challenge loop.
-        # This ensures the loop's active_count check sees the new game
-        # and won't send a second challenge.
-        thread = threading.Thread(
-            target=play_game,
-            args=(client, game_id, state.username),
-            daemon=True,
-        )
-        with state.games_lock:
-            state.active_games[game_id] = thread
+            if len(state.active_games) >= MAX_CONCURRENT_GAMES:
+                over_limit = True
+            else:
+                # Register the thread before clearing pending_challenge or
+                # waking the challenge loop, so the loop's count of active
+                # games already includes this one.
+                thread = threading.Thread(
+                    target=play_game,
+                    args=(client, game_id, state.username),
+                    daemon=True,
+                )
+                state.active_games[game_id] = thread
+
+        if over_limit:
+            logger.warning(f"Concurrent game limit ({MAX_CONCURRENT_GAMES}) reached, cannot start game {game_id}")
+            try:
+                client.bots.abort_game(game_id)
+            except Exception:
+                try:
+                    client.bots.resign_game(game_id)
+                except Exception as e:
+                    logger.debug(f"Could not abort or resign {game_id}: {e}")
+            return
+
         thread.start()
 
         # Now safe to clear pending challenge and wake the loop
