@@ -210,13 +210,40 @@ class TestIncomingChallenge(EventTestCase):
     def test_a_challenge_outside_the_rating_range_is_declined(self):
         self.send("challenge", challenge=incoming("chal0001", rating=900))
 
-        self.client.bots.decline_challenge.assert_called_once_with("chal0001")
+        self.client.bots.decline_challenge.assert_called_once_with("chal0001", reason="generic")
         self.client.bots.accept_challenge.assert_not_called()
 
-    def test_a_variant_challenge_is_declined(self):
+    def test_a_variant_challenge_is_declined_as_standard_only(self):
         self.send("challenge", challenge=incoming("chal0001", variant="chess960"))
 
-        self.client.bots.decline_challenge.assert_called_once_with("chal0001")
+        self.client.bots.decline_challenge.assert_called_once_with("chal0001", reason="standard")
+
+    def test_a_speed_the_bot_does_not_play_is_declined_with_the_direction_to_go(self):
+        cases = {
+            (60, 0): "tooFast",        # bullet, when blitz and rapid are played
+            (1800, 0): "tooSlow",      # classical
+        }
+        with patch("bot.TIME_CONTROL", ["blitz", "rapid"]):
+            for (limit, increment), reason in cases.items():
+                with self.subTest(clock=f"{limit}+{increment}"):
+                    self.client.reset_mock()
+                    self.send("challenge", challenge=incoming("chal0001", limit=limit, increment=increment))
+                    self.client.bots.decline_challenge.assert_called_once_with("chal0001", reason=reason)
+
+    def test_a_speed_left_out_in_the_middle_is_declined_as_a_time_control(self):
+        with patch("bot.TIME_CONTROL", ["bullet", "classical"]):
+            self.send("challenge", challenge=incoming("chal0001", limit=300, increment=0))
+
+        self.client.bots.decline_challenge.assert_called_once_with("chal0001", reason="timeControl")
+
+    def test_a_game_without_a_clock_is_declined_as_a_time_control(self):
+        challenge = incoming("chal0001")
+        challenge["timeControl"] = {"type": "correspondence", "daysPerTurn": 3}
+        challenge["speed"] = "correspondence"
+
+        self.send("challenge", challenge=challenge)
+
+        self.client.bots.decline_challenge.assert_called_once_with("chal0001", reason="timeControl")
 
     def test_a_challenge_is_declined_for_later_while_every_slot_is_playing(self):
         with patch("bot.MAX_CONCURRENT_GAMES", 2):

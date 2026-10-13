@@ -1027,6 +1027,67 @@ class TestParsePvFromInfo(unittest.TestCase):
         self.assertEqual(pv, "")
 
 
+class TestDeclineReasons(unittest.TestCase):
+    """The reason handed to Lichess says what the challenger would have to change."""
+
+    def reason(self, time_control=None, **fields):
+        from bot import challenge_decline_reason
+        challenge = {
+            "id": "chal0001",
+            "challenger": {"rating": fields.pop("rating", 1800)},
+            "variant": {"key": fields.pop("variant", "standard")},
+            "timeControl": time_control or {"type": "clock", "limit": 300, "increment": 0},
+            **fields,
+        }
+        return challenge_decline_reason(challenge)
+
+    def setUp(self):
+        for target, value in {"bot.ACCEPT_CHALLENGES": True, "bot.MIN_RATING": 1320, "bot.MAX_RATING": 2800,
+                              "bot.TIME_CONTROL": ["bullet", "blitz", "rapid", "classical"]}.items():
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_challenge_the_bot_plays_has_no_reason(self):
+        self.assertIsNone(self.reason())
+        self.assertIsNone(self.reason(rating=1320))
+        self.assertIsNone(self.reason(rating=2800))
+
+    def test_variants_are_declined_as_standard_only(self):
+        for variant in ("chess960", "antichess", "atomic", "fromPosition"):
+            self.assertEqual(self.reason(variant=variant), "standard", variant)
+
+    def test_games_without_a_clock_are_declined_as_a_time_control(self):
+        self.assertEqual(self.reason({"type": "correspondence", "daysPerTurn": 2}, speed="correspondence"), "timeControl")
+        self.assertEqual(self.reason({"type": "unlimited"}), "timeControl")
+
+    def test_a_rating_outside_the_range_has_only_the_general_reason(self):
+        self.assertEqual(self.reason(rating=1319), "generic")
+        self.assertEqual(self.reason(rating=2801), "generic")
+
+    def test_a_speed_outside_the_played_ones_names_the_direction(self):
+        with patch("bot.TIME_CONTROL", ["rapid"]):
+            self.assertEqual(self.reason({"limit": 60, "increment": 0}), "tooFast")
+            self.assertEqual(self.reason({"limit": 300, "increment": 0}), "tooFast")
+            self.assertEqual(self.reason({"limit": 1800, "increment": 0}), "tooSlow")
+            self.assertIsNone(self.reason({"limit": 600, "increment": 5}))
+
+    def test_the_clock_is_judged_before_the_rating(self):
+        """A bullet challenge to a bot that plays no bullet is too fast, whoever sends it."""
+        with patch("bot.TIME_CONTROL", ["blitz", "rapid", "classical"]):
+            self.assertEqual(self.reason({"limit": 60, "increment": 0}, rating=900), "tooFast")
+
+    def test_accepting_nothing_declines_everything(self):
+        with patch("bot.ACCEPT_CHALLENGES", False):
+            self.assertEqual(self.reason(), "generic")
+
+    def test_the_yes_or_no_answer_follows_the_reason(self):
+        from bot import should_accept_challenge
+        base = {"challenger": {"rating": 1800}, "variant": {"key": "standard"}, "timeControl": {"limit": 300, "increment": 0}}
+        self.assertTrue(should_accept_challenge(base))
+        self.assertFalse(should_accept_challenge({**base, "variant": {"key": "atomic"}}))
+
+
 class TestBulletChallengeAcceptance(unittest.TestCase):
     """Test that bullet time controls are accepted."""
 

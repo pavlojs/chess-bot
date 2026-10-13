@@ -33,6 +33,7 @@ from config import (
     MIN_RATING,
     MAX_RATING,
     TIME_CONTROL,
+    SPEEDS,
     DYNAMIC_STRENGTH,
     STRENGTH_ADVANTAGE,
     LIMIT_STRENGTH_THRESHOLD,
@@ -410,47 +411,56 @@ def determine_time_category(limit: int, increment: int) -> str | None:
     return "classical"
 
 
-def should_accept_challenge(challenge: Dict[str, Any]) -> bool:
-    if not ACCEPT_CHALLENGES:
-        return False
+def _speed_decline_reason(category: str) -> str:
+    """The Lichess decline reason for a speed the bot does not play."""
+    accepted = [SPEEDS.index(speed) for speed in TIME_CONTROL if speed in SPEEDS]
+    if accepted and SPEEDS.index(category) < min(accepted):
+        return "tooFast"
+    if accepted and SPEEDS.index(category) > max(accepted):
+        return "tooSlow"
+    return "timeControl"
 
-    # Only accept standard chess — reject all variants (chess960, antichess, atomic, etc.)
+
+def challenge_decline_reason(challenge: Dict[str, Any]) -> Optional[str]:
+    """Why the bot will not play this challenge, or None when it will.
+
+    The reason is one of the keys Lichess has for declining a challenge. Lichess
+    shows the challenger its own text for the key, so the answer says what to
+    change: the variant, the clock, or nothing that can be changed (``generic``).
+    """
+    if not ACCEPT_CHALLENGES:
+        return "generic"
+
+    # Standard chess only: no chess960, antichess, atomic and the like
     variant = challenge.get("variant", {})
     variant_key = variant.get("key", "standard") if isinstance(variant, dict) else str(variant)
     if variant_key != "standard":
-        logger.info(f"Rejecting challenge: unsupported variant '{variant_key}'")
-        return False
+        logger.info(f"Declining challenge: unsupported variant '{variant_key}'")
+        return "standard"
 
-    challenger = challenge.get("challenger", {})
-    rating = challenger.get("rating", 1500)
-    
-    # Check if challenge has speed field (more reliable than calculating)
-    speed = challenge.get("speed")
-    if speed:
-        # Reject correspondence and unlimited time games
-        if speed in ["correspondence", "unlimited"]:
-            logger.info(f"Rejecting {speed} challenge")
-            return False
-
+    # A correspondence or unlimited challenge carries no clock
     clock = challenge.get("timeControl", {})
-    limit = clock.get("limit", 0)
-    increment = clock.get("increment", 0)
-
-    category = determine_time_category(limit, increment)
-    
-    # Reject if category is None (unlimited or correspondence)
-    if category is None:
-        logger.info("Rejecting challenge with no valid time category")
-        return False
-
-    if not (MIN_RATING <= rating <= MAX_RATING):
-        return False
+    category = determine_time_category(clock.get("limit", 0), clock.get("increment", 0))
+    if challenge.get("speed") in ("correspondence", "unlimited") or category is None:
+        logger.info("Declining challenge: not a game on the clock")
+        return "timeControl"
 
     if category not in TIME_CONTROL:
-        return False
+        logger.info(f"Declining challenge: {category} is not played")
+        return _speed_decline_reason(category)
+
+    rating = challenge.get("challenger", {}).get("rating", 1500)
+    if not (MIN_RATING <= rating <= MAX_RATING):
+        # Lichess has no reason that says "outside my rating range".
+        logger.info(f"Declining challenge: rating {rating} is outside {MIN_RATING}–{MAX_RATING}")
+        return "generic"
 
     logger.info(f"Accepting challenge from {rating} ({category})")
-    return True
+    return None
+
+
+def should_accept_challenge(challenge: Dict[str, Any]) -> bool:
+    return challenge_decline_reason(challenge) is None
 
 
 def get_game_end_reason(board: chess.Board) -> str:
@@ -2059,8 +2069,9 @@ def handle_event(event: Dict[str, Any], state: BotState):
 
         # Only incoming challenges (where we are the destination) need an answer
         if dest_username == state.username.lower():
-            if not should_accept_challenge(challenge):
-                _answer_challenge(client.bots.decline_challenge, cid)
+            reason = challenge_decline_reason(challenge)
+            if reason is not None:
+                _answer_challenge(client.bots.decline_challenge, cid, reason=reason)
             elif free_game_slots(state) <= 0:
                 # Accepting would start a game that has to be aborted at once.
                 logger.info(f"Declining challenge {cid}: all {MAX_CONCURRENT_GAMES} game slot(s) are taken")
