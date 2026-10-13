@@ -1,84 +1,77 @@
-# =========================
-# Base image
-# =========================
-FROM ubuntu:latest
+# Two stages. The first has the tools: a package manager, pip, a shell, curl.
+# The second is the image that ships, and has none of them: the Python runtime
+# on a distroless base, the bot's modules, its libraries and the engine.
+# Whatever gets to run inside it finds no shell to start and nothing to install
+# with.
 
 # =========================
-# System dependencies
+# Build stage
 # =========================
+FROM debian:13.7-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS build
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-venv \
-    ca-certificates \
-    curl \
-    wget \
-    tar \
+        ca-certificates \
+        curl \
+        python3 \
+        python3-pip \
     && rm -rf /var/lib/apt/lists/*
+
+# Libraries go into a plain directory that the runtime stage takes as it is.
+# Debian's Python here is the same minor version as the one in the runtime base.
+COPY requirements.txt /src/requirements.txt
+RUN python3 -m pip install --no-cache-dir --no-compile --target /out/deps -r /src/requirements.txt
+
+# The engine is one named release, checked against its SHA-256 before it is
+# unpacked. The update_stockfish workflow moves both values when Stockfish
+# publishes a new release; nothing else changes them.
+ARG STOCKFISH_TAG=sf_19
+ARG STOCKFISH_SHA256=9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f
+RUN set -eux; \
+    asset=stockfish-linux-x86-64-universal; \
+    curl -fsSL -o /tmp/stockfish.tar.gz \
+      "https://github.com/official-stockfish/Stockfish/releases/download/${STOCKFISH_TAG}/${asset}.tar.gz"; \
+    echo "${STOCKFISH_SHA256}  /tmp/stockfish.tar.gz" | sha256sum -c -; \
+    mkdir /tmp/stockfish; \
+    tar -xzf /tmp/stockfish.tar.gz -C /tmp/stockfish; \
+    # Found by name, not by path: the archive's layout has changed between releases.
+    bin="$(find /tmp/stockfish -type f -name "$asset" | head -1)"; \
+    test -n "$bin"; \
+    install -D -m 755 "$bin" /out/stockfish; \
+    # Fail the build if the engine cannot run, and record the code path it picked.
+    /out/stockfish compiler | head -20; \
+    /out/stockfish bench 1 > /dev/null
+
+# An empty log directory, to be handed to the bot's user below.
+RUN mkdir /out/logs
+
+# =========================
+# Runtime stage
+# =========================
+# Distroless carries no version tags, so the digest is the whole pin.
+FROM gcr.io/distroless/python3-debian13:nonroot@sha256:83aa8d4f74a4d7f7cf2d472054139bef71a927b76c680c0f2e1021d6b1d6d732
 
 WORKDIR /app
 
-# =========================
-# Python deps (in a venv, so the system interpreter stays untouched)
-# =========================
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-RUN python3 -m venv "$VIRTUAL_ENV"
+# The engine is in the image and the bot cannot replace it, so the self-updater
+# is switched off and its module is not shipped.
+ENV PYTHONPATH=/app/deps \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    STOCKFISH_PATH=/usr/local/bin/stockfish \
+    AUTO_UPDATE_STOCKFISH=false
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Everything below is owned by root and read-only to the bot, except the log
+# directory: the one place it writes, besides its heartbeat stamp in /tmp.
+COPY --from=build /out/stockfish /usr/local/bin/stockfish
+COPY --from=build /out/deps /app/deps
+COPY bot.py config.py healthcheck.py logging_config.py /app/
+COPY --from=build --chown=65532:65532 /out/logs /app/logs
 
-# =========================
-# Stockfish install (root-owned, read-only to the bot at runtime)
-# =========================
-# Stockfish 19 dropped the per-microarch `stockfish-ubuntu-x86-64.tar` assets and
-# ships one gzipped universal build per platform instead. The universal binary
-# picks its code path (AVX2, AVX-512, ...) from the CPU at runtime. The binary is
-# located by search rather than by a hardcoded path so a future layout change
-# fails loudly at `find` instead of silently installing the wrong file.
-RUN set -eux; \
-    mkdir -p /tmp/stockfish; \
-    url="$(curl -fsS https://api.github.com/repos/official-stockfish/Stockfish/releases/latest \
-      | grep -o '"browser_download_url": "[^"]*stockfish-linux-x86-64-universal\.tar\.gz"' \
-      | cut -d'"' -f4)"; \
-    test -n "$url"; \
-    case "$url" in https://github.com/official-stockfish/Stockfish/*) ;; *) echo "unexpected host: $url" >&2; exit 1 ;; esac; \
-    wget -q -O /tmp/stockfish/stockfish.tar.gz "$url"; \
-    tar -xzf /tmp/stockfish/stockfish.tar.gz -C /tmp/stockfish; \
-    bin="$(find /tmp/stockfish -type f -name 'stockfish-linux-x86-64-universal' | head -1)"; \
-    test -n "$bin"; \
-    install -o root -g root -m 755 "$bin" /usr/local/bin/stockfish; \
-    rm -rf /tmp/stockfish
+USER 65532:65532
 
-# Fail the build if the engine cannot run, and record which code path it picked.
-RUN /usr/local/bin/stockfish compiler | head -20 && /usr/local/bin/stockfish bench 1 > /dev/null
+# Healthy while Lichess has been heard from in the last minute; see healthcheck.py.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD ["python3", "/app/healthcheck.py"]
 
-# =========================
-# App code
-# =========================
-COPY . .
-
-# =========================
-# Unprivileged runtime user
-# =========================
-# The engine is already installed and /usr/local/bin is not writable here, so
-# the bot points straight at the binary and skips the self-updater. That keeps
-# the container from fetching and executing a new binary at runtime.
-ENV STOCKFISH_PATH=/usr/local/bin/stockfish
-ENV AUTO_UPDATE_STOCKFISH=false
-
-RUN useradd --system --create-home --uid 10001 axiom && \
-    mkdir -p /app/logs && \
-    chown -R axiom:axiom /app
-
-USER axiom
-
-# =========================
-# Health check
-# =========================
-HEALTHCHECK --interval=60s --timeout=10s --retries=3 --start-period=30s \
-  CMD python3 -c "import os,time,sys; f='/tmp/axiom_heartbeat'; sys.exit(0 if os.path.exists(f) and time.time()-float(open(f).read())<300 else 1)"
-
-# =========================
-# Run bot
-# =========================
-CMD ["python3", "bot.py"]
+# The base image's entrypoint is the Python interpreter.
+CMD ["bot.py"]

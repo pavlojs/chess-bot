@@ -22,8 +22,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.14 is what the container's Ubuntu LTS ships, so it is the version
-        # the bot actually runs on. The older ones cover local installs.
+        # 3.13 is what the container image ships, so it is the version the
+        # published bot runs on. The others cover local installs.
         python-version: ['3.11', '3.12', '3.13', '3.14']
 
     steps:
@@ -57,7 +57,7 @@ jobs:
       - name: Upload coverage to Codecov
         # Only one matrix leg needs to report coverage; use the version the
         # container runs.
-        if: matrix.python-version == '3.14'
+        if: matrix.python-version == '3.13'
         uses: codecov/codecov-action@v7
         with:
           files: ./coverage.xml
