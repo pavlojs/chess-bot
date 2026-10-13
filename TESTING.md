@@ -23,8 +23,8 @@ pytest --no-cov -q                                    # without the coverage rep
 
 | File | What it tests | How |
 | --- | --- | --- |
-| `test_bot.py` | The pieces a game is built from: which challenges are accepted, speed categories, clock parsing, thinking time, engine output parsing, the challenge limits, how long a bot is left alone, the game watchdog, cleanup on startup, the engine updater | Direct calls, with a mock where Lichess or the engine would be |
-| `test_events.py` | What the bot does with the events Lichess sends: games starting and ending, challenges arriving, the challenge loop under its limits, the bots it leaves alone | The real event handling and challenge loop, driven event by event against a recording client |
+| `test_bot.py` | The pieces a game is built from: which challenges are accepted, speed categories, clock parsing, thinking time, engine output parsing, the challenge limits, how long a bot is left alone, what is written down for the next run, the game watchdog, cleanup on startup, the engine updater | Direct calls, with a mock where Lichess or the engine would be |
+| `test_events.py` | What the bot does with the events Lichess sends: games starting and ending, challenges arriving, the challenge loop under its limits, the bots it leaves alone, what a restart takes over | The real event handling and challenge loop, driven event by event against a recording client |
 | `test_game.py` | A whole game thread: first move to last, reconnects, refused moves, draw offers, an opponent who leaves, an engine that fails | Scripted games served by `lichess_stub.py`; a fake engine, and the real one for the last class |
 | `test_resilience.py` | Staying connected: timeouts, a stream that goes silent, reconnects during games, the heartbeat, the stall watchdog, shutdown | The bot's real HTTP stack against `lichess_stub.py`; real signals sent to a real process |
 | `test_config.py` | Defaults and overrides of every setting, log rotation, tablebase detection | A fresh interpreter per case, compared with `.env.example` |

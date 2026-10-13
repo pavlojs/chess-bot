@@ -797,6 +797,66 @@ class TestLeavingBotsAlone(ChallengeLoopTestCase):
                 self.assertFalse(self.state.rests.resting("OtherBot", "blitz"))
 
 
+class TestRemembering(ChallengeLoopTestCase):
+    """What the bot writes down, and what the next run makes of it."""
+
+    def setUp(self):
+        super().setUp()
+        import tempfile
+        directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
+        self.path = os.path.join(directory, "state.json")
+        self.state.store = bot.StateFile(self.path)
+
+    def next_run(self):
+        state = bot.BotState(client=MagicMock(), username="Axiom_BOT", tracker=bot.ChallengeTracker(5, 100),
+                             store=bot.StateFile(self.path))
+        state.recall()
+        return state
+
+    def test_a_challenge_is_written_down_when_it_is_made(self):
+        self.run_loop(1)
+
+        self.assertEqual(len(bot.StateFile(self.path).load()["challenges"]), 1)
+
+    def test_a_refused_attempt_is_written_down_too(self):
+        self.client.challenges.create.side_effect = http_error(429)
+
+        self.run_loop(1)
+
+        self.assertEqual(len(bot.StateFile(self.path).load()["challenges"]), 1)
+
+    def test_a_decline_is_written_down_when_it_arrives(self):
+        with patch("bot.threading.Timer"):
+            self.send("challengeDeclined", challenge=declined("old00001", "OtherBot", "nobot"))
+
+        self.assertIn("otherbot", bot.StateFile(self.path).load()["rests"])
+
+    def test_the_next_run_starts_where_this_one_stopped(self):
+        self.run_loop(1)
+        with patch("bot.threading.Timer"):
+            self.send("challengeDeclined", challenge=declined("chal0001", "OtherBot", "nobot"))
+
+        after_restart = self.next_run()
+
+        self.assertEqual(after_restart.tracker.counts(), (1, 1))
+        self.assertTrue(after_restart.rests.resting("OtherBot", "blitz"))
+
+    def test_a_first_run_starts_with_nothing(self):
+        state = self.next_run()
+
+        self.assertEqual(state.tracker.counts(), (0, 0))
+        self.assertEqual(state.rests.export(), {})
+
+    def test_a_bot_without_a_state_file_just_does_not_remember(self):
+        self.state.store = None
+
+        self.run_loop(1)                    # must not raise
+        self.state.recall()
+
+        self.assertFalse(os.path.exists(self.path))
+
+
 class TestRetryAfter(unittest.TestCase):
     def test_seconds_are_read_from_a_named_limit(self):
         exc = http_error(429, {"error": "x", "ratelimit": {"key": "bot.vsBot.day", "seconds": 1234}})

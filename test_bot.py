@@ -680,6 +680,158 @@ class TestOpponentRests(unittest.TestCase):
                 self.assertEqual(rests.export(), {})
 
 
+class TestChallengeMemory(unittest.TestCase):
+    """The challenges of the last day count across a restart, as they do at Lichess."""
+
+    def setUp(self):
+        self.wall = Clock(1_800_000_000.0)
+
+    def tracker(self, running_for=0.0, per_hour=10, per_day=180):
+        """A tracker in a process that has been running for ``running_for`` seconds."""
+        from bot import ChallengeTracker
+        offset = self.wall.now - running_for
+        return ChallengeTracker(per_hour, per_day, clock=lambda: self.wall.now - offset, wall_clock=self.wall)
+
+    def test_attempts_are_taken_over_at_the_age_they_had(self):
+        before = self.tracker(running_for=5000)
+        for _ in range(3):
+            before.record_challenge()
+            self.wall.forward(600)
+        written = before.export()
+
+        self.wall.forward(120)                      # down for two minutes
+        after = self.tracker()
+        after.restore(written)
+
+        self.assertEqual(after.counts(), (3, 3))
+        self.assertEqual(after.get_remaining_challenges(), 7)
+
+    def test_a_restart_does_not_hand_out_a_fresh_allowance(self):
+        """The reason the count is kept: a full day's worth sent, then a restart."""
+        before = self.tracker(per_hour=1000, per_day=180)
+        for _ in range(180):
+            before.record_challenge()
+            self.wall.forward(60)
+        self.assertFalse(before.can_challenge())
+
+        after = self.tracker(per_hour=1000, per_day=180)
+        after.restore(before.export())
+
+        self.assertFalse(after.can_challenge())
+        self.assertGreater(after.seconds_until_free(), 20 * 3600)
+
+    def test_the_hourly_limit_is_also_kept(self):
+        before = self.tracker(per_hour=2)
+        before.record_challenge()
+        before.record_challenge()
+
+        self.wall.forward(600)
+        after = self.tracker(per_hour=2)
+        after.restore(before.export())
+
+        self.assertFalse(after.can_challenge())
+        self.assertEqual(after.seconds_until_free(), 3000)
+
+    def test_attempts_older_than_a_day_are_left_behind(self):
+        before = self.tracker()
+        before.record_challenge()
+        written = before.export()
+
+        self.wall.forward(86400 + 1)
+        after = self.tracker()
+        after.restore(written)
+
+        self.assertEqual(after.counts(), (0, 0))
+
+    def test_a_time_ahead_of_the_clock_counts_as_just_made(self):
+        """Written before the clock was set back. Forgetting it would hand out a challenge Lichess has counted."""
+        after = self.tracker(per_hour=1)
+        after.restore([self.wall.now + 30])
+
+        self.assertEqual(after.counts(), (1, 1))
+        self.assertEqual(after.seconds_until_free(), 3600)
+
+    def test_what_is_written_down_does_not_change_while_nothing_happens(self):
+        tracker = self.tracker()
+        tracker.record_challenge()
+        written = tracker.export()
+
+        self.wall.forward(0.0004)                # the two clocks never tick in step
+
+        self.assertEqual(tracker.export(), written)
+
+    def test_a_damaged_record_is_ignored(self):
+        for damaged in (None, "text", {"a": 1}, ["x", None, {}, True]):
+            with self.subTest(damaged=damaged):
+                tracker = self.tracker()
+                tracker.restore(damaged)
+                self.assertEqual(tracker.counts(), (0, 0))
+
+
+class TestStateFile(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.directory, ignore_errors=True))
+        self.path = os.path.join(self.directory, "state.json")
+
+    def store(self, path=None):
+        from bot import StateFile
+        return StateFile(path or self.path)
+
+    def test_what_is_saved_is_what_is_loaded(self):
+        data = {"challenges": [1.5, 2.5], "rests": {"bot": [9.0, 2]}}
+        self.store().save(data)
+
+        self.assertEqual(self.store().load(), data)
+        self.assertEqual(os.listdir(self.directory), ["state.json"])      # no scratch file left
+
+    def test_no_file_means_nothing_remembered(self):
+        self.assertEqual(self.store().load(), {})
+
+    def test_a_file_that_is_not_json_means_nothing_remembered(self):
+        for content in ("", "{half a file", "[1, 2, 3]", "null"):
+            with self.subTest(content=content):
+                with open(self.path, "w") as f:
+                    f.write(content)
+                self.assertEqual(self.store().load(), {})
+
+    def test_a_place_that_cannot_be_written_does_not_stop_the_bot(self):
+        store = self.store(os.path.join(self.directory, "no", "such", "directory", "state.json"))
+
+        store.save({"challenges": []})          # must not raise
+        store.save({"challenges": []})
+
+        self.assertEqual(store.load(), {})
+
+    def test_a_save_replaces_the_file_whole(self):
+        self.store().save({"challenges": list(range(1000))})
+        self.store().save({"challenges": [1]})
+
+        self.assertEqual(self.store().load(), {"challenges": [1]})
+
+    def test_nothing_is_written_while_nothing_has_changed(self):
+        store = self.store()
+        store.save({"challenges": [1.5]})
+        written = os.stat(self.path).st_ino      # a save puts a new file in place
+
+        store.save({"challenges": [1.5]})
+        self.assertEqual(os.stat(self.path).st_ino, written)
+
+        store.save({"challenges": [1.5, 2.5]})
+        self.assertNotEqual(os.stat(self.path).st_ino, written)
+
+    def test_a_save_that_failed_is_tried_again(self):
+        missing = os.path.join(self.directory, "later")
+        store = self.store(os.path.join(missing, "state.json"))
+        store.save({"challenges": [1.5]})
+
+        os.mkdir(missing)                        # the log directory turns up
+        store.save({"challenges": [1.5]})
+
+        self.assertEqual(store.load(), {"challenges": [1.5]})
+
+
 class TestFilterSuitableBots(unittest.TestCase):
     """Opponents are chosen by their rating in the kind of game being offered."""
 

@@ -97,12 +97,41 @@ class ChallengeTracker:
     DAY = 86400
 
     def __init__(self, max_per_hour: int = MAX_CHALLENGES_PER_HOUR,
-                 max_per_day: int = MAX_CHALLENGES_PER_DAY, clock=time.monotonic):
+                 max_per_day: int = MAX_CHALLENGES_PER_DAY, clock=time.monotonic, wall_clock=time.time):
         self.max_per_hour = max_per_hour
         self.max_per_day = max_per_day
         self._clock = clock
+        # The limits are measured on the clock that never jumps. Only what is
+        # written down for the next run is in time of day, this far from it.
+        self._wall_offset = wall_clock() - clock()
         self._attempts: deque = deque()  # times of the attempts of the last day, oldest first
         self.lock = threading.Lock()
+
+    def export(self) -> List[float]:
+        """The attempts of the last day as times of day, to be written down for the next run."""
+        with self.lock:
+            self._recent(self._clock())
+            return [round(t + self._wall_offset, 3) for t in self._attempts]
+
+    def restore(self, times: Any):
+        """Take over the attempts an earlier run wrote down.
+
+        Lichess goes on counting across a restart of the bot, so the bot has to
+        as well, or a restart late in the day hands it a full allowance that
+        Lichess does not share.
+        """
+        if not isinstance(times, list):
+            return
+        with self.lock:
+            now = self._clock()
+            # A time ahead of the clock was written before the clock was set
+            # back: it counts as just made, never as not made.
+            ages = sorted(
+                (max(now + self._wall_offset - t, 0) for t in times
+                 if isinstance(t, (int, float)) and not isinstance(t, bool)),
+                reverse=True,
+            )
+            self._attempts = deque(now - age for age in ages if age < self.DAY)
 
     def _recent(self, now: float) -> List[float]:
         """Forget attempts older than a day and return those of the last hour."""
@@ -273,6 +302,52 @@ class OpponentRests:
                         and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)):
                     self._rests[key] = [float(value[0]), max(int(value[1]), 0)]
             self._prune(self._clock())
+
+
+# The bot's memory lives in its log directory: the one place it may write, in
+# the container and under the systemd unit alike.
+STATE_FILE = os.path.join("logs", "state.json")
+
+
+class StateFile:
+    """What the bot keeps across restarts, as a small JSON file."""
+
+    def __init__(self, path: str = STATE_FILE):
+        self.path = path
+        # Held by whoever gathers the data as well, so that an older picture
+        # is never written over a newer one.
+        self.lock = threading.RLock()
+        self._saved: Optional[str] = None
+        self._warned = False
+
+    def load(self) -> Dict[str, Any]:
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as e:
+            logger.warning(f"Could not read {self.path}, starting without it: {e}")
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def save(self, data: Dict[str, Any]):
+        with self.lock:
+            text = json.dumps(data)
+            if text == self._saved:
+                return
+            scratch = f"{self.path}.tmp"
+            try:
+                with open(scratch, "w") as f:
+                    f.write(text)
+                # Swapped in whole, so a crash never leaves half a file behind.
+                os.replace(scratch, self.path)
+                self._saved = text
+                self._warned = False
+            except OSError as e:
+                if not self._warned:
+                    logger.warning(f"Could not write {self.path}; limits and rests will not survive a restart: {e}")
+                    self._warned = True
 
 
 # ─────────────────────────────────────────────
@@ -1926,8 +2001,28 @@ class BotState:
     # by challenge id with the time of acceptance. Each one holds a game slot.
     accepted_challenges: Dict[str, float] = field(default_factory=dict)
     stream: StreamMonitor = field(default_factory=StreamMonitor)
-    # Bots that are being left alone for a while
+    # Bots that are being left alone, and the file all of this is remembered in
     rests: OpponentRests = field(default_factory=OpponentRests)
+    store: Optional[StateFile] = None
+
+    def remember(self):
+        """Write down what has to survive a restart: the challenges made and the bots left alone."""
+        if self.store is not None:
+            with self.store.lock:
+                self.store.save({"challenges": self.tracker.export(), "rests": self.rests.export()})
+
+    def recall(self):
+        """Take over what the previous run wrote down."""
+        if self.store is None:
+            return
+        saved = self.store.load()
+        self.tracker.restore(saved.get("challenges"))
+        self.rests.restore(saved.get("rests"))
+        _, last_day = self.tracker.counts()
+        logger.info(
+            f"Remembered from the previous run: {last_day} challenge(s) in the last 24 hours, "
+            f"{self.rests.count()} bot(s) being left alone"
+        )
 
 
 # How long an accepted challenge may take to show up as a game before its slot
@@ -2023,6 +2118,7 @@ def challenge_loop(state: BotState):
                         # Its answer would have come over the event stream.
                         logger.info(f"No response from {opponent} after {elapsed:.0f}s, with the event stream down")
                     cancel_pending_challenge(state, f"no answer after {elapsed:.0f}s")
+                    state.remember()
                     retry_event.wait(timeout=RETRY_DELAY)
                     retry_event.clear()
 
@@ -2069,6 +2165,7 @@ def challenge_loop(state: BotState):
             try:
                 challenge = try_challenge_random_bot(state.client, state.username, state.tracker, state.rests)
             except RateLimitError as e:
+                state.remember()
                 if e.retry_after:
                     # Lichess said when the limit ends; asking sooner is pointless.
                     wait = e.retry_after + 60
@@ -2084,6 +2181,7 @@ def challenge_loop(state: BotState):
 
             # Successful challenge attempt — reset backoff
             rate_limit_backoff = RATE_LIMIT_BASE
+            state.remember()
 
             if challenge:
                 challenge_id, opponent, speed = challenge
@@ -2269,6 +2367,7 @@ def handle_event(event: Dict[str, Any], state: BotState):
         )
         if is_ours:
             pending_challenge.clear()
+        state.remember()
         # Always signal retry so challenge loop can pick the next bot
         retry_timer = threading.Timer(30, retry_event.set)
         retry_timer.daemon = True
@@ -2343,6 +2442,7 @@ def handle_event(event: Dict[str, Any], state: BotState):
         opponent = (event["game"].get("opponent") or {}).get("username")
         if opponent:
             state.rests.played(opponent, event["game"].get("speed"))
+            state.remember()
         retry_event.set()
 
         logger.info(f"Game {game_id} started")
@@ -2388,7 +2488,9 @@ def main():
         client=client,
         username=bot_username,
         tracker=ChallengeTracker(MAX_CHALLENGES_PER_HOUR, MAX_CHALLENGES_PER_DAY),
+        store=StateFile(),
     )
+    state.recall()
     global _running_state
     _running_state = state
 

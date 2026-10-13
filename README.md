@@ -94,7 +94,7 @@ What the image is and how it is meant to run:
 
 - **Nothing but the bot.** The runtime is a [distroless](https://github.com/GoogleContainerTools/distroless) Python base: no shell, no package manager, no `curl`. `/app` holds the bot's four modules and its libraries.
 - **An unprivileged user.** The bot runs as uid 65532. Its code and the engine belong to root and it cannot change them.
-- **A read-only root filesystem.** The bot writes in two places: its log directory `/app/logs`, which is the volume above, and a heartbeat stamp in `/tmp`.
+- **A read-only root filesystem.** The bot writes in two places: `/app/logs`, the volume above, for its log and for `state.json` (what it [remembers across restarts](#challenging-other-bots)), and a heartbeat stamp in `/tmp`.
 - **A pinned engine.** The image carries one named Stockfish release, checked against its SHA-256 when the image is built. The bot's self-updater is not in the image.
 - **A bounded log.** `logs/axiom_bot.log` records everything from DEBUG up and is rotated, 60 MB in all by default (`LOG_FILE_MAX_MB`, `LOG_FILE_BACKUPS`). What the bot prints (INFO and up) goes to `docker logs`, capped by the `logging` options above.
 - **Memory is yours to limit.** Each game runs an engine of its own, with `SF_HASH` MB of hash on top of the engine's own networks. Add a `mem_limit` that fits `SF_HASH × MAX_CONCURRENT_GAMES` with room to spare.
@@ -227,6 +227,8 @@ A challenge spent on a bot that will not play is one fewer for a bot that would.
 | Lichess would not create the challenge: the other bot takes none, or has played its 100 games against bots for the day | as long as Lichess says, 6 hours when it does not say |
 
 A bot that starts a game with this one is cleared at once, whichever of the two sent the challenge.
+
+The challenges of the last 24 hours and the bots being left alone are written to `logs/state.json` and read again at startup. Lichess goes on counting while the bot restarts, so the bot has to as well: without the file a restart would hand it a full allowance that Lichess does not share, and send it straight back to the bots that just said no. Deleting the file makes the bot start from nothing.
 
 ## Staying connected
 
