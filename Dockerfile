@@ -48,7 +48,7 @@ RUN mkdir /out/logs
 # Runtime stage
 # =========================
 # Distroless carries no version tags, so the digest is the whole pin.
-FROM gcr.io/distroless/python3-debian13:nonroot@sha256:f47f5807043391605425f2bd162b25f50cebdc90640bacc804e0177608fe5c65
+FROM gcr.io/distroless/python3-debian13:nonroot@sha256:64e54c4b1200da244d80181d98e86fc01d73c8101f107d5baf472152d8e119a2
 
 WORKDIR /app
 
